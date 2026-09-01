@@ -21,9 +21,11 @@
 // Expected: `Splash` classified as function (because `loading_screen` is a function)
 // Expected golden: tests/golden/ambiguous_decls/component_vs_function.json
 
-// `loading_screen` is defined as a function → Splash should also classify as function.
+// `loading_screen` is defined as a function → Splash should classify as component
+// because loading_screen() is a function call, and Splash's body is purely call
+// expressions that resolve to functions (COMPILER_ARCHITECTURE.md §4 component rule).
 loading_screen() -> Screen:
-    Screen { id: 0 }
+    Screen()
 
 Screen:
     id: Int
