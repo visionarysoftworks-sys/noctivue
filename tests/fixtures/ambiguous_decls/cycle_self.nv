@@ -1,0 +1,29 @@
+// tests/fixtures/ambiguous_decls/cycle_self.nv
+// Phase 0 adversarial fixture: SELF-REFERENCE classification cycle (A → A).
+//
+// To classify `Loop`, the resolver inspects its body and finds a call
+// expression `Loop()`. To determine if `Loop` is a component-builder (calls
+// resolve to functions/macros) or a struct (no calls), it needs to know what
+// `Loop` resolves to — but that's the very declaration being classified.
+//
+// This MUST produce a "declaration classification cycle" diagnostic (E0010),
+// NOT infinite recursion or a silent guess.
+//
+// --- Why the previous version was wrong ---
+// The previous fixture was:
+//     Node:
+//         next: Node
+// That is a field declaration (`identifier: type_expr`), not a call. Field
+// type references do NOT require classifying the referenced declaration — they
+// only look up the name as a type. There is no classification dependency there;
+// it becomes a type-layout error (recursive struct without indirection) at a
+// later stage, not a classification cycle. A genuine cycle requires a CALL
+// expression whose callee's classification is unknown.
+//
+// (EXECUTION_GUIDE.md Phase 0 precision points; COMPILER_ARCHITECTURE.md §4)
+//
+// Expected: error E0010 "declaration classification cycle" on Loop
+// Expected golden: tests/golden/ambiguous_decls/cycle_self.json
+
+Loop:
+    Loop()

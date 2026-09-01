@@ -1,0 +1,10 @@
+[package]
+name = "interp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Noctivue tree-walking interpreter (Phase 1 / M0 deliverable)"
+
+[dependencies]
+compiler = { path = "../compiler" }

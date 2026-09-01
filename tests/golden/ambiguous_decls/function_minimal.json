@@ -1,0 +1,9 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/function_minimal.nv",
+  "_status": "pending",
+  "source_file": "tests/fixtures/ambiguous_decls/function_minimal.nv",
+  "expected_classification": "function",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

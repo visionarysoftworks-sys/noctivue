@@ -1,0 +1,14 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/component_vs_function.nv",
+  "_status": "pending — expected_classification confirmed by Phase 0 simulation",
+  "source_file": "tests/fixtures/ambiguous_decls/component_vs_function.nv",
+  "expected_classification": {
+    "loading_screen": "function (return type -> Screen present — unambiguous at body-shape level)",
+    "Screen": "struct (body exclusively field declarations: id: Int)",
+    "Splash": "component (body is a single call; loading_screen resolves to a function/macro, not a type — COMPILER_ARCHITECTURE.md §4 component rule)"
+  },
+  "_rationale": "Splash's body contains the call expression loading_screen(). The component rule fires when calls in the body resolve to functions/macros rather than types. loading_screen classifies as a function (return type present), so Splash's body-call resolves to a function — Splash is a component/builder-call, NOT a function returning loading_screen()'s result. This was wrong in the original golden (said 'function'). The transitive classification succeeds without a cycle because loading_screen classifies independently before Splash is inspected.",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

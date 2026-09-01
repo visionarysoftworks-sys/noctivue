@@ -1,0 +1,22 @@
+// tests/fixtures/ambiguous_decls/empty_body.nv
+// Phase 0 adversarial fixture: zero-field struct vs. zero-statement function —
+// these look identical after whitespace is stripped (EXECUTION_GUIDE.md Phase 0
+// precision points: "confirm your classification rule handles the empty body
+// case explicitly, not by falling through to a default").
+//
+// With NO return type and NO parameters, an empty body is:
+//   - classified as STRUCT (zero-field struct) per the "field-decl-only body"
+//     rule, because an empty set of field decls satisfies "exclusively field
+//     declarations."
+//   - OR: classified as FUNCTION if the resolver treats "no fields, no return
+//     type" as the function path.
+//
+// This fixture exists to FORCE a definitive choice in the classification
+// algorithm. The outcome MUST be recorded in DECISIONS.md (Issue 1/2 note)
+// once the prototype validates it.
+//
+// Expected classification: TO BE DETERMINED (Phase 0 exit criterion)
+// Expected golden: tests/golden/ambiguous_decls/empty_body.json
+
+Empty:
+    // empty body — no fields, no statements

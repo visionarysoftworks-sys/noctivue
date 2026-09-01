@@ -1,0 +1,36 @@
+// tests/fixtures/functions/basic.nv
+// Tests: function declarations (concise and explicit forms, SYNTAX.md §4,
+//        single-expression bodies, named parameters, return types)
+
+// Concise form with explicit return type — classified as function by resolver
+// because a return type `-> Type` is present (COMPILER_ARCHITECTURE.md §4).
+calculate(x: Int) -> Int:
+    x * 2
+
+// Explicit `fn` keyword — unambiguous at parse time.
+fn add(a: Int, b: Int) -> Int:
+    a + b
+
+// Single-expression body (SYNTAX.md §10, function_body = block | ":" expression).
+double(x: Int) -> Int: x * 2
+
+// Named parameters at call site.
+greet(name: String, greeting: String) -> String:
+    "{greeting}, {name}!"
+
+// Function with no return value (returns Unit implicitly).
+print_name(name: String):
+    // TODO: requires stdlib print — placeholder body
+    let _ = name
+
+// Function with a local variable.
+clamp(value: Int, min: Int, max: Int) -> Int:
+    if value < min:
+        return min
+    if value > max:
+        return max
+    value
+
+// Function calling another function.
+fn change_icon(change: String) -> String:
+    if change.starts_with("+"): "trending-up" else: "trending-down"

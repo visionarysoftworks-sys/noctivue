@@ -1,0 +1,10 @@
+[package]
+name = "compiler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Noctivue compiler frontend (lexer, parser, AST, resolver, typeck, HIR)"
+
+[dependencies]
+unicode-ident = "1.0.14"

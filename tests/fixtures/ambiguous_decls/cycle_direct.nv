@@ -1,0 +1,31 @@
+// tests/fixtures/ambiguous_decls/cycle_direct.nv
+// Phase 0 adversarial fixture: DIRECT classification cycle (A → B → A).
+//
+// To classify `Ping`, the resolver finds a call `Pong()` in the body.
+// Determining whether `Pong` is a type or a function/macro requires
+// classifying `Pong`. To classify `Pong`, the resolver finds a call `Ping()`
+// in the body. Classifying `Ping` requires classifying `Pong` — cycle.
+//
+// This MUST produce a "declaration classification cycle" diagnostic (E0010),
+// NOT infinite recursion or a silent guess.
+//
+// --- Why the previous version was wrong ---
+// The previous fixture was:
+//     Alpha: { value: Beta }
+//     Beta:  { value: Alpha }
+// Both bodies are field declarations (`identifier: type_expr`). Field type
+// references don't require classifying the referenced declaration — they only
+// look up the name as a type. Both classify independently as structs. No cycle.
+// A genuine cycle requires CALL expressions whose callee classifications are
+// mutually dependent.
+//
+// (EXECUTION_GUIDE.md Phase 0; COMPILER_ARCHITECTURE.md §4)
+//
+// Expected: error E0010 "declaration classification cycle" (Ping and/or Pong)
+// Expected golden: tests/golden/ambiguous_decls/cycle_direct.json
+
+Ping:
+    Pong()
+
+Pong:
+    Ping()

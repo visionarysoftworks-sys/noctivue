@@ -1,0 +1,10 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/empty_body.nv",
+  "_status": "pending — expected_classification decided by Phase 0",
+  "source_file": "tests/fixtures/ambiguous_decls/empty_body.nv",
+  "expected_classification": "struct",
+  "_rationale": "An empty body vacuously satisfies the struct rule: 'body consists exclusively of field_decl-shaped lines with no calls.' Zero field declarations is still exclusively field declarations (no counterexample). This keeps `Empty:` and `struct Empty:` equivalent (ADR-008 — same AST for concise and explicit forms) and gives users a valid zero-field / unit-like type. The alternative (error, force explicit keyword) adds friction with no safety benefit since a zero-field struct is not dangerous. Decision recorded in DECISIONS.md Issue 1/2 note.",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

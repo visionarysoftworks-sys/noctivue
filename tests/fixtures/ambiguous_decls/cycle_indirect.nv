@@ -1,0 +1,29 @@
+// tests/fixtures/ambiguous_decls/cycle_indirect.nv
+// Phase 0 adversarial fixture: INDIRECT classification cycle (A → B → C → A).
+//
+// Classifying `Apple` requires classifying `Banana` (call in body).
+// Classifying `Banana` requires classifying `Cherry` (call in body).
+// Classifying `Cherry` requires classifying `Apple` (call in body).
+// Three-node cycle — must produce E0010, not infinite recursion.
+//
+// --- Why the previous version was wrong ---
+// The previous fixture was three structs with mutual field type references
+// (Aardvark.peer: Beetle, Beetle.peer: Crane, Crane.peer: Aardvark).
+// Field type references don't create classification dependencies — all three
+// classified independently as structs. No cycle. Genuine cycles require CALL
+// expressions whose callee classifications are mutually dependent.
+//
+// (EXECUTION_GUIDE.md Phase 0: "construct at least three genuinely different
+// cycle shapes … confirm each produces the same well-defined error")
+//
+// Expected: error E0010 "declaration classification cycle"
+// Expected golden: tests/golden/ambiguous_decls/cycle_indirect.json
+
+Apple:
+    Banana()
+
+Banana:
+    Cherry()
+
+Cherry:
+    Apple()

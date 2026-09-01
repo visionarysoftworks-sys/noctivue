@@ -1,0 +1,8 @@
+{
+  "_comment": "Golden output for tests/fixtures/ui_components/placeholder.nv",
+  "_status": "pending — UI research track not yet started",
+  "source_file": "tests/fixtures/ui_components/placeholder.nv",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

@@ -1,0 +1,7 @@
+{
+  "_comment": "Golden output for tests/fixtures/functions/basic.nv — noct ast --json",
+  "_status": "pending",
+  "_note": "Populate once Phase 1 `noct ast --json` is stable.",
+  "source_file": "tests/fixtures/functions/basic.nv",
+  "ast": null
+}

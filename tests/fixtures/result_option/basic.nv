@@ -1,0 +1,37 @@
+// tests/fixtures/result_option/basic.nv
+// Tests: Option<T>, Result<T, E>, `?` error propagation
+// (TYPE_SYSTEM.md §9-10, ERROR_HANDLING.md)
+
+// Option usage.
+fn find_user(id: Int) -> Option<String>:
+    if id == 1:
+        Some("Alice")
+    else:
+        None
+
+// match on Option.
+fn greet_user(id: Int) -> String:
+    match find_user(id):
+        Some(name): "Hello, {name}!"
+        None:       "User not found"
+
+// Result usage — a function that can fail.
+fn parse_int(s: String) -> Result<Int, String>:
+    // Stub: real implementation would parse the string.
+    // Returns Err to exercise the Err path.
+    Err("not implemented")
+
+// `?` operator — propagate errors upward (ERROR_HANDLING.md).
+fn double_parsed(s: String) -> Result<Int, String>:
+    let n = parse_int(s)?
+    Ok(n * 2)
+
+// Chaining Results.
+fn process(input: String) -> Result<String, String>:
+    let n = parse_int(input)?
+    let doubled = double_parsed(input)?
+    Ok("result: {doubled}")
+
+// Option coalescing with `??`.
+fn name_or_default(id: Int) -> String:
+    find_user(id) ?? "anonymous"

@@ -1,0 +1,15 @@
+// tests/fixtures/ambiguous_decls/struct_minimal.nv
+// Phase 0 adversarial fixture: minimal struct that could plausibly be confused
+// with a function or component declaration (EXECUTION_GUIDE.md Phase 0,
+// COMPILER_ARCHITECTURE.md §4).
+//
+// Classification rule: body consists exclusively of field declarations
+// (identifier: type_expr) → classified as STRUCT.
+//
+// Expected classification: struct
+// Expected golden: tests/golden/ambiguous_decls/struct_minimal.json
+
+// Minimal one-field struct — bare colon-block, no `struct` keyword,
+// no parameter list, no return type.
+Item:
+    value: Int

@@ -1,0 +1,34 @@
+// tests/fixtures/structs/basic.nv
+// Tests: basic struct declarations (concise and explicit forms, SYNTAX.md §4)
+
+// Concise form — bare colon-block whose body is exclusively field declarations.
+// The resolver classifies this as a struct (COMPILER_ARCHITECTURE.md §4).
+User:
+    id: Int
+    name: String
+    email: String
+
+// Explicit form — identical AST (ADR-008).
+struct Point:
+    x: Float
+    y: Float
+
+// Single-field struct.
+Wrapper:
+    value: Int
+
+// Struct using generic types.
+Pair:
+    first: String
+    second: String
+
+// Nested struct fields (field type is another struct, by name).
+Address:
+    street: String
+    city: String
+    zip: String
+
+Person:
+    name: String
+    age: Int
+    address: Address

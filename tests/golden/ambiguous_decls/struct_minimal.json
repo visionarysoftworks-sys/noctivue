@@ -1,0 +1,9 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/struct_minimal.nv",
+  "_status": "pending",
+  "source_file": "tests/fixtures/ambiguous_decls/struct_minimal.nv",
+  "expected_classification": "struct",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

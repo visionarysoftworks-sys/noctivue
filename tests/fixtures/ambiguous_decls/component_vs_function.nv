@@ -1,0 +1,32 @@
+// tests/fixtures/ambiguous_decls/component_vs_function.nv
+// Phase 0 adversarial fixture: the `Splash: loading_screen()` case from
+// COMPILER_ARCHITECTURE.md §4.
+//
+// A zero-argument, zero-field bare declaration with a single nested call body
+// is structurally compatible with BOTH:
+//   (a) a component that calls one builder function (`loading_screen`)
+//   (b) a function that returns the result of `loading_screen()`
+//
+// Resolution is TRANSITIVE — the classification of `Splash` depends on the
+// classification of `loading_screen`. If `loading_screen` is a function,
+// `Splash` is a function. If `loading_screen` is a component-builder, `Splash`
+// is a component.
+//
+// This fixture tests the transitive-resolution path when `loading_screen`
+// IS defined (disambiguates to function in this file) and when it is NOT
+// defined (should produce an unresolved-name error, not a silent misclassification).
+//
+// (COMPILER_ARCHITECTURE.md §4 "Known remaining ambiguity")
+//
+// Expected: `Splash` classified as function (because `loading_screen` is a function)
+// Expected golden: tests/golden/ambiguous_decls/component_vs_function.json
+
+// `loading_screen` is defined as a function → Splash should also classify as function.
+loading_screen() -> Screen:
+    Screen { id: 0 }
+
+Screen:
+    id: Int
+
+Splash:
+    loading_screen()

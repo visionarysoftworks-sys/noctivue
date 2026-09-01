@@ -1,0 +1,18 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/cycle_indirect.nv",
+  "_status": "pending — expected outcome confirmed by Phase 0 simulation",
+  "source_file": "tests/fixtures/ambiguous_decls/cycle_indirect.nv",
+  "expected_classification": "error — classification cycle (A→B→C→A)",
+  "_rationale": "Apple calls Banana(). Classifying Apple requires classifying Banana. Banana calls Cherry(). Classifying Banana requires classifying Cherry. Cherry calls Apple(). Classifying Cherry requires classifying Apple — which is already in the pending set. E0010 fires at Cherry's resolution attempt. Three-node indirect cycle. NOTE: the previous fixture version used mutual field type references (Aardvark.peer: Beetle etc.), which do NOT create classification dependencies — all three would have classified as structs independently.",
+  "expected_diagnostics": [
+    {
+      "severity": "error",
+      "code": "E0010",
+      "message_pattern": "declaration classification cycle",
+      "involved_declarations": ["Apple", "Banana", "Cherry"],
+      "_note": "Must produce the same error code (E0010) as cycle_self and cycle_direct. The reported declaration will be whichever the resolver visits when it detects the pending-set hit — likely Apple, since Cherry tries to classify Apple and finds it pending."
+    }
+  ],
+  "ast": null,
+  "diagnostics": null
+}

@@ -1,0 +1,114 @@
+//! Analytics dashboard example.
+//! Demonstrates: components, state, events, async data loading,
+//! loading/error states, reusable components, conditional rendering,
+//! iteration, styling/themes, and both compact and expanded syntax.
+
+import http
+import json
+
+// ---- Data model (concise struct style) ----------------------------------
+
+RevenuePoint:
+    date: String
+    amount: Float
+
+User:
+    id: Int
+    name: String
+    plan: String
+
+// ---- Reusable, compact leaf component ------------------------------------
+// Small components stay on one line: compact multi-statement form.
+
+metric(label: String, value: String, change: String):
+    row: icon(change_icon(change), size: 18); column: text(label, size: 12); text(value, size: 20)
+
+fn change_icon(change: String) -> String:
+    if change.starts_with("+"): "trending-up" else: "trending-down"
+
+// ---- Async data fetch, Result-based error handling -----------------------
+
+async fetch_revenue() -> Result<[RevenuePoint], Error>:
+    let response = await http.get("/api/revenue")?
+    json.parse(response.body)
+
+// ---- Theme (constants, SCREAMING_CASE convention) ------------------------
+
+const THEME_BG: String = "#0b0c10"
+const THEME_ACCENT: String = "#66fcf1"
+
+// ---- Root component: expanded style throughout ---------------------------
+
+Dashboard:
+    state loading = false
+    state error: Option<String> = None
+    state revenue: [RevenuePoint] = []
+    state current_user: Option<User> = None
+
+    load_data():
+        loading = true
+        error = None
+
+        match await fetch_revenue():
+            Ok(points):
+                revenue = points
+                loading = false
+            Err(e):
+                error = Some(e.message)
+                loading = false
+
+    column:
+        background: THEME_BG
+
+        header:
+            title("Analytics")
+            button("Refresh"): load_data()
+
+        if loading:
+            spinner()
+        else:
+            if let Some(message) = error:
+                banner(text: message, kind: "error")
+            else:
+                row:
+                    metric("Revenue", "$128,420", "+12.4%")
+                    metric("Users", "24,892", "+8.2%")
+                    metric("Orders", "4,821", "-2.1%")
+
+                graph:
+                    data: revenue
+                    type: line
+                    height: 320
+                    accent: THEME_ACCENT
+
+                    x_axis:
+                        field: date
+                        label: "Date"
+
+                    y_axis:
+                        field: amount
+                        label: "Revenue"
+
+                    tooltip:
+                        enabled: true
+
+                    legend:
+                        enabled: true
+                        position: bottom
+
+                table:
+                    columns: ["Date", "Amount"]
+
+                    for point in revenue:
+                        row: text(point.date); text("${point.amount}")
+
+        footer:
+            if let Some(user) = current_user:
+                text("Signed in as {user.name} ({user.plan})", size: 12)
+            else:
+                text("Not signed in", size: 12)
+
+// ---- Entry point (native mode, minimal density) ---------------------------
+
+main():
+    run(Dashboard())

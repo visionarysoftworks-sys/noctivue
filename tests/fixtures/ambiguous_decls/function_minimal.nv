@@ -1,0 +1,14 @@
+// tests/fixtures/ambiguous_decls/function_minimal.nv
+// Phase 0 adversarial fixture: minimal function that could plausibly be
+// confused with a struct declaration (EXECUTION_GUIDE.md Phase 0,
+// COMPILER_ARCHITECTURE.md §4).
+//
+// Classification rule: return type (`-> Type`) is present → classified as FUNCTION,
+// regardless of body shape.
+//
+// Expected classification: function
+// Expected golden: tests/golden/ambiguous_decls/function_minimal.json
+
+// Return type present — unambiguously a function even with a trivial body.
+identity(x: Int) -> Int:
+    x

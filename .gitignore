@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo lock files — keep the workspace lockfile, ignore sub-crate ones
+# (workspace root Cargo.lock is kept)
+!Cargo.lock
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Noctivue compiler artifacts (future)
+*.nvir
+*.nvc

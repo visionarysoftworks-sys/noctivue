@@ -1,0 +1,18 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/cycle_direct.nv",
+  "_status": "pending — expected outcome confirmed by Phase 0 simulation",
+  "source_file": "tests/fixtures/ambiguous_decls/cycle_direct.nv",
+  "expected_classification": "error — classification cycle (A→B→A)",
+  "_rationale": "Ping's body calls Pong(). Classifying Ping requires classifying Pong (is Pong a type or a function?). Pong's body calls Ping(). Classifying Pong requires classifying Ping. Two-node mutual dependency — E0010 on whichever node the resolver visits second (it finds the first in the pending set). NOTE: the previous fixture version (Alpha: { value: Beta } / Beta: { value: Alpha }) used field type references, which do NOT create classification dependencies. Both would have classified independently as structs. Only call expressions create the dependency.",
+  "expected_diagnostics": [
+    {
+      "severity": "error",
+      "code": "E0010",
+      "message_pattern": "declaration classification cycle",
+      "involved_declarations": ["Ping", "Pong"],
+      "_note": "Exact message, which declaration is reported first, and span filled once resolver is implemented. MUST produce the same error code as cycle_self and cycle_indirect."
+    }
+  ],
+  "ast": null,
+  "diagnostics": null
+}

@@ -1,0 +1,18 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/cycle_self.nv",
+  "_status": "pending — expected outcome confirmed by Phase 0 simulation",
+  "source_file": "tests/fixtures/ambiguous_decls/cycle_self.nv",
+  "expected_classification": "error — classification cycle (A→A self-reference)",
+  "_rationale": "Loop's body contains the call expression Loop(). To classify Loop, the resolver must determine whether the callee Loop is a type or a function/macro. But classifying Loop is the very operation in progress. The pending-set check fires immediately: Loop is already in the pending set when the resolver tries to classify the callee. E0010 is emitted. NOTE: the previous fixture version (Node: { next: Node }) was wrong — a field type reference does NOT create a classification dependency; Node would have classified as a struct independently. Only call expressions whose callee classification is unknown create classification dependencies.",
+  "expected_diagnostics": [
+    {
+      "severity": "error",
+      "code": "E0010",
+      "message_pattern": "declaration classification cycle",
+      "involved_declarations": ["Loop"],
+      "_note": "Exact message and span filled once resolver is implemented."
+    }
+  ],
+  "ast": null,
+  "diagnostics": null
+}

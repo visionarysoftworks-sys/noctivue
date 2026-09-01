@@ -1,0 +1,15 @@
+[package]
+name = "noct-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "noct — the Noctivue command-line toolchain (run, test, build, fmt, lint, …)"
+
+[[bin]]
+name = "noct"
+path = "src/main.rs"
+
+[dependencies]
+compiler = { path = "../compiler" }
+interp    = { path = "../interp" }

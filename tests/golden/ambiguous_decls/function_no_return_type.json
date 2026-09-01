@@ -1,0 +1,15 @@
+{
+  "_comment": "Golden output for tests/fixtures/ambiguous_decls/function_no_return_type.nv",
+  "_status": "pending — expected_classification confirmed by Phase 0 simulation",
+  "source_file": "tests/fixtures/ambiguous_decls/function_no_return_type.nv",
+  "expected_classification": {
+    "make_greeting": "function (body contains `let` binding — not a field declaration)",
+    "early_return": "function (body contains `return` statement — not a field declaration)",
+    "accumulate": "function (body contains `var` binding — not a field declaration)",
+    "double": "function (body is a single expression statement `x * 2` — not a field declaration of the form `identifier: type_expr`)"
+  },
+  "_rationale": "All four declarations have NO return type annotation. Classification falls through to body-shape analysis (COMPILER_ARCHITECTURE.md §4 second function rule). The struct rule requires 'exclusively field_decl-shaped lines (identifier: type_expr) with no calls.' None of these bodies satisfy that — each contains at least one statement that is not a field declaration. Therefore all four classify as functions. This fixture specifically exercises the body-statement path so Phase 1's resolver implementation is tested against it, not just the return-type-present path covered by function_minimal.nv.",
+  "expected_diagnostics": [],
+  "ast": null,
+  "diagnostics": null
+}

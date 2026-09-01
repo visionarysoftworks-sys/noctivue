@@ -1,0 +1,7 @@
+{
+  "_comment": "Golden output for tests/fixtures/structs/basic.nv — noct ast --json",
+  "_status": "pending",
+  "_note": "Populate this file once the Phase 1 parser + resolver are implemented and `noct ast --json` is stable (IMPLEMENTATION_PLAN.md §3 exit criteria).",
+  "source_file": "tests/fixtures/structs/basic.nv",
+  "ast": null
+}

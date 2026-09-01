@@ -1,0 +1,47 @@
+// tests/fixtures/enums_match/basic.nv
+// Tests: enum declarations, match statements, exhaustiveness, ADTs
+// (TYPE_SYSTEM.md §4, SYNTAX.md §10)
+
+// Simple enum.
+enum Direction:
+    North
+    South
+    East
+    West
+
+// Enum with tuple-style payload (ADT).
+enum Shape:
+    Circle(radius: Float)
+    Rectangle(width: Float, height: Float)
+    Triangle(base: Float, height: Float)
+
+// match must be exhaustive — all variants covered (TYPE_SYSTEM.md §4).
+fn area(shape: Shape) -> Float:
+    match shape:
+        Circle(radius):      3.14159 * radius * radius
+        Rectangle(w, h):     w * h
+        Triangle(b, h):      0.5 * b * h
+
+// match with a wildcard catch-all arm.
+fn direction_label(d: Direction) -> String:
+    match d:
+        North: "up"
+        South: "down"
+        _:     "sideways"
+
+// match with a guard condition.
+fn classify_number(n: Int) -> String:
+    match n:
+        0:               "zero"
+        x if x < 0:     "negative"
+        _:               "positive"
+
+// Nested enum — Option<T> style.
+enum Maybe:
+    Just(Int)
+    Nothing
+
+fn unwrap_or(m: Maybe, default: Int) -> Int:
+    match m:
+        Just(v):  v
+        Nothing:  default

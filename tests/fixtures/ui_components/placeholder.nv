@@ -1,0 +1,12 @@
+// tests/fixtures/ui_components/placeholder.nv
+// UI research track — created in scaffold as a placeholder per SCAFFOLD.md §2.
+//
+// Real UI fixtures will be added when the UI-S0 research spike begins
+// (UI research track: IMPLEMENTATION_PLAN.md §11, ROADMAP.md §2).
+// Do NOT populate these fixtures until there is a concrete implementation
+// to validate against — empty fixtures here are a scaffold marker only.
+//
+// For now, the `dashboard.nv` example in examples/ serves as the canonical
+// UI syntax reference. See docs/UI_SPEC.md and docs/DECISIONS.md Issue 2.
+//
+// [UI-S0: not yet started]
