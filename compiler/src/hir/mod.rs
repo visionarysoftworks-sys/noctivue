@@ -9,19 +9,13 @@
 //! - Type annotations on every expression and binding.
 //! - `?` operators desugared to explicit `Result`/`Option` handling.
 //!
-//! [Phase 1] This module is skeletal; it will be fleshed out alongside the type
-//! checker. NIR lowering (Phase 2 / M1) will consume this representation.
+//! ## Module layout
+//!
+//! - [`types`] — the [`Ty`] enum (resolved type representation).
+//! - [`items`] — typed item, statement, expression definitions.
 
-/// A type-checked, resolved module (output of [`crate::typeck`]).
-#[derive(Debug, Clone)]
-pub struct Module {
-    // TODO (Phase 1): populate with typed item definitions.
-    pub items: Vec<()>,
-}
+pub mod items;
+pub mod types;
 
-impl Module {
-    /// Returns an empty module (stub until the type checker is implemented).
-    pub fn empty() -> Self {
-        Module { items: Vec::new() }
-    }
-}
+pub use items::{Enum, Function, Module, Struct};
+pub use types::Ty;
