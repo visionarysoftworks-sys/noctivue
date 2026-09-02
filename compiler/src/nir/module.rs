@@ -30,6 +30,10 @@ impl Block {
     pub fn has_terminator(&self) -> bool {
         self.terminator.is_some()
     }
+
+    pub fn has_return_terminator(&self) -> bool {
+        matches!(self.terminator, Some(Instr::Return { .. }))
+    }
 }
 
 /// A NIR function — signature + basic blocks.

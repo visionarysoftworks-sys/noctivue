@@ -439,7 +439,9 @@ impl Vm {
                     VmValue::Result(Err(e)) => {
                         return Err(VmError::ResultUnwrapErr(e));
                     }
-                    _ => VmValue::Unit,
+                    other => {
+                        return Err(VmError::TypeMismatch(format!("expected Option/Result, got {:?}", other)));
+                    }
                 };
                 frame.locals[dst.0 as usize] = result;
             }
@@ -543,6 +545,9 @@ impl Vm {
                 frame.prev_block = Some(prev);
                 frame.pc = 0;
                 Ok(ControlFlow::Continue)
+            }
+            Instr::Unreachable => {
+                Err(VmError::Unreachable)
             }
             _ => Err(VmError::UnimplementedTerminator(format!("{:?}", term))),
         }
