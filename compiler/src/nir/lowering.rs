@@ -17,6 +17,7 @@ pub struct LoweringContext {
     next_local_index: u32,
     enum_variants: HashMap<String, (String, u32)>,
     loop_fallthrough: Option<BlockId>,
+    func_fallthrough: Option<BlockId>,
 }
 
 impl LoweringContext {
@@ -48,6 +49,7 @@ impl LoweringContext {
             next_local_index: 0,
             enum_variants,
             loop_fallthrough: None,
+            func_fallthrough: None,
         }
     }
 
@@ -85,7 +87,7 @@ impl LoweringContext {
         let func_id = self.func_infos.iter()
             .find(|(n, _, _)| n == &name)
             .map(|(_, id, _)| *id)
-            .unwrap_or(FuncId(0));
+            .unwrap_or(FuncId::UNRESOLVED);
 
         let sig = self.func_infos.iter()
             .find(|(n, _, _)| n == &name)
@@ -96,6 +98,20 @@ impl LoweringContext {
         let mut block = crate::nir::module::Block::new(entry_block);
         self.current_block = Some(entry_block);
         self.local_values.clear();
+
+        let returns_option_result = matches!(
+            sig.ret.inner,
+            Ty::Option(_) | Ty::Result(_, _)
+        );
+
+        let exit_block = if returns_option_result {
+            let eb = self.module.new_block_id();
+            self.func_fallthrough = Some(eb);
+            eb
+        } else {
+            self.func_fallthrough = None;
+            self.module.new_block_id()
+        };
 
         for (i, (param_name, _)) in func.params.iter().enumerate() {
             let val = ValueId(self.next_local_index);
@@ -113,12 +129,23 @@ impl LoweringContext {
             }
         }
 
-        if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.id == func_id) {
-            nir_func.blocks.insert(0, block);
+        if returns_option_result {
+            let mut exit_nir_block = crate::nir::module::Block::new(exit_block);
+            exit_nir_block.set_terminator(Instr::Return { val: None });
+
+            if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.id == func_id) {
+                nir_func.blocks.insert(0, block);
+                nir_func.add_block(exit_nir_block);
+            }
+        } else {
+            if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.id == func_id) {
+                nir_func.blocks.insert(0, block);
+            }
         }
 
         self.current_func = None;
         self.current_block = None;
+        self.func_fallthrough = None;
     }
 
     fn lower_stmts(&mut self, stmts: &[TypedStmt], nir_block: &mut crate::nir::module::Block) {
@@ -431,7 +458,7 @@ impl LoweringContext {
             let mut body_nir_block = crate::nir::module::Block::new(body_block);
             self.lower_arm_body(&arm.body, &mut body_nir_block);
 
-            let arm_result = if let Some(last) = arm.body.last() {
+            let _arm_result = if let Some(last) = arm.body.last() {
                 if let crate::hir::items::TypedStmtKind::Expr(e) = &last.kind {
                     let val = self.lower_expr(e, &mut body_nir_block);
                     incoming.push((val, body_block));
@@ -607,9 +634,20 @@ impl LoweringContext {
                     self.func_infos.iter()
                         .find(|(n, _, _)| n == name)
                         .map(|(_, id, _)| *id)
-                        .unwrap_or(FuncId(0))
+                        // Unresolved callee (e.g. a method/member call the
+                        // resolver/typeck let through, like `String.starts_with`
+                        // on a value type with no lowering support yet) must
+                        // NOT silently fall back to FuncId(0) — id 0 is a real,
+                        // arbitrary function (whichever the source declares
+                        // first), so that fallback used to make the VM quietly
+                        // call the wrong function, sometimes recursing into
+                        // itself and stack-overflowing instead of reporting a
+                        // proper error. FuncId::UNRESOLVED is never assigned by
+                        // `new_func_id`, so the VM's `get_function_by_id` lookup
+                        // cleanly fails with `VmError::FunctionNotFound`.
+                        .unwrap_or(FuncId::UNRESOLVED)
                 } else {
-                    FuncId(0)
+                    FuncId::UNRESOLVED
                 };
                 nir_block.add_instr(Instr::Call {
                     dst,
@@ -692,6 +730,21 @@ impl LoweringContext {
                     src,
                     ty: NirTy::new(expr.ty.clone(), Mode::Native),
                 });
+
+                if let Some(exit_block) = self.func_fallthrough {
+                    let continue_block = self.module.new_block_id();
+                    nir_block.set_terminator(Instr::CondBranch {
+                        cond: dst,
+                        then_block: continue_block,
+                        else_block: exit_block,
+                    });
+
+                    let continue_nir_block = crate::nir::module::Block::new(continue_block);
+                    if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.name == self.current_func.clone().unwrap_or_default()) {
+                        nir_func.add_block(continue_nir_block);
+                    }
+                }
+
                 dst
             }
             TypedExprKind::Coalesce { left, right } => {
@@ -942,7 +995,7 @@ impl LoweringContext {
 
                 dst
             }
-            TypedExprKind::EnumVariant { enum_name, variant } => {
+            TypedExprKind::EnumVariant { enum_name: _, variant } => {
                 let tag = self.enum_variants.get(variant).map(|(_, t)| *t).unwrap_or(0);
                 let tag_dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
@@ -981,14 +1034,14 @@ impl LoweringContext {
             TypedExprKind::Spread(inner) => {
                 self.lower_expr(inner, nir_block)
             }
-            TypedExprKind::Closure { params, body } => {
+            TypedExprKind::Closure { params: _, body: _ } => {
                 let captured: Vec<ValueId> = Vec::new();
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
                 let func_id = self.func_infos.iter()
                     .find(|(n, _, _)| n == &self.current_func.clone().unwrap_or_default())
                     .map(|(_, id, _)| *id)
-                    .unwrap_or(FuncId(0));
+                    .unwrap_or(FuncId::UNRESOLVED);
                 nir_block.add_instr(Instr::ClosureNew {
                     dst,
                     func: func_id,

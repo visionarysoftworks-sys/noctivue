@@ -121,6 +121,8 @@ pub enum Instr {
     Return { val: Option<ValueId> },
     /// `unreachable` — unreachable code
     Unreachable,
+    /// `early_return val` — early return from current function (for ? propagation)
+    EarlyReturn { val: ValueId },
 
     // ── Error Handling ──────────────────────────────────────────────────────
     /// `%dst = result_ok %val` — construct Ok
@@ -196,6 +198,7 @@ impl fmt::Display for Instr {
             Instr::CondBranch { cond, then_block, else_block } => write!(f, "cond_branch {}, {}, {}", cond, then_block, else_block),
             Instr::Switch { val, cases, default } => write!(f, "switch {} [{}] default {}", val, cases.iter().map(|(tag, blk)| format!("{} -> {}", tag, blk)).collect::<Vec<_>>().join(", "), default),
             Instr::Return { val } => write!(f, "return {}", val.map(|v| v.to_string()).unwrap_or_default()),
+            Instr::EarlyReturn { val } => write!(f, "early_return {}", val),
             Instr::Unreachable => write!(f, "unreachable"),
             Instr::ResultOk { dst, val, ty } => write!(f, "{} = result_ok {} : {}", dst, val, ty),
             Instr::ResultErr { dst, val, ty } => write!(f, "{} = result_err {} : {}", dst, val, ty),

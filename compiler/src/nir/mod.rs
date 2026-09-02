@@ -14,3 +14,6 @@ pub use instr::*;
 pub use module::*;
 pub use lowering::*;
 pub use types::*;
+
+#[cfg(test)]
+mod vm_tests;

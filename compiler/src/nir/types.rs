@@ -72,6 +72,19 @@ impl fmt::Display for BlockId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncId(pub u32);
 
+impl FuncId {
+    /// Sentinel for "callee could not be resolved during lowering"
+    /// (e.g. a method/member call the resolver let through with no
+    /// corresponding top-level function). `NirModule::new_func_id`
+    /// assigns real ids starting at 0 and counting up, so `u32::MAX`
+    /// can never collide with a real function id. Lowering sites that
+    /// can't resolve a callee MUST use this instead of defaulting to
+    /// `FuncId(0)` — id 0 is a real, arbitrary function (whichever the
+    /// source declares first), and silently calling it produces wrong
+    /// results or unbounded recursion instead of a diagnosable error.
+    pub const UNRESOLVED: FuncId = FuncId(u32::MAX);
+}
+
 impl fmt::Display for FuncId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "@func{}", self.0)

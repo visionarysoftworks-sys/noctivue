@@ -798,7 +798,6 @@ impl<'s> TypeChecker<'s> {
                     }
                 } else if let Some((enum_name, payload_tys)) = self.enum_variants.get(name).cloned() {
                     // Payload-less enum variant - it's a value of the enum type
-                    eprintln!("DEBUG: Found enum variant '{}' -> enum '{}' with payload {:?}", name, enum_name, payload_tys);
                     TypedExpr {
                         ty: Ty::Named(enum_name, payload_tys),
                         kind: TypedExprKind::Ident(name.clone()),

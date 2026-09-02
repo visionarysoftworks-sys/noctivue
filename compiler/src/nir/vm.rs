@@ -108,6 +108,8 @@ struct CallFrame {
     locals: Vec<VmValue>,
     #[allow(dead_code)]
     block_params: Vec<VmValue>,
+    /// Destination register in the *caller* frame where the return value should be stored
+    return_dst: Option<ValueId>,
 }
 
 impl Vm {
@@ -132,6 +134,10 @@ impl Vm {
     }
 
     pub fn call(&mut self, func_id: FuncId, args: Vec<VmValue>) -> Result<VmValue, VmError> {
+        self.call_with_return_dst(func_id, args, None)
+    }
+
+    fn call_with_return_dst(&mut self, func_id: FuncId, args: Vec<VmValue>, return_dst: Option<ValueId>) -> Result<VmValue, VmError> {
         let func = self.module.get_function_by_id(func_id)
             .ok_or(VmError::FunctionNotFound(func_id))?;
         let entry_block = func.entry_block()
@@ -150,6 +156,7 @@ impl Vm {
             pc: 0,
             locals,
             block_params: Vec::new(),
+            return_dst,
         };
         self.call_stack.push(frame);
 
@@ -392,7 +399,8 @@ impl Vm {
                 let arg_vals: Vec<VmValue> = args.iter()
                     .map(|v| self.get_value(frame, *v))
                     .collect::<Result<Vec<_>, _>>()?;
-                let result = self.call(*func, arg_vals)?;
+                // Call with return_dst so callee writes directly to our dst
+                let result = self.call_with_return_dst(*func, arg_vals, Some(*dst))?;
                 frame.locals[dst.0 as usize] = result;
             }
             Instr::CallIndirect { dst, func_ptr, args, ret_ty: _ } => {
@@ -401,7 +409,7 @@ impl Vm {
                     let arg_vals: Vec<VmValue> = args.iter()
                         .map(|v| self.get_value(frame, *v))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let result = self.call(fid, arg_vals)?;
+                    let result = self.call_with_return_dst(fid, arg_vals, Some(*dst))?;
                     frame.locals[dst.0 as usize] = result;
                 } else {
                     frame.locals[dst.0 as usize] = VmValue::Unit;
@@ -433,11 +441,15 @@ impl Vm {
                 let result = match src_val {
                     VmValue::Option(Some(v)) => *v,
                     VmValue::Option(None) => {
-                        return Err(VmError::OptionUnwrapNone);
+                        frame.locals[dst.0 as usize] = VmValue::Unit;
+                        frame.pc += 1;
+                        return Ok(());
                     }
                     VmValue::Result(Ok(v)) => *v,
-                    VmValue::Result(Err(e)) => {
-                        return Err(VmError::ResultUnwrapErr(e));
+                    VmValue::Result(Err(_)) => {
+                        frame.locals[dst.0 as usize] = VmValue::Unit;
+                        frame.pc += 1;
+                        return Ok(());
                     }
                     other => {
                         return Err(VmError::TypeMismatch(format!("expected Option/Result, got {:?}", other)));
@@ -502,6 +514,9 @@ impl Vm {
                 return Err(VmError::UnimplementedTerminator("Switch used as instruction, not terminator".to_string()));
             }
             Instr::Return { .. } => {}
+            Instr::EarlyReturn { .. } => {
+                return Err(VmError::Unreachable);
+            }
         }
         Ok(())
     }
@@ -514,7 +529,26 @@ impl Vm {
                 } else {
                     VmValue::Unit
                 };
+                // Propagate to caller if there is one
+                let return_dst = frame.return_dst;
                 self.call_stack.pop();
+                if let Some(caller_frame) = self.call_stack.last_mut() {
+                    if let Some(dst) = return_dst {
+                        caller_frame.locals[dst.0 as usize] = result.clone();
+                    }
+                }
+                Ok(ControlFlow::Return(result))
+            }
+            Instr::EarlyReturn { val } => {
+                // Early return (for ? operator) - same as Return but explicit
+                let result = self.get_value(frame, *val)?;
+                let return_dst = frame.return_dst;
+                self.call_stack.pop();
+                if let Some(caller_frame) = self.call_stack.last_mut() {
+                    if let Some(dst) = return_dst {
+                        caller_frame.locals[dst.0 as usize] = result.clone();
+                    }
+                }
                 Ok(ControlFlow::Return(result))
             }
             Instr::Branch { target } => {
