@@ -84,11 +84,15 @@ pub enum Instr {
 
     // ── Aggregates ──────────────────────────────────────────────────────────
     /// `%dst = struct_new [field0, field1, ...]` — construct struct
-    StructNew { dst: ValueId, fields: Vec<ValueId>, ty: NirTy },
+    StructNew { dst: ValueId, fields: Vec<ValueId>, field_names: Vec<String>, ty: NirTy },
     /// `%dst = field_get %obj, field` — get struct field
     FieldGet { dst: ValueId, obj: ValueId, field: String, ty: NirTy },
-    /// `field_set %obj, field, %val` — set struct field
-    FieldSet { obj: ValueId, field: String, val: ValueId },
+    /// `%dst = field_set %obj, field, %val` — set struct field, returns new struct
+    FieldSet { dst: ValueId, obj: ValueId, field: String, val: ValueId },
+    /// `%dst = list_len %src` — get list length
+    ListLen { dst: ValueId, src: ValueId },
+    /// `%dst = list_index %src, %index` — index into list
+    ListIndex { dst: ValueId, src: ValueId, index: ValueId },
     /// `%dst = enum_tag %src` — get enum variant tag
     EnumTag { dst: ValueId, src: ValueId },
     /// `%dst = enum_payload %src` — get enum payload
@@ -101,6 +105,10 @@ pub enum Instr {
     Call { dst: ValueId, func: FuncId, args: Vec<ValueId>, ret_ty: NirTy },
     /// `%dst = call_indirect %func_ptr(args...)` — indirect call
     CallIndirect { dst: ValueId, func_ptr: ValueId, args: Vec<ValueId>, ret_ty: NirTy },
+
+    // ── I/O ────────────────────────────────────────────────────────────────
+    /// `print %val` — print a value (returns Unit)
+    Print { val: ValueId },
 
     // ── Control Flow (Terminators) ──────────────────────────────────────────
     /// `branch target` — unconditional jump
@@ -125,6 +133,10 @@ pub enum Instr {
     OptionSome { dst: ValueId, val: ValueId, ty: NirTy },
     /// `%dst = option_none` — construct None
     OptionNone { dst: ValueId, ty: NirTy },
+
+    // ── Conversion ─────────────────────────────────────────────────────────
+    /// `%dst = to_string %val` — convert value to String
+    ToString { dst: ValueId, src: ValueId },
 
     // ── Phi / Block Arguments ───────────────────────────────────────────────
     /// `%dst = phi [val0, block0], [val1, block1], ...` — phi node (SSA)
@@ -169,14 +181,17 @@ impl fmt::Display for Instr {
             Instr::ArcRetain { src } => write!(f, "arc_retain {}", src),
             Instr::ArcRelease { src } => write!(f, "arc_release {}", src),
             Instr::WeakLoad { dst, src, ty } => write!(f, "{} = weak_load {} : {}", dst, src, ty),
-            Instr::StructNew { dst, fields, ty } => write!(f, "{} = struct_new [{}] : {}", dst, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
+            Instr::StructNew { dst, fields, field_names, ty } => write!(f, "{} = struct_new [{}] : {} ({})", dst, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty, field_names.join(", ")),
             Instr::FieldGet { dst, obj, field, ty } => write!(f, "{} = field_get {}, {} : {}", dst, obj, field, ty),
-            Instr::FieldSet { obj, field, val } => write!(f, "field_set {}, {}, {}", obj, field, val),
+            Instr::FieldSet { dst, obj, field, val } => write!(f, "{} = field_set {}, {}, {}", dst, obj, field, val),
+            Instr::ListLen { dst, src } => write!(f, "{} = list_len {}", dst, src),
+            Instr::ListIndex { dst, src, index } => write!(f, "{} = list_index {}, {}", dst, src, index),
             Instr::EnumTag { dst, src } => write!(f, "{} = enum_tag {}", dst, src),
             Instr::EnumPayload { dst, src, ty } => write!(f, "{} = enum_payload {} : {}", dst, src, ty),
             Instr::EnumNew { dst, tag, fields, ty } => write!(f, "{} = enum_new {} [{}] : {}", dst, tag, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
             Instr::Call { dst, func, args, ret_ty } => write!(f, "{} = call {}({}) : {}", dst, func, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
             Instr::CallIndirect { dst, func_ptr, args, ret_ty } => write!(f, "{} = call_indirect {}({}) : {}", dst, func_ptr, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
+            Instr::Print { val } => write!(f, "print {}", val),
             Instr::Branch { target } => write!(f, "branch {}", target),
             Instr::CondBranch { cond, then_block, else_block } => write!(f, "cond_branch {}, {}, {}", cond, then_block, else_block),
             Instr::Switch { val, cases, default } => write!(f, "switch {} [{}] default {}", val, cases.iter().map(|(tag, blk)| format!("{} -> {}", tag, blk)).collect::<Vec<_>>().join(", "), default),
@@ -187,6 +202,7 @@ impl fmt::Display for Instr {
             Instr::TryUnwrap { dst, src, ty } => write!(f, "{} = try_unwrap {} : {}", dst, src, ty),
             Instr::OptionSome { dst, val, ty } => write!(f, "{} = option_some {} : {}", dst, val, ty),
             Instr::OptionNone { dst, ty } => write!(f, "{} = option_none : {}", dst, ty),
+            Instr::ToString { dst, src } => write!(f, "{} = to_string {}", dst, src),
             Instr::Phi { dst, incoming, ty } => write!(f, "{} = phi [{}] : {}", dst, incoming.iter().map(|(v, b)| format!("{} from {}", v, b)).collect::<Vec<_>>().join(", "), ty),
             Instr::ClosureNew { dst, func, captured, ty } => write!(f, "{} = closure_new {}({}) : {}", dst, func, captured.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
             Instr::ClosureCall { dst, closure, args, ret_ty } => write!(f, "{} = closure_call {}({}) : {}", dst, closure, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),

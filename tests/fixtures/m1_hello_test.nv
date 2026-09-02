@@ -1,0 +1,3 @@
+// Super simple VM test
+main():
+    print("Hello\n")

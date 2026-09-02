@@ -66,6 +66,7 @@ fn item_name(item: &Item) -> &str {
         Item::Impl(_) => "<impl>",
         Item::Const(c) => &c.name,
         Item::Export(_) => "<export>",
+        Item::Mod(m) => &m.name,
     }
 }
 

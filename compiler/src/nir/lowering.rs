@@ -102,21 +102,12 @@ impl LoweringContext {
             block.params.push((val, sig.params[i].clone()));
         }
 
-        self.lower_stmts(&func.body, &mut block);
+        let result = self.lower_stmts_with_result(&func.body, &mut block);
 
         if !block.has_terminator() {
-            block.set_terminator(Instr::Return { val: None });
-            if let Some(last_stmt) = func.body.last() {
-                if matches!(last_stmt.kind, crate::hir::items::TypedStmtKind::Expr(_)) {
-                    let val = if let crate::hir::items::TypedStmtKind::Expr(e) = &last_stmt.kind {
-                        Some(self.lower_expr(e, &mut block))
-                    } else {
-                        None
-                    };
-                    if let Some(v) = val {
-                        block.set_terminator(Instr::Return { val: Some(v) });
-                    }
-                }
+            match result {
+                Some(val) => block.set_terminator(Instr::Return { val: Some(val) }),
+                None => block.set_terminator(Instr::Return { val: None }),
             }
         }
 
@@ -132,6 +123,21 @@ impl LoweringContext {
         for stmt in stmts {
             self.lower_stmt(stmt, nir_block);
         }
+    }
+
+    fn lower_stmts_with_result(&mut self, stmts: &[TypedStmt], nir_block: &mut crate::nir::module::Block) -> Option<ValueId> {
+        let mut result = None;
+        for stmt in stmts {
+            match &stmt.kind {
+                crate::hir::items::TypedStmtKind::Expr(e) => {
+                    result = Some(self.lower_expr(e, nir_block));
+                }
+                _ => {
+                    self.lower_stmt(stmt, nir_block);
+                }
+            }
+        }
+        result
     }
 
     fn lower_stmt(&mut self, stmt: &crate::hir::items::TypedStmt, nir_block: &mut crate::nir::module::Block) {
@@ -187,22 +193,41 @@ impl LoweringContext {
                 });
 
                 let mut then_nir_block = crate::nir::module::Block::new(then_block);
-                self.lower_stmts(then_body, &mut then_nir_block);
+                let then_val = self.lower_stmts_with_result(then_body, &mut then_nir_block);
                 if !then_nir_block.has_terminator() {
                     then_nir_block.set_terminator(Instr::Branch { target: merge_block });
                 }
 
                 let mut else_nir_block = crate::nir::module::Block::new(else_block);
-                if let Some(else_b) = else_body {
-                    self.lower_stmts(else_b, &mut else_nir_block);
-                }
+                let else_val = if let Some(else_b) = else_body {
+                    self.lower_stmts_with_result(else_b, &mut else_nir_block)
+                } else {
+                    None
+                };
                 if !else_nir_block.has_terminator() {
                     else_nir_block.set_terminator(Instr::Branch { target: merge_block });
+                }
+
+                let mut merge_nir_block = crate::nir::module::Block::new(merge_block);
+
+                if then_val.is_some() || else_val.is_some() {
+                    let dst = ValueId(self.next_local_index);
+                    self.next_local_index += 1;
+                    let incoming: Vec<(ValueId, BlockId)> = then_val.map(|v| (v, then_block)).into_iter()
+                        .chain(else_val.map(|v| (v, else_block)).into_iter())
+                        .collect();
+                    merge_nir_block.add_instr(Instr::Phi {
+                        dst,
+                        incoming,
+                        ty: NirTy::new(Ty::Unknown, Mode::Native),
+                    });
+                    merge_nir_block.set_terminator(Instr::Return { val: Some(dst) });
                 }
 
                 if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.name == self.current_func.clone().unwrap_or_default()) {
                     nir_func.add_block(then_nir_block);
                     nir_func.add_block(else_nir_block);
+                    nir_func.add_block(merge_nir_block);
                 }
             }
             TypedStmtKind::While { condition, body } => {
@@ -271,14 +296,22 @@ impl LoweringContext {
             }
             TypedStmtKind::For { binding, iterable, body } => {
                 let iter_val = self.lower_expr(iterable, nir_block);
+
                 let len_val = ValueId(self.next_local_index);
                 self.next_local_index += 1;
-                nir_block.add_instr(Instr::Const {
+                nir_block.add_instr(Instr::ListLen {
                     dst: len_val,
+                    src: iter_val,
+                });
+
+                let idx_val = ValueId(self.next_local_index);
+                self.next_local_index += 1;
+                nir_block.add_instr(Instr::Const {
+                    dst: idx_val,
                     value: ConstValue::Int(0),
                     ty: NirTy::new(Ty::Int, Mode::Native),
                 });
-                self.local_values.insert(binding.clone(), len_val);
+                self.local_values.insert(binding.clone(), idx_val);
 
                 let header_block = self.module.new_block_id();
                 let body_block = self.module.new_block_id();
@@ -287,7 +320,6 @@ impl LoweringContext {
                 nir_block.set_terminator(Instr::Branch { target: header_block });
 
                 let mut header_nir_block = crate::nir::module::Block::new(header_block);
-                let idx_val = *self.local_values.get(binding).unwrap();
                 let cond_val = ValueId(self.next_local_index);
                 self.next_local_index += 1;
                 header_nir_block.add_instr(Instr::ICmp {
@@ -303,10 +335,20 @@ impl LoweringContext {
                 });
 
                 let mut body_nir_block = crate::nir::module::Block::new(body_block);
-                let next_val = ValueId(self.next_local_index);
+                let elem_val = ValueId(self.next_local_index);
+                self.next_local_index += 1;
+                body_nir_block.add_instr(Instr::ListIndex {
+                    dst: elem_val,
+                    src: iter_val,
+                    index: idx_val,
+                });
+                self.local_values.insert(binding.clone(), elem_val);
+                self.lower_stmts(body, &mut body_nir_block);
+
+                let next_idx = ValueId(self.next_local_index);
                 self.next_local_index += 1;
                 body_nir_block.add_instr(Instr::Const {
-                    dst: next_val,
+                    dst: next_idx,
                     value: ConstValue::Int(1),
                     ty: NirTy::new(Ty::Int, Mode::Native),
                 });
@@ -315,16 +357,17 @@ impl LoweringContext {
                 body_nir_block.add_instr(Instr::Add {
                     dst: new_idx,
                     lhs: idx_val,
-                    rhs: next_val,
+                    rhs: next_idx,
                     ty: NirTy::new(Ty::Int, Mode::Native),
                 });
                 self.local_values.insert(binding.clone(), new_idx);
-                self.lower_stmts(body, &mut body_nir_block);
+
                 if !body_nir_block.has_terminator() {
                     body_nir_block.set_terminator(Instr::Branch { target: header_block });
                 }
 
-                let exit_nir_block = crate::nir::module::Block::new(exit_block);
+                let mut exit_nir_block = crate::nir::module::Block::new(exit_block);
+                exit_nir_block.set_terminator(Instr::Return { val: None });
 
                 if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.name == self.current_func.clone().unwrap_or_default()) {
                     nir_func.add_block(header_nir_block);
@@ -351,6 +394,7 @@ impl LoweringContext {
 
         let exit_block = self.module.new_block_id();
         let mut cases: Vec<(u32, BlockId)> = Vec::new();
+        let mut incoming: Vec<(ValueId, BlockId)> = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
             let body_block = self.module.new_block_id();
@@ -358,6 +402,19 @@ impl LoweringContext {
 
             let mut body_nir_block = crate::nir::module::Block::new(body_block);
             self.lower_arm_body(&arm.body, &mut body_nir_block);
+
+            let arm_result = if let Some(last) = arm.body.last() {
+                if let crate::hir::items::TypedStmtKind::Expr(e) = &last.kind {
+                    let val = self.lower_expr(e, &mut body_nir_block);
+                    incoming.push((val, body_block));
+                    val
+                } else {
+                    ValueId(0)
+                }
+            } else {
+                ValueId(0)
+            };
+
             if !body_nir_block.has_terminator() {
                 body_nir_block.set_terminator(Instr::Branch { target: exit_block });
             }
@@ -373,7 +430,16 @@ impl LoweringContext {
             default: exit_block,
         });
 
-        let exit_nir_block = crate::nir::module::Block::new(exit_block);
+        let dst = ValueId(self.next_local_index);
+        self.next_local_index += 1;
+        let mut exit_nir_block = crate::nir::module::Block::new(exit_block);
+        exit_nir_block.add_instr(Instr::Phi {
+            dst,
+            incoming,
+            ty: NirTy::new(Ty::String, Mode::Native),
+        });
+        exit_nir_block.set_terminator(Instr::Return { val: Some(dst) });
+
         if let Some(nir_func) = self.module.functions.iter_mut().find(|f| f.name == self.current_func.clone().unwrap_or_default()) {
             nir_func.add_block(exit_nir_block);
         }
@@ -495,6 +561,20 @@ impl LoweringContext {
                     .collect();
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
+
+                if let TypedExprKind::Ident(name) = &callee.kind {
+                    if name == "print" || name == "println" {
+                        let print_val = arg_vals.first().copied().unwrap_or(ValueId(0));
+                        nir_block.add_instr(Instr::Print { val: print_val });
+                        nir_block.add_instr(Instr::Const {
+                            dst,
+                            value: ConstValue::Unit,
+                            ty: NirTy::new(expr.ty.clone(), Mode::Native),
+                        });
+                        return dst;
+                    }
+                }
+
                 let func_id = if let TypedExprKind::Ident(name) = &callee.kind {
                     self.func_infos.iter()
                         .find(|(n, _, _)| n == name)
@@ -650,10 +730,9 @@ impl LoweringContext {
                             let expr_val = self.lower_expr(e, nir_block);
                             let str_val = ValueId(self.next_local_index);
                             self.next_local_index += 1;
-                            nir_block.add_instr(Instr::Const {
+                            nir_block.add_instr(Instr::ToString {
                                 dst: str_val,
-                                value: ConstValue::String("".to_string()),
-                                ty: NirTy::new(Ty::String, Mode::Native),
+                                src: expr_val,
                             });
                             if let Some(existing) = result_val {
                                 let new_result = ValueId(self.next_local_index);
@@ -666,7 +745,7 @@ impl LoweringContext {
                                 });
                                 result_val = Some(new_result);
                             } else {
-                                result_val = Some(expr_val);
+                                result_val = Some(str_val);
                             }
                         }
                     }
@@ -691,6 +770,7 @@ impl LoweringContext {
                 nir_block.add_instr(Instr::StructNew {
                     dst,
                     fields: field_vals,
+                    field_names: vec![],
                     ty: NirTy::new(expr.ty.clone(), Mode::Native),
                 });
                 dst
@@ -705,6 +785,7 @@ impl LoweringContext {
                 nir_block.add_instr(Instr::StructNew {
                     dst,
                     fields: field_vals,
+                    field_names: vec![],
                     ty: NirTy::new(expr.ty.clone(), Mode::Native),
                 });
                 dst
@@ -714,14 +795,14 @@ impl LoweringContext {
                 let idx_val = self.lower_expr(index, nir_block);
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
-                nir_block.add_instr(Instr::StructNew {
+                nir_block.add_instr(Instr::ListIndex {
                     dst,
-                    fields: vec![obj_val, idx_val],
-                    ty: NirTy::new(expr.ty.clone(), Mode::Native),
+                    src: obj_val,
+                    index: idx_val,
                 });
                 dst
             }
-            TypedExprKind::Range { start, end, inclusive } => {
+            TypedExprKind::Range { start, end, inclusive: _ } => {
                 let start_val = self.lower_expr(start, nir_block);
                 let end_val = self.lower_expr(end, nir_block);
                 let dst = ValueId(self.next_local_index);
@@ -729,6 +810,7 @@ impl LoweringContext {
                 nir_block.add_instr(Instr::StructNew {
                     dst,
                     fields: vec![start_val, end_val],
+                    field_names: vec!["start".to_string(), "end".to_string()],
                     ty: NirTy::new(expr.ty.clone(), Mode::Native),
                 });
                 dst
@@ -851,15 +933,19 @@ impl LoweringContext {
                 });
                 dst
             }
-            TypedExprKind::StructLit { name, fields } => {
+            TypedExprKind::StructLit { name: _, fields } => {
                 let field_vals: Vec<ValueId> = fields.iter()
                     .map(|(_, e)| self.lower_expr(e, nir_block))
+                    .collect();
+                let field_names: Vec<String> = fields.iter()
+                    .map(|(n, _)| n.clone())
                     .collect();
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
                 nir_block.add_instr(Instr::StructNew {
                     dst,
                     fields: field_vals,
+                    field_names,
                     ty: NirTy::new(expr.ty.clone(), Mode::Native),
                 });
                 dst

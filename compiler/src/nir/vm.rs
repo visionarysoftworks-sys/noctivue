@@ -46,6 +46,52 @@ impl VmValue {
     }
 }
 
+impl std::fmt::Display for VmValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VmValue::Int(i) => write!(f, "{}", i),
+            VmValue::Float(fl) => write!(f, "{}", fl),
+            VmValue::Bool(b) => write!(f, "{}", b),
+            VmValue::Char(c) => write!(f, "{}", c),
+            VmValue::String(s) => write!(f, "{}", s),
+            VmValue::Unit => write!(f, "()"),
+            VmValue::Struct { name, fields } => {
+                let field_strs: Vec<String> = fields.iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
+                write!(f, "{} {{ {} }}", name, field_strs.join(", "))
+            }
+            VmValue::Enum { variant, tag: _, fields } => {
+                if fields.is_empty() {
+                    write!(f, "{}", variant)
+                } else {
+                    let field_strs: Vec<String> = fields.iter().map(|v| v.to_string()).collect();
+                    write!(f, "{}({})", variant, field_strs.join(", "))
+                }
+            }
+            VmValue::List(l) => {
+                let elem_strs: Vec<String> = l.iter().map(|v| v.to_string()).collect();
+                write!(f, "[{}]", elem_strs.join(", "))
+            }
+            VmValue::Option(Some(v)) => write!(f, "Some({})", v),
+            VmValue::Option(None) => write!(f, "None"),
+            VmValue::Result(Ok(v)) => write!(f, "Ok({})", v),
+            VmValue::Result(Err(e)) => write!(f, "Err({})", e),
+            VmValue::Function(id) => write!(f, "<function {}>", id.0),
+            VmValue::Closure { func, captured: _ } => write!(f, "<closure {}>", func.0),
+            VmValue::Tuple(elems) => {
+                let elem_strs: Vec<String> = elems.iter().map(|v| v.to_string()).collect();
+                write!(f, "({})", elem_strs.join(", "))
+            }
+            VmValue::Range { start, end, inclusive } => {
+                let end_str = if *inclusive { "=" } else { "" };
+                write!(f, "{}..{}{}", start, end_str, end)
+            }
+            VmValue::Pointer(addr) => write!(f, "pointer@{:?}", addr),
+        }
+    }
+}
+
 pub struct Vm {
     module: NirModule,
     call_stack: Vec<CallFrame>,
@@ -57,6 +103,7 @@ pub struct Vm {
 struct CallFrame {
     func: FuncId,
     block: BlockId,
+    prev_block: Option<BlockId>,
     pc: usize,
     locals: Vec<VmValue>,
     #[allow(dead_code)]
@@ -99,6 +146,7 @@ impl Vm {
         let frame = CallFrame {
             func: func_id,
             block: entry_block,
+            prev_block: None,
             pc: 0,
             locals,
             block_params: Vec::new(),
@@ -135,8 +183,7 @@ impl Vm {
                         if self.call_stack.is_empty() {
                             return Ok(result);
                         }
-                        self.call_stack.push(frame);
-                        return Ok(VmValue::Unit);
+                        return Ok(result);
                     }
                 }
             } else {
@@ -243,7 +290,7 @@ impl Vm {
             Instr::WeakLoad { dst, src, ty: _ } => {
                 frame.locals[dst.0 as usize] = VmValue::Option(None);
             }
-            Instr::StructNew { dst, fields, ty } => {
+            Instr::StructNew { dst, fields, field_names, ty } => {
                 let field_values: Vec<VmValue> = fields.iter()
                     .map(|f| self.get_value(frame, *f))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -252,8 +299,18 @@ impl Vm {
                     _ => "unknown".to_string(),
                 };
                 let mut fields_map = HashMap::new();
-                for (i, val) in field_values.into_iter().enumerate() {
-                    fields_map.insert(format!("f{}", i), val);
+                if field_names.is_empty() {
+                    for (i, val) in field_values.into_iter().enumerate() {
+                        fields_map.insert(format!("f{}", i), val);
+                    }
+                } else {
+                    for (i, val) in field_values.into_iter().enumerate() {
+                        if i < field_names.len() {
+                            fields_map.insert(field_names[i].clone(), val);
+                        } else {
+                            fields_map.insert(format!("f{}", i), val);
+                        }
+                    }
                 }
                 frame.locals[dst.0 as usize] = VmValue::Struct { name, fields: fields_map };
             }
@@ -266,13 +323,44 @@ impl Vm {
                 };
                 frame.locals[dst.0 as usize] = result;
             }
-            Instr::FieldSet { obj, field, val } => {
+            Instr::FieldSet { dst, obj, field, val } => {
                 let obj_val = self.get_value(frame, *obj)?;
                 let val_val = self.get_value(frame, *val)?;
-                if let VmValue::Struct { fields, .. } = obj_val {
-                    let mut f = fields.clone();
-                    f.insert(field.clone(), val_val);
-                }
+                let result = if let VmValue::Struct { name, fields } = obj_val {
+                    let mut new_fields = fields.clone();
+                    new_fields.insert(field.clone(), val_val);
+                    VmValue::Struct { name, fields: new_fields }
+                } else {
+                    obj_val
+                };
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::ListLen { dst, src } => {
+                let src_val = self.get_value(frame, *src)?;
+                let len = match src_val {
+                    VmValue::List(v) => v.len() as i128,
+                    VmValue::String(s) => s.len() as i128,
+                    VmValue::Tuple(v) => v.len() as i128,
+                    _ => 0,
+                };
+                frame.locals[dst.0 as usize] = VmValue::Int(len);
+            }
+            Instr::ListIndex { dst, src, index } => {
+                let src_val = self.get_value(frame, *src)?;
+                let idx_val = self.get_value(frame, *index)?;
+                let result = match (src_val, idx_val) {
+                    (VmValue::List(v), VmValue::Int(i)) => {
+                        v.get(i as usize).cloned().unwrap_or(VmValue::Unit)
+                    }
+                    (VmValue::String(s), VmValue::Int(i)) => {
+                        s.chars().nth(i as usize).map(VmValue::Char).unwrap_or(VmValue::Unit)
+                    }
+                    (VmValue::Tuple(v), VmValue::Int(i)) => {
+                        v.get(i as usize).cloned().unwrap_or(VmValue::Unit)
+                    }
+                    _ => VmValue::Unit,
+                };
+                frame.locals[dst.0 as usize] = result;
             }
             Instr::EnumTag { dst, src } => {
                 let src_val = self.get_value(frame, *src)?;
@@ -319,6 +407,10 @@ impl Vm {
                     frame.locals[dst.0 as usize] = VmValue::Unit;
                 }
             }
+            Instr::Print { val } => {
+                let v = self.get_value(frame, *val)?;
+                print!("{}", v);
+            }
             Instr::CondBranch { cond, then_block, else_block } => {
                 let cond_val = self.get_value(frame, *cond)?;
                 let target = if cond_val.is_truthy() { *then_block } else { *else_block };
@@ -358,11 +450,25 @@ impl Vm {
             Instr::OptionNone { dst, ty: _ } => {
                 frame.locals[dst.0 as usize] = VmValue::Option(None);
             }
+            Instr::ToString { dst, src } => {
+                let v = self.get_value(frame, *src)?;
+                let s = format!("{}", v);
+                frame.locals[dst.0 as usize] = VmValue::String(s);
+            }
             Instr::Phi { dst, incoming, ty: _ } => {
-                let result = incoming.last()
-                    .map(|(v, _)| self.get_value(frame, *v))
-                    .transpose()?
-                    .unwrap_or(VmValue::Unit);
+                let prev = frame.prev_block;
+                let result = if let Some(p) = prev {
+                    incoming.iter()
+                        .find(|(_, b)| *b == p)
+                        .map(|(v, _)| self.get_value(frame, *v))
+                        .transpose()?
+                        .unwrap_or(VmValue::Unit)
+                } else {
+                    incoming.last()
+                        .map(|(v, _)| self.get_value(frame, *v))
+                        .transpose()?
+                        .unwrap_or(VmValue::Unit)
+                };
                 frame.locals[dst.0 as usize] = result;
             }
             Instr::ClosureNew { dst, func, captured, ty: _ } => {
@@ -385,7 +491,9 @@ impl Vm {
                 }
             }
             Instr::Branch { target } => {
+                let prev = frame.block;
                 frame.block = *target;
+                frame.prev_block = Some(prev);
                 frame.pc = 0;
             }
             Instr::Switch { .. } => {
@@ -408,14 +516,18 @@ impl Vm {
                 Ok(ControlFlow::Return(result))
             }
             Instr::Branch { target } => {
+                let prev = frame.block;
                 frame.block = *target;
+                frame.prev_block = Some(prev);
                 frame.pc = 0;
                 Ok(ControlFlow::Continue)
             }
             Instr::CondBranch { cond, then_block, else_block } => {
                 let cond_val = self.get_value(frame, *cond)?;
                 let target = if cond_val.is_truthy() { *then_block } else { *else_block };
+                let prev = frame.block;
                 frame.block = target;
+                frame.prev_block = Some(prev);
                 frame.pc = 0;
                 Ok(ControlFlow::Continue)
             }
@@ -426,7 +538,9 @@ impl Vm {
                     .find(|(t, _)| *t == tag)
                     .map(|(_, b)| *b)
                     .unwrap_or(*default);
+                let prev = frame.block;
                 frame.block = target;
+                frame.prev_block = Some(prev);
                 frame.pc = 0;
                 Ok(ControlFlow::Continue)
             }
