@@ -1,0 +1,12 @@
+// Simple test for NIR VM - basic arithmetic only
+fn add(a: Int, b: Int) -> Int:
+    a + b
+
+fn double(x: Int) -> Int:
+    x * 2
+
+main():
+    let x = add(1, 2)
+    let y = double(x)
+    let z = add(x, y)
+    let _ = z

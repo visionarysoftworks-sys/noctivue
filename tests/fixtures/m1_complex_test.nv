@@ -1,0 +1,92 @@
+//! M0-1 Complex Test Script
+//! Comprehensive test covering working M0-1 features.
+
+struct User:
+    name: String
+    age: Int
+    email: String
+
+enum Direction:
+    North
+    South
+    East
+    West
+
+fn describe_dir(dir: Direction) -> String:
+    match dir:
+        North: "Going up"
+        South: "Going down"
+        East: "Going right"
+        West: "Going left"
+
+fn factorial(n: Int) -> Int:
+    if n <= 1: 1 else: n * factorial(n - 1)
+
+fn fibonacci(n: Int) -> Int:
+    if n <= 1: n else: fibonacci(n - 1) + fibonacci(n - 2)
+
+fn find_in_list(items: [Int], target: Int) -> Option<Int>:
+    for item in items:
+        if item == target:
+            return Some(item)
+    None
+
+fn safe_divide(a: Int, b: Int) -> Result<Int, String>:
+    if b == 0:
+        Err("Division by zero")
+    else:
+        Ok(a / b)
+
+fn sum_list(items: [Int]) -> Int:
+    var total = 0
+    for item in items:
+        total = total + item
+    total
+
+main():
+    // === Basic types and arithmetic ===
+    let a: Int = 42
+    let b: Int = 7
+    print("Basic: {a} + {b} = {a + b}")
+
+    // === Structs ===
+    let user = User { name: "Alice", age: 30, email: "alice@example.com" }
+    print("User: {user.name}, age {user.age}")
+
+    // === Enums ===
+    print(describe_dir(North))
+    print(describe_dir(West))
+
+    // === Recursive functions ===
+    print("Factorial(5): {factorial(5)}")
+    print("Fibonacci(10): {fibonacci(10)}")
+
+    // === Option and ? operator ===
+    let found = find_in_list([1, 2, 3, 4, 5], 3)
+    let value = found?
+    print("Found: {value}")
+
+    let not_found = find_in_list([1, 2, 3], 99)
+    match not_found:
+        Some(v): print("Found {v}")
+        None: print("Not found")
+
+    // === Result ===
+    let ok_result = safe_divide(10, 2)?
+    print("Div: {ok_result}")
+
+    let div_result = safe_divide(10, 0)
+    match div_result:
+        Ok(v): print("Got: {v}")
+        Err(e): print("Error: {e}")
+
+    // === Lists ===
+    let numbers = [1, 2, 3, 4, 5]
+    print("Length: {numbers.length}")
+    print("Sum: {sum_list(numbers)}")
+
+    // === String interpolation ===
+    let name = "Test"
+    print("Hello, {name}!")
+
+    print("M1 test complete!")

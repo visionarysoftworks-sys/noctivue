@@ -5,19 +5,31 @@ estimates intentionally omitted (v0.1 is pre-implementation).
 
 ## 1. Core Milestones
 
-### M0 — Core Language + Interpreter
+## 1. Core Milestones
+
+### M0 — Core Language + Interpreter ✅ COMPLETE
 - Lexer, parser, AST
-- Basic type checker
+- Basic type checker (local inference, function signatures fully annotated)
 - Tree-walking interpreter
-- Functions, structs, enums, traits, generics, modules
-- `Result`, `Option`, basic collections, basic I/O
-- `noct run`, `noct test`
-- Machine-readable diagnostics, basic `noct ast --json`
+- Functions (fn, bare decls classified as functions, closures `|params| expr`)
+- Structs (`struct Name: field: Type`, struct literals `Name { field: val }`)
+- Enums (`enum Name: Variant(payload)`, exhaustive `match`)
+- Traits (`trait`, `impl Trait for Type` with verification)
+- Generics (`<T>` on functions/structs/enums/traits, monomorphisation not yet)
+- Modules (`mod`, `use`, `pub` keywords, `ModDecl` parsing)
+- `Result`, `Option`, basic collections (`[T]` lists with `.length`, `.filter`, `.map`, `.sort`)
+- Basic I/O (`print`, `println` builtins)
+- Spread syntax (`...expr` in struct literals and expressions)
+- Struct update syntax (`Struct { ...base, field: val }`)
+- Const declarations at top level
+- `noct run`, `noct test` (fixture runner with golden JSON)
+- Machine-readable diagnostics (`noct diagnostics --json`), `noct ast --json`
+- Syntax highlighting generator (`noctivue-syntax/syntaxes/noctivue.tmLanguage.json` from compiler tokens)
 
 **Explicitly excluded from M0:** UI, package registry, native
 compilation, LLVM, Cranelift, async, ARC, full managed runtime, macros,
-advanced sandboxing. This is a deliberately small MVP surface — see
-design brief §35; do not silently grow it.
+advanced sandboxing, monomorphisation of generics, REPL. This is a deliberately
+small MVP surface — see design brief §35; do not silently grow it.
 
 ### M1 — NIR + Bytecode VM
 Introduces NIR (NIR.md) and a bytecode VM as a faster-iterating

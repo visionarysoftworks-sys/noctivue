@@ -65,6 +65,8 @@ pub enum Item {
     Impl(ImplBlock),
     /// Constant declaration (`const …`). Always explicit.
     Const(ConstDecl),
+    /// Module declaration (`mod …`).
+    Mod(ModDecl),
     /// Re-export (`export …`).
     Export(Box<Item>),
 }
@@ -162,6 +164,13 @@ pub struct ConstDecl {
     pub span: Span,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModDecl {
+    pub name: String,
+    pub items: Vec<Stmt>,
+    pub span: Span,
+}
+
 // ── Function helpers ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -221,6 +230,8 @@ pub enum Stmt {
     /// Not a valid statement inside an explicit fn body — the resolver will
     /// emit an error if it appears there.
     BareField(FieldDecl),
+    /// A bare declaration `name: expr` without a type annotation.
+    Decl(DeclStmt),
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +252,13 @@ pub struct VarStmt {
 
 #[derive(Debug, Clone)]
 pub struct StateStmt {
+    pub name: String,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeclStmt {
     pub name: String,
     pub value: Expr,
     pub span: Span,
@@ -344,6 +362,15 @@ pub enum Expr {
     Try(TryExpr),
     Range(RangeExpr),
     StringInterp(StringInterpExpr),
+    /// Struct literal: `User { id: 1, name: "Alice" }`
+    /// Supports spread: `User { ...base, name: "Bob" }`
+    StructLit(StructLitExpr),
+    /// List literal: `[a, b, c]`
+    ListLit(ListLitExpr),
+    /// Closure: `|params| body`
+    Closure(ClosureExpr),
+    /// Spread expression: `...expr`
+    Spread(SpreadExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +379,44 @@ pub struct CallExpr {
     pub args: Vec<Arg>,
     /// Optional trailing block, e.g. `button("Save"): save()`.
     pub trailing_block: Option<Block>,
+    pub span: Span,
+}
+
+/// Struct literal: `User { id: 1, name: "Alice" }`
+#[derive(Debug, Clone)]
+pub struct StructLitExpr {
+    pub name: String,
+    pub fields: Vec<StructField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum StructField {
+    /// Normal field: `name: value`
+    Named(String, Expr),
+    /// Spread field: `...expr`
+    Spread(Box<Expr>),
+}
+
+/// List literal: `[a, b, c]`
+#[derive(Debug, Clone)]
+pub struct ListLitExpr {
+    pub elements: Vec<Expr>,
+    pub span: Span,
+}
+
+/// Spread expression: `...expr`
+#[derive(Debug, Clone)]
+pub struct SpreadExpr {
+    pub expr: Box<Expr>,
+    pub span: Span,
+}
+
+/// Closure: `|params| body`
+#[derive(Debug, Clone)]
+pub struct ClosureExpr {
+    pub params: Vec<String>,
+    pub body: Box<Expr>,
     pub span: Span,
 }
 
@@ -402,7 +467,7 @@ pub struct UnaryOpExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnaryOp { Neg, Not }
+pub enum UnaryOp { Neg, Not, Await }
 
 #[derive(Debug, Clone)]
 pub struct TryExpr {
@@ -456,6 +521,17 @@ pub enum TypeExpr {
     Collection(Box<TypeExpr>, Span),
     /// Function type `(A, B) -> C`.
     Function(Vec<TypeExpr>, Box<TypeExpr>, Span),
+}
+
+impl TypeExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            TypeExpr::Named(_, _, s) => s.clone(),
+            TypeExpr::Tuple(_, s) => s.clone(),
+            TypeExpr::Collection(_, s) => s.clone(),
+            TypeExpr::Function(_, _, s) => s.clone(),
+        }
+    }
 }
 
 // ── Generics ─────────────────────────────────────────────────────────────────

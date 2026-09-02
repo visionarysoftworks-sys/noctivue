@@ -1,0 +1,87 @@
+// M0 Demo: Noctivue language features showcase (working subset)
+// Run with: `cargo run -p noct-cli -- run examples/m0_demo.nv`
+
+// ─── Basic types and functions ───
+greet(name: String) -> String:
+    "Hello, {name}!"
+
+fn add(a: Int, b: Int) -> Int:
+    a + b
+
+// ─── Structs ───
+struct User:
+    name: String
+    age: Int
+    active: Bool
+
+make_user(name: String, age: Int) -> User:
+    User { name: name, age: age, active: true }
+
+// ─── Enums and match ───
+enum Direction:
+    North
+    South
+    East
+    West
+
+describe_dir(dir: Direction) -> String:
+    match dir:
+        North: "Going up"
+        South: "Going down"
+        East: "Going right"
+        West: "Going left"
+
+// ─── Option type and ? operator ───
+find_user(id: Int) -> Option<User>:
+    if id == 42:
+        Some(User { name: "Alice", age: 30, active: true })
+    else:
+        None
+
+get_user_name(id: Int) -> String:
+    let user = find_user(id)?  // Returns None early if not found
+    user.name
+
+// ─── Lists ───
+sum_list(items: [Int]) -> Int:
+    var total = 0
+    for item in items:
+        total += item
+    total
+
+// ─── Generic functions (explicit monomorphization) ───
+fn identity(x: Int) -> Int:
+    x
+
+fn identity_str(x: String) -> String:
+    x
+
+// ─── Main entry point ───
+main():
+    // Basic I/O - print adds newline by default (most common case)
+    print(greet("World"))
+    print("2 + 3 = {add(2, 3)}")
+
+    // Structs
+    let user = make_user("Bob", 25)
+    print("User: {user.name}, age {user.age}")
+
+    // Enums (variants in scope without prefix)
+    print(describe_dir(North))
+    print(describe_dir(West))
+
+    // Option with ?
+    let name = get_user_name(42)
+    print("User 42: {name}")
+    let missing = get_user_name(99)
+    print("User 99: {missing}")
+
+    // Lists
+    let numbers = [1, 2, 3, 4, 5]
+    print("Sum: {sum_list(numbers)}")
+
+    // Generics (explicit monomorphization)
+    print("Identity: {identity(42)}")
+    print("IdentityStr: {identity_str("hello")}")
+
+    print("M0 demo complete!")

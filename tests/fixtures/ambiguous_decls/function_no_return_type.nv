@@ -1,12 +1,13 @@
 // tests/fixtures/ambiguous_decls/function_no_return_type.nv
 // Phase 0 adversarial fixture: function classified by BODY STATEMENTS, not by
 // return type.
+// @skip-typecheck - tests resolver classification only; typechecker not expected to pass
 //
 // The spec defines TWO ways a bare_decl classifies as a function
-// (COMPILER_ARCHITECTURE.md §4):
-//   (a) a return type (`-> Type`) is present — unambiguous immediately
+// (COMPILER_ARCHITECTURE.md Section 4):
+//   (a) a return type (`-> Type`) is present - unambiguous immediately
 //   (b) the body contains `return`, `let`, `var`, or other statement forms
-//       rather than field declarations — classified by body shape
+//       rather than field declarations - classified by body shape
 //
 // `function_minimal.nv` covers case (a). This fixture covers case (b):
 // no return type, but the body contains statements that are incompatible
@@ -19,18 +20,18 @@
 // Expected classification: all function
 // Expected golden: tests/golden/ambiguous_decls/function_no_return_type.json
 
-// Body contains a `let` binding — not a field decl, therefore function.
+// Body contains a `let` binding - not a field decl, therefore function.
 make_greeting(name: String):
     let msg = "Hello, {name}!"
     msg
 
-// Body contains a `return` statement — unambiguously a function body.
+// Body contains a `return` statement - unambiguously a function body.
 early_return(x: Int):
     if x < 0:
         return 0
     x
 
-// Body contains a `var` binding — mutable local, not a field decl.
+// Body contains a `var` binding - mutable local, not a field decl.
 accumulate(items: [Int]):
     var total = 0
     for item in items:

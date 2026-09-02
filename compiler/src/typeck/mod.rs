@@ -22,12 +22,12 @@ use std::collections::HashMap;
 
 use crate::ast::{
     self, BinOp, Block, Expr, FunctionBody, FunctionDecl, InterpPart, Item, MatchBody, Program,
-    Stmt, TypeExpr, UnaryOp,
+    Stmt, StructField, TypeExpr, UnaryOp,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticSink, Span};
 use crate::hir;
 use crate::hir::items::{
-    Enum, Function, Module, Struct, TypedArm, TypedExpr, TypedExprKind, TypedInterpPart,
+    Enum, Function, Module, Struct, Trait, TypedArm, TypedExpr, TypedExprKind, TypedInterpPart,
     TypedLit, TypedPattern, TypedStmt, TypedStmtKind,
 };
 use crate::hir::Ty;
@@ -50,8 +50,12 @@ struct TypeChecker<'s> {
     sink: &'s mut DiagnosticSink,
     /// Maps type-level names (struct/enum) to their `Ty`.
     type_defs: HashMap<String, TypeDef>,
+    /// Maps trait names to their method signatures.
+    trait_defs: HashMap<String, Vec<(String, (Vec<Ty>, Ty))>>,
     /// Maps top-level function names to their signature `Ty::Fn(params, ret)`.
     fn_sigs: HashMap<String, (Vec<Ty>, Ty)>,
+    /// Maps enum variant names to (enum_name, payload_tys) for payload-less variants.
+    enum_variants: HashMap<String, (String, Vec<Ty>)>,
 }
 
 /// A collected type definition used for field resolution.
@@ -63,7 +67,18 @@ enum TypeDef {
 
 impl<'s> TypeChecker<'s> {
     fn new(sink: &'s mut DiagnosticSink) -> Self {
-        TypeChecker { sink, type_defs: HashMap::new(), fn_sigs: HashMap::new() }
+        let mut tc = TypeChecker { sink, type_defs: HashMap::new(), trait_defs: HashMap::new(), fn_sigs: HashMap::new(), enum_variants: HashMap::new() };
+        // Register built-in functions so calls to them type-check.
+        tc.fn_sigs.insert("print".to_string(), (vec![Ty::String], Ty::Unit));
+        tc.fn_sigs.insert("println".to_string(), (vec![Ty::String], Ty::Unit));
+        tc.fn_sigs.insert("to_string".to_string(), (vec![Ty::String], Ty::String));
+        tc.fn_sigs.insert("to_int".to_string(), (vec![Ty::String], Ty::Option(Box::new(Ty::Int))));
+        tc.fn_sigs.insert("to_float".to_string(), (vec![Ty::String], Ty::Option(Box::new(Ty::Float))));
+        tc.fn_sigs.insert("panic".to_string(), (vec![Ty::String], Ty::Unit));
+        tc.fn_sigs.insert("assert".to_string(), (vec![Ty::Bool, Ty::String], Ty::Unit));
+        tc.fn_sigs.insert("run".to_string(), (vec![Ty::Unknown], Ty::Unit));
+        tc.fn_sigs.insert("load_data".to_string(), (vec![], Ty::Unit));
+        tc
     }
 
     // ── Program ───────────────────────────────────────────────────────────────
@@ -72,6 +87,7 @@ impl<'s> TypeChecker<'s> {
         // Pass 1: collect all type definitions so forward references work.
         let mut structs: Vec<Struct> = Vec::new();
         let mut enums: Vec<Enum> = Vec::new();
+        let mut traits: Vec<Trait> = Vec::new();
 
         for item in &program.items {
             match item {
@@ -89,9 +105,36 @@ impl<'s> TypeChecker<'s> {
                         hir_enum.name.clone(),
                         TypeDef::Enum(hir_enum.variants.clone()),
                     );
+                    // Register enum variant constructors
+                    for (variant_name, payload_tys) in &hir_enum.variants {
+                        if !payload_tys.is_empty() {
+                            // For payload variants, the constructor is a function from payload to enum
+                            let constructor_ty = Ty::Fn(payload_tys.clone(), Box::new(Ty::Named(hir_enum.name.clone(), vec![])));
+                            self.fn_sigs.insert(variant_name.clone(), (payload_tys.clone(), constructor_ty));
+                        } else {
+                            // For payload-less variants, register in enum_variants map
+                            self.enum_variants.insert(variant_name.clone(), (hir_enum.name.clone(), payload_tys.clone()));
+                        }
+                    }
                     enums.push(hir_enum);
                 }
+                Item::Trait(t) => {
+                    let hir_trait = self.lower_trait(t);
+                    self.trait_defs.insert(hir_trait.name.clone(), hir_trait.methods.clone());
+                    traits.push(hir_trait);
+                }
+                Item::Mod(_) => {
+                    // For M0, modules are passed through without type-checking their contents.
+                    // A full implementation would recursively type-check nested items.
+                }
                 _ => {}
+            }
+        }
+
+        // Pass 1b: verify impl blocks against traits
+        for item in &program.items {
+            if let Item::Impl(impl_block) = item {
+                self.verify_impl_block(impl_block);
             }
         }
 
@@ -106,7 +149,19 @@ impl<'s> TypeChecker<'s> {
                     };
                     self.fn_sigs.insert(f.name.clone(), (params, ret));
                 }
-                // BareDecl that survived the resolver (i.e. component) — skip.
+                Item::BareDecl(decl) if decl.name == "main" => {
+                    // Special case: treat `main` as a function even if classified as component.
+                    let params: Vec<Ty> = decl.params.clone().unwrap_or_default()
+                        .iter()
+                        .map(|p| self.lower_ty(&p.ty))
+                        .collect();
+                    let ret = match &decl.return_ty {
+                        Some(t) => self.lower_ty(t),
+                        None => Ty::Unit,
+                    };
+                    self.fn_sigs.insert(decl.name.clone(), (params, ret));
+                }
+                // Other BareDecls (components) — skip.
                 _ => {}
             }
         }
@@ -118,10 +173,25 @@ impl<'s> TypeChecker<'s> {
                 if let Some(hir_fn) = self.check_function(f) {
                     functions.push(hir_fn);
                 }
+            } else if let Item::BareDecl(decl) = item {
+                // Special case: treat `main` as a function even if classified as component.
+                if decl.name == "main" {
+                    let f = FunctionDecl {
+                        name: decl.name.clone(),
+                        generic_params: Vec::new(),
+                        params: decl.params.clone().unwrap_or_default(),
+                        return_ty: decl.return_ty.clone(),
+                        body: FunctionBody::Block(decl.body.clone()),
+                        span: decl.span.clone(),
+                    };
+                    if let Some(hir_fn) = self.check_function(f) {
+                        functions.push(hir_fn);
+                    }
+                }
             }
         }
 
-        Module { structs, enums, functions }
+        Module { structs, enums, traits, functions }
     }
 
     // ── Struct / Enum lowering ────────────────────────────────────────────────
@@ -145,6 +215,72 @@ impl<'s> TypeChecker<'s> {
             })
             .collect();
         Enum { name: e.name.clone(), variants }
+    }
+
+    fn lower_trait(&mut self, t: &ast::TraitDecl) -> Trait {
+        let methods = t
+            .members
+            .iter()
+            .map(|m| {
+                let params: Vec<Ty> = m.params.iter().map(|p| self.lower_ty(&p.ty)).collect();
+                let ret = match &m.return_ty {
+                    Some(t) => self.lower_ty(t),
+                    None => Ty::Unit,
+                };
+                (m.name.clone(), (params, ret))
+            })
+            .collect();
+        Trait { name: t.name.clone(), methods }
+    }
+
+    fn verify_impl_block(&mut self, impl_block: &ast::ImplBlock) {
+        // Check if this is a trait impl (has for_trait)
+        if let Some(trait_ty) = &impl_block.for_trait {
+            if let TypeExpr::Named(trait_name, _, _) = trait_ty {
+                if let Some(trait_methods) = self.trait_defs.get(trait_name) {
+                    // Verify all trait methods are implemented with matching signatures
+                    for (trait_method_name, (trait_params, trait_ret)) in trait_methods {
+                        let found = impl_block.methods.iter().find(|m| m.name == *trait_method_name);
+                        match found {
+                            Some(impl_method) => {
+                                let impl_params: Vec<Ty> = impl_method.params.iter().map(|p| self.lower_ty(&p.ty)).collect();
+                                let impl_ret = match &impl_method.return_ty {
+                                    Some(t) => self.lower_ty(t),
+                                    None => Ty::Unit,
+                                };
+                                if impl_params != *trait_params || impl_ret != *trait_ret {
+                                    self.sink.emit(
+                                        Diagnostic::error(format!(
+                                            "method `{}` signature mismatch in impl of trait `{}`",
+                                            trait_method_name, trait_name
+                                        ))
+                                        .with_span(impl_method.span.clone(), "here")
+                                        .with_code("E0302"),
+                                    );
+                                }
+                            }
+                            None => {
+                                self.sink.emit(
+                                    Diagnostic::error(format!(
+                                        "missing method `{}` in impl of trait `{}`",
+                                        trait_method_name, trait_name
+                                    ))
+                                    .with_span(impl_block.span.clone(), "here")
+                                    .with_code("E0300"),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    self.sink.emit(
+                        Diagnostic::error(format!("trait `{}` not found", trait_name))
+                            .with_span(trait_ty.clone().span(), "here")
+                            .with_code("E0301"),
+                    );
+                }
+            }
+        }
+        // Inherent impl blocks (no for_trait) are allowed without verification for now
     }
 
     // ── Type lowering: ast::TypeExpr → Ty ────────────────────────────────────
@@ -327,6 +463,21 @@ impl<'s> TypeChecker<'s> {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::Var {
                         name: ss.name.clone(),
+                        ty: bind_ty,
+                        value: value_expr,
+                    },
+                })
+            }
+
+            // ── bare declaration `name: expr` ──────────────────────────────
+            Stmt::Decl(ds) => {
+                let value_expr = self.infer_expr(&ds.value, env);
+                let bind_ty = value_expr.ty.clone();
+                env.bind(ds.name.clone(), bind_ty.clone());
+                Some(TypedStmt {
+                    ty: Ty::Unit,
+                    kind: TypedStmtKind::Decl {
+                        name: ds.name.clone(),
                         ty: bind_ty,
                         value: value_expr,
                     },
@@ -639,10 +790,17 @@ impl<'s> TypeChecker<'s> {
                         ty: Ty::Fn(params, Box::new(ret)),
                         kind: TypedExprKind::Ident(name.clone()),
                     }
-                } else if self.type_defs.contains_key(name.as_str()) {
-                    // Named type used as a value (e.g. enum variant constructor).
+                } else if let Some(TypeDef::Enum(_variants)) = self.type_defs.get(name.as_str()) {
+                    // This is an enum type name used as a value (not a variant)
                     TypedExpr {
                         ty: Ty::Named(name.clone(), Vec::new()),
+                        kind: TypedExprKind::Ident(name.clone()),
+                    }
+                } else if let Some((enum_name, payload_tys)) = self.enum_variants.get(name).cloned() {
+                    // Payload-less enum variant - it's a value of the enum type
+                    eprintln!("DEBUG: Found enum variant '{}' -> enum '{}' with payload {:?}", name, enum_name, payload_tys);
+                    TypedExpr {
+                        ty: Ty::Named(enum_name, payload_tys),
                         kind: TypedExprKind::Ident(name.clone()),
                     }
                 } else {
@@ -694,6 +852,7 @@ impl<'s> TypeChecker<'s> {
                 let result_ty = match &uo.op {
                     UnaryOp::Neg => operand.ty.clone(),
                     UnaryOp::Not => Ty::Bool,
+                    UnaryOp::Await => operand.ty.clone(),
                 };
                 TypedExpr {
                     ty: result_ty,
@@ -755,6 +914,84 @@ impl<'s> TypeChecker<'s> {
                         start: Box::new(start),
                         end: Box::new(end),
                         inclusive: re.inclusive,
+                    },
+                }
+            }
+
+            // ── Struct literal: `User { id: 1, name: "Alice" }` ───────────────
+            Expr::StructLit(sl) => {
+                let fields: Vec<(String, TypedExpr)> = sl
+                    .fields
+                    .iter()
+                    .filter_map(|field| match field {
+                        StructField::Named(name, val) => Some((name.clone(), self.infer_expr(val, env))),
+                        StructField::Spread(_) => {
+                            // Spread in struct literal - type checking would need
+                            // to verify the spread expression is a compatible struct
+                            // For M0, we just skip spread in field list
+                            None
+                        }
+                    })
+                    .collect();
+                TypedExpr {
+                    ty: Ty::Named(sl.name.clone(), vec![]),
+                    kind: TypedExprKind::StructLit {
+                        name: sl.name.clone(),
+                        fields,
+                    },
+                }
+            }
+
+            // ── Spread expression: `...expr` ────────────────────────────────
+            Expr::Spread(spread) => {
+                let expr = self.infer_expr(&spread.expr, env);
+                // Spread propagates the inner expression's type
+                TypedExpr {
+                    ty: expr.ty.clone(),
+                    kind: TypedExprKind::Spread(Box::new(expr)),
+                }
+            }
+
+            // ── List literal: `[a, b, c]` ──────────────────────────────────
+            Expr::ListLit(ll) => {
+                let elements: Vec<TypedExpr> = ll
+                    .elements
+                    .iter()
+                    .map(|e| self.infer_expr(e, env))
+                    .collect();
+                // Infer element type from the first element, or Unknown if empty.
+                let elem_ty = elements.first().map(|e| e.ty.clone()).unwrap_or(Ty::Unknown);
+                TypedExpr {
+                    ty: Ty::List(Box::new(elem_ty)),
+                    kind: TypedExprKind::List(elements),
+                }
+            }
+
+            // ── Closure: `|params| body` ─────────────────────────────────────
+            Expr::Closure(cl) => {
+                // Create a new scope for the closure parameters
+                // Copy existing bindings from parent scope
+                let mut closure_env = LocalEnv::new(&[], &Ty::Unit);
+                // Copy parent scope bindings
+                for scope in &env.scopes {
+                    for (name, ty) in scope {
+                        closure_env.bind(name.clone(), ty.clone());
+                    }
+                }
+                for param in &cl.params {
+                    closure_env.bind(param.clone(), Ty::Unknown);
+                }
+                let body_expr = self.infer_expr(&cl.body, &mut closure_env);
+                // The closure's type is Fn(param_types) -> return_type
+                // For M0, we'll use Unknown for params and infer return type from body
+                let param_tys = cl.params.iter().map(|_| Ty::Unknown).collect();
+                let return_ty = body_expr.ty.clone();
+                let fn_ty = Ty::Fn(param_tys, Box::new(return_ty));
+                TypedExpr {
+                    ty: fn_ty.clone(),
+                    kind: TypedExprKind::Closure {
+                        params: cl.params.clone(),
+                        body: Box::new(body_expr),
                     },
                 }
             }
@@ -846,6 +1083,7 @@ impl<'s> TypeChecker<'s> {
                 // Check argument count & types if signature is known.
                 if args.len() != param_tys.len() {
                     // Argument count mismatch — emit but recover.
+                    eprintln!("E0200: callee={:?}, expected {} args, found {}", call.callee, param_tys.len(), args.len());
                     self.sink.emit(
                         Diagnostic::error(format!(
                             "expected {} argument(s), found {}",
@@ -892,7 +1130,24 @@ impl<'s> TypeChecker<'s> {
 
         let result_ty = match &bo.op {
             // Arithmetic — result type = operand type (must be numeric).
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            // String concatenation: String + String -> String
+            BinOp::Add => {
+                if left.ty == Ty::String && right.ty == Ty::String {
+                    Ty::String
+                } else if !left.ty.compatible_with(&right.ty) {
+                    self.emit_mismatch(&left.ty, &right.ty, &bo.span, "binary operands");
+                    left.ty.clone()
+                } else {
+                    // Numeric primitives
+                    match &left.ty {
+                        Ty::Int | Ty::UInt | Ty::Float | Ty::Unknown | Ty::Error => {
+                            left.ty.clone()
+                        }
+                        _ => left.ty.clone()
+                    }
+                }
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 if !left.ty.compatible_with(&right.ty) {
                     self.emit_mismatch(&left.ty, &right.ty, &bo.span, "binary operands");
                 }
@@ -982,6 +1237,25 @@ impl<'s> TypeChecker<'s> {
             // method access on a primitive as returning Unknown rather than
             // emitting a false-positive E0204.
             Ty::String | Ty::Int | Ty::UInt | Ty::Float | Ty::Bool | Ty::Char => Ty::Unknown,
+            Ty::List(elem_ty) => {
+                let elem = *elem_ty.clone();
+                match field {
+                    "length" => Ty::Int,
+                    "filter" => Ty::Fn(vec![Ty::Fn(vec![elem.clone()], Box::new(Ty::Bool))], Box::new(Ty::List(Box::new(elem.clone())))),
+                    "map" => Ty::Fn(vec![Ty::Fn(vec![elem.clone()], Box::new(Ty::Unknown))], Box::new(Ty::List(Box::new(Ty::Unknown)))),
+                    "sort" => Ty::Fn(vec![Ty::Fn(vec![elem.clone(), elem.clone()], Box::new(Ty::Int))], Box::new(Ty::Unit)),
+                    _ => {
+                        self.sink.emit(
+                            Diagnostic::error(format!(
+                                "list has no method `{field}`"
+                            ))
+                            .with_span(span.clone(), "method access")
+                            .with_code("E0204"),
+                        );
+                        Ty::Error
+                    }
+                }
+            }
             Ty::Unknown | Ty::Error => Ty::Unknown,
             _ => {
                 // Compound type (Option, Result, List, …) — emit E0204 only

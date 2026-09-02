@@ -1,0 +1,51 @@
+//! Non-UI subset of examples/dashboard.nv for Phase 1 / M0 integration testing.
+//!
+//! Contains only what the M0 interpreter supports:
+//! structs, functions, enums, match, Result/Option, ?, const.
+//!
+//! Excluded (deferred to later milestones):
+//! - async/await (M1)
+//! - UI components / state / widget tree (UI-M1)
+//! - import (no stdlib yet)
+
+// ---- Data model (concise struct style) ----------------------------------
+
+RevenuePoint:
+    date: String
+    amount: Float
+
+User:
+    id: Int
+    name: String
+    plan: String
+
+// ---- Theme (constants) --------------------------------------------------
+
+const THEME_BG: String = "#0b0c10"
+const THEME_ACCENT: String = "#66fcf1"
+
+// ---- Helper function ----------------------------------------------------
+
+fn change_icon(change: String) -> String:
+    if change.starts_with("+"): "trending-up" else: "trending-down"
+
+// ---- Result/Option usage ------------------------------------------------
+
+fn find_user(id: Int) -> Option<User>:
+    if id == 1:
+        Some(User { id: 1, name: "Alice", plan: "pro" })
+    else:
+        None
+
+fn format_user(id: Int) -> String:
+    match find_user(id):
+        Some(u): "Hello, {u.name}!"
+        None:    "Unknown user"
+
+// ---- Entry point --------------------------------------------------------
+
+main():
+    let icon = change_icon("+5%")
+    let msg = format_user(1)
+    let _ = icon
+    let _ = msg

@@ -13,6 +13,7 @@
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticSink, Span};
 use crate::lexer::{Spanned, Token};
+use std::collections::HashSet;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parser state
@@ -22,11 +23,12 @@ pub struct Parser<'a> {
     tokens: &'a [Spanned<Token>],
     pos: usize,
     pub sink: &'a mut DiagnosticSink,
+    known_types: HashSet<String>,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [Spanned<Token>], sink: &'a mut DiagnosticSink) -> Self {
-        Parser { tokens, pos: 0, sink }
+    pub fn new(tokens: &'a [Spanned<Token>], sink: &'a mut DiagnosticSink, known_types: HashSet<String>) -> Self {
+        Parser { tokens, pos: 0, sink, known_types }
     }
 
     // ── Token navigation ──────────────────────────────────────────────────
@@ -53,6 +55,13 @@ impl<'a> Parser<'a> {
     fn peek3(&self) -> &Token {
         self.tokens
             .get(self.pos + 2)
+            .map(|s| &s.node)
+            .unwrap_or(&Token::Eof)
+    }
+
+    fn peek4(&self) -> &Token {
+        self.tokens
+            .get(self.pos + 3)
             .map(|s| &s.node)
             .unwrap_or(&Token::Eof)
     }
@@ -114,13 +123,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip comment tokens that may appear between items.
+    /// Skip comment tokens and blank lines that may appear between items.
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
                 Token::Newline
+                | Token::Semi
                 | Token::LineComment(_)
-                | Token::BlockComment(_) => { self.advance(); }
+                | Token::BlockComment(_)
+                | Token::DocComment(_)
+                | Token::ModDocComment(_)
+                | Token::Dedent  // stray dedents from malformed blocks
+                => { self.advance(); }
                 _ => break,
             }
         }
@@ -205,6 +219,7 @@ impl<'a> Parser<'a> {
             Token::Trait => Some(Item::Trait(self.parse_trait_decl()?)),
             Token::Impl => Some(Item::Impl(self.parse_impl_block()?)),
             Token::Const => Some(Item::Const(self.parse_const_decl()?)),
+            Token::Mod => Some(Item::Mod(self.parse_mod_decl()?)),
             // Doc/mod-doc comments: attach to next item (skip for now).
             Token::DocComment(_) | Token::ModDocComment(_) => {
                 self.advance();
@@ -390,6 +405,16 @@ impl<'a> Parser<'a> {
         let end = self.current_span().start;
         self.skip_newlines();
         Some(ConstDecl { name, ty, value, span: Span { start, end } })
+    }
+
+    fn parse_mod_decl(&mut self) -> Option<ModDecl> {
+        let start = self.current_span().start;
+        self.expect(&Token::Mod)?;
+        let name = self.parse_ident()?;
+        self.expect(&Token::Colon)?;
+        let items = self.parse_colon_block()?.stmts;
+        let end = self.current_span().start;
+        Some(ModDecl { name, items, span: Span { start, end } })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -885,7 +910,6 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Token::Let   => self.parse_let_stmt().map(Stmt::Let),
             Token::Var   => self.parse_var_stmt().map(Stmt::Var),
-            // `state` is a contextual keyword (identifier "state")
             Token::Return => self.parse_return_stmt().map(Stmt::Return),
             Token::Break  => self.parse_break_stmt().map(Stmt::Break),
             Token::Continue => {
@@ -905,21 +929,93 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_stmt()
             }
-            // Check for `state` contextual keyword (stored as Ident("state"))
             Token::Ident(s) if s == "state" => {
                 self.parse_state_stmt().map(Stmt::State)
             }
-            // Field-declaration shaped line: `identifier: TypeExpr`
-            // Detected by peeking: Ident followed by Colon followed by a type-starting token.
-            Token::Ident(_) if self.is_field_decl_ahead() => {
-                self.parse_bare_field_stmt()
+            Token::Ident(_) => {
+                if *self.peek2() == Token::LParen {
+                    self.parse_ident_paren_stmt()
+                } else if *self.peek2() == Token::Colon {
+                    if self.is_field_decl_ahead() {
+                        self.parse_bare_field_stmt()
+                    } else if self.is_bare_decl_ahead_no_parens() {
+                        self.parse_bare_decl_stmt()
+                    } else {
+                        self.parse_decl_stmt()
+                    }
+                } else {
+                    self.parse_expr_or_assign_stmt()
+                }
             }
             _ => self.parse_expr_or_assign_stmt(),
         }
     }
 
+    fn parse_ident_paren_stmt(&mut self) -> Option<Stmt> {
+        let start = self.current_span().start;
+
+        // Scan forward past balanced parens to see what follows.
+        let mut j = self.pos + 1;
+        let mut depth = 0u32;
+        let mut empty_parens = false;
+        let mut looks_like_params = false;
+        while j < self.tokens.len() {
+            match &self.tokens[j].node {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                Token::Colon if depth == 0 => {
+                    let first = self.tokens.get(self.pos + 2).map(|s| &s.node);
+                    let second = self.tokens.get(self.pos + 3).map(|s| &s.node);
+                    empty_parens = j == self.pos + 2;
+                    looks_like_params = matches!(first, Some(Token::Ident(_)))
+                        && matches!(second, Some(Token::Colon));
+                    break;
+                }
+                Token::Newline | Token::Semi | Token::Dedent | Token::Eof if depth == 0 => break,
+                _ => {}
+            }
+            j += 1;
+        }
+
+        if empty_parens || looks_like_params {
+            let name = self.parse_ident()?;
+            let generic_params = Vec::new();
+            let params = if *self.peek() == Token::LParen {
+                self.parse_param_list()?
+            } else {
+                Vec::new()
+            };
+            let return_ty = if *self.peek() == Token::Arrow {
+                self.advance();
+                Some(self.parse_type_expr()?)
+            } else {
+                None
+            };
+            let body = self.parse_colon_block()?;
+            let end = body.span.end;
+            let func = FunctionDecl {
+                name,
+                generic_params,
+                params,
+                return_ty,
+                body: FunctionBody::Block(body),
+                span: Span { start, end },
+            };
+            return Some(Stmt::Function(func));
+        }
+
+        self.parse_expr_or_assign_stmt()
+    }
+
     /// Returns true if the next tokens look like `Ident : TypeStart`
-    /// where TypeStart is Ident, `[`, or `(` — i.e., a field declaration.
+    /// where TypeStart is a known type name, a tuple type `(`, or a
+    /// collection type `[T]` whose first inner token is a type-like ident
+    /// or nested paren. Call expressions and literals are excluded.
     fn is_field_decl_ahead(&self) -> bool {
         if !matches!(self.peek(), Token::Ident(_)) {
             return false;
@@ -927,11 +1023,28 @@ impl<'a> Parser<'a> {
         if *self.peek2() != Token::Colon {
             return false;
         }
-        // peek3 should be a type-starting token, not `=` (which would be assignment)
-        // and not another Colon (which would be `::` path separator).
+        match self.peek3() {
+            Token::Ident(ref name) => self.known_types.contains(name.as_str()),
+            Token::LParen => true,
+            Token::LBracket => matches!(self.peek4(), Token::Ident(_) | Token::LParen),
+            _ => false,
+        }
+    }
+
+    /// Returns true if the next tokens look like a bare declaration without
+    /// preceding parens: `identifier: block`. This is only checked when the
+    /// identifier is directly followed by `:` (no `(` in between).
+    fn is_bare_decl_ahead_no_parens(&self) -> bool {
+        if !matches!(self.peek(), Token::Ident(_)) {
+            return false;
+        }
+        if *self.peek2() != Token::Colon {
+            return false;
+        }
+        let next = self.peek3();
         matches!(
-            self.peek3(),
-            Token::Ident(_) | Token::LBracket | Token::LParen
+            next,
+            Token::Newline | Token::Indent | Token::LBrace | Token::Dedent | Token::Eof
         )
     }
 
@@ -943,6 +1056,45 @@ impl<'a> Parser<'a> {
         let end = self.current_span().start;
         self.skip_newlines();
         Some(Stmt::BareField(FieldDecl { name, ty, span: Span { start, end } }))
+    }
+
+    fn parse_bare_decl_stmt(&mut self) -> Option<Stmt> {
+        let start = self.current_span().start;
+        let name = self.parse_ident()?;
+        let generic_params = Vec::new();
+        let params = if *self.peek() == Token::LParen {
+            self.parse_param_list()?
+        } else {
+            Vec::new()
+        };
+        let return_ty = if *self.peek() == Token::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+        let body = self.parse_colon_block()?;
+        let end = body.span.end;
+        let func = FunctionDecl {
+            name,
+            generic_params,
+            params,
+            return_ty,
+            body: FunctionBody::Block(body),
+            span: Span { start, end },
+        };
+        Some(Stmt::Function(func))
+    }
+
+    /// Parse a bare declaration `name: expr` without a type annotation.
+    fn parse_decl_stmt(&mut self) -> Option<Stmt> {
+        let start = self.current_span().start;
+        let name = self.parse_ident()?;
+        self.expect(&Token::Colon)?;
+        let value = self.parse_expr()?;
+        let end = self.current_span().start;
+        self.skip_newlines();
+        Some(Stmt::Decl(DeclStmt { name, value, span: Span { start, end } }))
     }
 
     fn parse_let_stmt(&mut self) -> Option<LetStmt> {
@@ -1187,6 +1339,25 @@ impl<'a> Parser<'a> {
                 span: Span { start, end },
             }));
         }
+
+        // Trailing block on a call expression: `call(args): block`.
+        // This is distinct from control-flow `:` (if/match/for) which is
+        // consumed by those parsers before we reach here.
+        if *self.peek() == Token::Colon {
+            if let Expr::Call(ref call) = expr {
+                let block = self.parse_colon_block()?;
+                let span = Span { start: expr_span(&expr).start, end: block.span.end };
+                let expr = Expr::Call(CallExpr {
+                    callee: call.callee.clone(),
+                    args: call.args.clone(),
+                    trailing_block: Some(block),
+                    span,
+                });
+                self.skip_newlines();
+                return Some(Stmt::Expr(expr));
+            }
+        }
+
         self.skip_newlines();
         Some(Stmt::Expr(expr))
     }
@@ -1266,7 +1437,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assignment_expr(&mut self) -> Option<Expr> {
-        // Assignment is handled at statement level; here we just parse binary.
         self.parse_coalesce_expr()
     }
 
@@ -1414,6 +1584,16 @@ impl<'a> Parser<'a> {
                     span: Span { start, end },
                 }))
             }
+            Token::Await => {
+                self.advance();
+                let operand = self.parse_unary_expr()?;
+                let end = expr_span(&operand).end;
+                Some(Expr::UnaryOp(UnaryOpExpr {
+                    op: UnaryOp::Await,
+                    operand: Box::new(operand),
+                    span: Span { start, end },
+                }))
+            }
             _ => self.parse_postfix_expr(),
         }
     }
@@ -1480,6 +1660,37 @@ impl<'a> Parser<'a> {
                     };
                     expr = Expr::Member(MemberExpr { object: Box::new(expr), field, span });
                 }
+                // Single-argument call sugar: `ident: expr` → `ident(expr)`.
+                // Only apply when the token after `:` starts an expression.
+                // If `:` is followed by a block-starting token, it belongs to
+                // control-flow syntax (`if`/`match`/`for`) and must not be
+                // consumed here.
+                Token::Colon => {
+                    if let Expr::Ident(ref name, _) = expr {
+                        if !matches!(
+                            self.peek2(),
+                            Token::Newline | Token::Indent | Token::LBrace | Token::Dedent | Token::Eof
+                        ) {
+                            self.advance(); // consume `:`
+                            let arg = self.parse_expr()?;
+                            let arg_span = expr_span(&arg).clone();
+                            let span = Span {
+                                start: expr_span(&expr).start,
+                                end: arg_span.end,
+                            };
+                            expr = Expr::Call(CallExpr {
+                                callee: Box::new(Expr::Ident(name.clone(), expr_span(&expr).clone())),
+                                args: vec![Arg { label: None, value: arg, span: arg_span }],
+                                trailing_block: None,
+                                span,
+                            });
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
@@ -1509,7 +1720,6 @@ impl<'a> Parser<'a> {
 
     fn parse_arg(&mut self) -> Option<Arg> {
         let start = self.current_span().start;
-        // Named arg: `label: expr`
         let label = if let Token::Ident(_) = self.peek() {
             if *self.peek2() == Token::Colon {
                 let name = self.parse_ident()?;
@@ -1527,7 +1737,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
-        let start = self.current_span().start;
+        let _start = self.current_span().start;
         match self.peek().clone() {
             Token::IntLit(n) => {
                 let span = self.current_span();
@@ -1592,7 +1802,52 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 let span = self.current_span();
                 self.advance();
+                // Struct literal: `Name { field: val, ... }`
+                // Only parse as struct literal when `{` follows immediately
+                // (no newline between the ident and the brace).
+                if *self.peek() == Token::LBrace {
+                    let start = span.start;
+                    self.advance(); // `{`
+                    let mut fields = Vec::new();
+                    loop {
+                        self.skip_newlines_and_semis();
+                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
+                            break;
+                        }
+                        // Check for spread: `...expr`
+                        if matches!(self.peek(), Token::DotDotDot) {
+                            self.advance(); // consume `...`
+                            let expr = self.parse_expr()?;
+                            fields.push(StructField::Spread(Box::new(expr)));
+                            self.eat(&Token::Comma);
+                            continue;
+                        }
+                        if let Token::Ident(_) = self.peek() {
+                            if *self.peek2() == Token::Colon {
+                                let fname = self.parse_ident()?;
+                                self.advance(); // colon
+                                let fval = self.parse_expr()?;
+                                fields.push(StructField::Named(fname, fval));
+                                self.eat(&Token::Comma);
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    let end = self.current_span().end;
+                    self.expect(&Token::RBrace);
+                    return Some(Expr::StructLit(StructLitExpr {
+                        name: s,
+                        fields,
+                        span: Span { start, end },
+                    }));
+                }
                 Some(Expr::Ident(s, span))
+            }
+            Token::Type => {
+                let span = self.current_span();
+                self.advance();
+                Some(Expr::Ident("type".to_string(), span))
             }
             Token::LParen => {
                 self.advance();
@@ -1615,22 +1870,60 @@ impl<'a> Parser<'a> {
                 self.expect(&Token::RParen);
                 Some(expr)
             }
+            Token::Pipe => {
+                // Closure: `|params| body`
+                let start = self.current_span().start;
+                self.advance(); // consume `|`
+                let mut params = Vec::new();
+                // Parse parameters: `|a, b|` or `||`
+                if *self.peek() != Token::Pipe {
+                    loop {
+                        self.skip_newlines();
+                        if let Token::Ident(ref name) = self.peek() {
+                            params.push(name.clone());
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Token::Pipe); // closing `|`
+                let body = self.parse_expr()?;
+                let end = self.current_span().end;
+                Some(Expr::Closure(ClosureExpr {
+                    params,
+                    body: Box::new(body),
+                    span: Span { start, end },
+                }))
+            }
+            Token::DotDotDot => {
+                // Spread expression: `...expr`
+                let start = self.current_span().start;
+                self.advance(); // consume `...`
+                let expr = self.parse_expr()?;
+                let end = self.current_span().end;
+                Some(Expr::Spread(SpreadExpr {
+                    expr: Box::new(expr),
+                    span: Span { start, end },
+                }))
+            }
             Token::LBracket => {
-                // List literal `[a, b, c]` — represent as a series of elements
-                // For now, parse and return an Ident placeholder.
-                // TODO: add ListLit variant to Expr.
+                // List literal `[a, b, c]`
                 self.advance();
-                let mut _elems = Vec::new();
+                let start = self.current_span().start;
+                let mut elements = Vec::new();
                 loop {
                     self.skip_newlines();
                     if matches!(self.peek(), Token::RBracket | Token::Eof) { break; }
-                    if let Some(e) = self.parse_expr() { _elems.push(e); }
+                    if let Some(e) = self.parse_expr() { elements.push(e); }
                     if !self.eat(&Token::Comma) { break; }
                 }
                 let end = self.current_span().end;
                 self.expect(&Token::RBracket);
-                // Return a placeholder empty-ident for now.
-                Some(Expr::Ident("[]".to_string(), Span { start, end }))
+                Some(Expr::ListLit(ListLitExpr { elements, span: Span { start, end } }))
             }
             _ => {
                 let span = self.current_span();
@@ -1783,5 +2076,9 @@ fn expr_span(expr: &Expr) -> &Span {
         Expr::Try(e) => &e.span,
         Expr::Range(e) => &e.span,
         Expr::StringInterp(e) => &e.span,
+        Expr::StructLit(e) => &e.span,
+        Expr::ListLit(e) => &e.span,
+        Expr::Closure(e) => &e.span,
+        Expr::Spread(e) => &e.span,
     }
 }

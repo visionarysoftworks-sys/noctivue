@@ -24,6 +24,7 @@ mod cmd_lint;
 mod cmd_add;
 mod cmd_publish;
 mod cmd_run;
+mod cmd_run_vm;
 mod cmd_test;
 
 use std::process;
@@ -42,6 +43,7 @@ fn main() {
         Some("add")         => cmd_add::run(&args[2..]),
         Some("publish")     => cmd_publish::run(&args[2..]),
         Some("doc")         => cmd_doc::run(&args[2..]),
+        Some("run-vm")      => cmd_run_vm::run(&args[2..]),
         Some("--version") | Some("-V") => {
             println!("noct {}", env!("CARGO_PKG_VERSION"));
             0
@@ -68,7 +70,8 @@ USAGE:
     noct <command> [options]
 
 COMMANDS:
-    run          [Phase 1] Build and execute a .nv program
+    run          [Phase 1] Build and execute a .nv program (tree-walking interpreter)
+    run-vm       [Phase 2] Build and execute a .nv program via NIR bytecode VM
     test         [Phase 1] Run the test suite
     ast          [Phase 1] Dump the AST as JSON (noct ast --json)
     diagnostics  [Phase 1] Dump compiler diagnostics as JSON

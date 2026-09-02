@@ -44,8 +44,8 @@ pub enum Token {
     // ── Core keywords (LANGUAGE_SPEC.md §7.1) ───────────────────────────────
     As, Async, Await, Break, Const, Continue,
     Else, Export, False, For, If, Import,
-    In, Let, Loop, Match, Return, True,
-    Var, While,
+    In, Let, Loop, Match, Mod, Return, True,
+    Use, Var, While,
 
     // ── Type/system keywords (§7.2) ─────────────────────────────────────────
     Enum, Fn, Impl, Struct, Trait, Type, Unsafe,
@@ -62,11 +62,12 @@ pub enum Token {
     EqEq, BangEq, Lt, LtEq, Gt, GtEq,
     AmpAmp, PipePipe, Bang,
     Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
-    DotDot, DotDotEq,
+    DotDot, DotDotEq, DotDotDot,
     Question, QuestionQuestion,
     Arrow,                    // `->`
     Dot, ColonColon,          // `.`  `::`
     Colon, Comma, Semi,
+    Pipe,                     // `|` for closures
     LParen, RParen,
     LBracket, RBracket,
     LBrace, RBrace,

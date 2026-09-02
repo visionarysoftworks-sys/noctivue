@@ -1,0 +1,1000 @@
+/// Noctivue Expert Server Service
+/// Production-oriented architecture showcase.
+/// The design emphasizes explicit boundaries, small functions, immutable
+/// configuration, typed request/response models, centralized validation,
+/// deterministic routing, observability, and failure containment.
+
+import noctivue.io
+import std.http
+import std.json
+import std.time
+import std.log
+
+const SERVICE_NAME = "noctivue-api"
+const SERVICE_VERSION = "1.0.0"
+const DEFAULT_HOST = "0.0.0.0"
+const DEFAULT_PORT = 8080
+const DEFAULT_WORKERS = 8
+const DEFAULT_TIMEOUT = 30
+const DEFAULT_MAX_CONNECTIONS = 4096
+const MAX_PAGE_SIZE = 100
+const DEFAULT_PAGE_SIZE = 25
+
+type UserId = String
+type RequestId = String
+type RouteId = String
+type JsonValue = String
+type Timestamp = Int
+
+enum Environment {
+    Development
+    Staging
+    Production
+}
+
+enum LogLevel {
+    Debug
+    Info
+    Warn
+    Error
+}
+
+enum HttpMethod {
+    Get
+    Post
+    Put
+    Delete
+}
+
+enum HealthState {
+    Healthy
+    Degraded
+    Unavailable
+}
+
+enum ErrorCode {
+    BadRequest
+    Unauthorized
+    Forbidden
+    NotFound
+    Conflict
+    RateLimited
+    Internal
+}
+
+enum AuthResult {
+    Allowed
+    Denied
+    Expired
+}
+
+struct ServerConfig {
+    host: String
+    port: Int
+    workers: Int
+    timeout: Int
+    maxConnections: Int
+    environment: Environment
+    debug: Bool
+}
+
+struct User {
+    id: UserId
+    name: String
+    email: String
+    active: Bool
+    createdAt: Timestamp
+}
+
+struct Request {
+    id: RequestId
+    method: HttpMethod
+    path: String
+    body: JsonValue
+}
+
+struct Response {
+    status: Int
+    body: JsonValue
+    contentType: String
+}
+
+struct RequestContext {
+    request: Request
+    user: User?
+    startedAt: Timestamp
+}
+
+struct ApiError {
+    code: ErrorCode
+    message: String
+    requestId: RequestId
+}
+
+struct Page {
+    offset: Int
+    limit: Int
+}
+
+struct HealthReport {
+    state: HealthState
+    uptime: Int
+    requests: Int
+    errors: Int
+}
+
+struct Metric {
+    name: String
+    value: Int
+    unit: String
+}
+
+struct Counter {
+    name: String
+    value: Int
+}
+
+struct Route {
+    id: RouteId
+    method: HttpMethod
+    path: String
+}
+
+struct Router {
+    routes: List<Route>
+}
+
+struct ServerState {
+    startedAt: Timestamp
+    requests: Counter
+    errors: Counter
+    activeConnections: Counter
+}
+
+struct ValidationResult {
+    valid: Bool
+    message: String
+}
+
+@native
+fn now() -> Timestamp {
+    return 0
+}
+
+fn defaultConfig() -> ServerConfig {
+    return ServerConfig {
+        host: DEFAULT_HOST,
+        port: DEFAULT_PORT,
+        workers: DEFAULT_WORKERS,
+        timeout: DEFAULT_TIMEOUT,
+        maxConnections: DEFAULT_MAX_CONNECTIONS,
+        environment: Production,
+        debug: false
+    }
+}
+
+fn productionConfig() -> ServerConfig {
+    let config: ServerConfig = defaultConfig()
+    return ServerConfig {
+        host: config.host,
+        port: config.port,
+        workers: config.workers,
+        timeout: config.timeout,
+        maxConnections: config.maxConnections,
+        environment: Production,
+        debug: false
+    }
+}
+
+fn developmentConfig() -> ServerConfig {
+    let config: ServerConfig = defaultConfig()
+    return ServerConfig {
+        host: "127.0.0.1",
+        port: 8080,
+        workers: 2,
+        timeout: 10,
+        maxConnections: 256,
+        environment: Development,
+        debug: true
+    }
+}
+
+fn validateConfig(config: ServerConfig) -> ValidationResult {
+    if config.port < 1 {
+        return ValidationResult {
+            valid: false,
+            message: "port must be positive"
+        }
+    }
+
+    if config.workers < 1 {
+        return ValidationResult {
+            valid: false,
+            message: "workers must be positive"
+        }
+    }
+
+    if config.maxConnections < config.workers {
+        return ValidationResult {
+            valid: false,
+            message: "connection limit is below worker count"
+        }
+    }
+
+    return ValidationResult {
+        valid: true,
+        message: "configuration accepted"
+    }
+}
+
+fn initializeState(startedAt: Timestamp) -> ServerState {
+    return ServerState {
+        startedAt: startedAt,
+        requests: Counter {
+            name: "requests",
+            value: 0
+        },
+        errors: Counter {
+            name: "errors",
+            value: 0
+        },
+        activeConnections: Counter {
+            name: "active_connections",
+            value: 0
+        }
+    }
+}
+
+fn increment(counter: Counter, amount: Int) -> Counter {
+    return Counter {
+        name: counter.name,
+        value: counter.value + amount
+    }
+}
+
+fn page(offset: Int, limit: Int) -> Page {
+    if offset < 0 {
+        return Page {
+            offset: 0,
+            limit: DEFAULT_PAGE_SIZE
+        }
+    }
+
+    if limit < 1 {
+        return Page {
+            offset: offset,
+            limit: DEFAULT_PAGE_SIZE
+        }
+    }
+
+    if limit > MAX_PAGE_SIZE {
+        return Page {
+            offset: offset,
+            limit: MAX_PAGE_SIZE
+        }
+    }
+
+    return Page {
+        offset: offset,
+        limit: limit
+    }
+}
+
+fn route(id: RouteId, method: HttpMethod, path: String) -> Route {
+    return Route {
+        id: id,
+        method: method,
+        path: path
+    }
+}
+
+fn buildRouter() -> Router {
+    return Router {
+        routes: [
+            route("health", Get, "/health"),
+            route("ready", Get, "/ready"),
+            route("users.list", Get, "/v1/users"),
+            route("users.create", Post, "/v1/users"),
+            route("users.get", Get, "/v1/users/:id"),
+            route("users.update", Put, "/v1/users/:id"),
+            route("users.delete", Delete, "/v1/users/:id")
+        ]
+    }
+}
+
+fn emptyBody() -> JsonValue {
+    return "{}"
+}
+
+fn jsonResponse(status: Int, body: JsonValue) -> Response {
+    return Response {
+        status: status,
+        body: body,
+        contentType: "application/json"
+    }
+}
+
+fn textResponse(status: Int, body: String) -> Response {
+    return Response {
+        status: status,
+        body: body,
+        contentType: "text/plain"
+    }
+}
+
+fn errorResponse(error: ApiError) -> Response {
+    return jsonResponse(
+        errorStatus(error.code),
+        error.message
+    )
+}
+
+fn errorStatus(code: ErrorCode) -> Int {
+    match code {
+        BadRequest => return 400
+        Unauthorized => return 401
+        Forbidden => return 403
+        NotFound => return 404
+        Conflict => return 409
+        RateLimited => return 429
+        Internal => return 500
+    }
+}
+
+fn apiError(code: ErrorCode, message: String, requestId: RequestId) -> ApiError {
+    return ApiError {
+        code: code,
+        message: message,
+        requestId: requestId
+    }
+}
+
+fn createContext(request: Request) -> RequestContext {
+    return RequestContext {
+        request: request,
+        user: null,
+        startedAt: now()
+    }
+}
+
+fn authenticate(context: RequestContext) -> AuthResult {
+    if context.user == null {
+        return Denied
+    }
+
+    if !context.user.active {
+        return Expired
+    }
+
+    return Allowed
+}
+
+fn requireAuthentication(context: RequestContext) -> ValidationResult {
+    let result: AuthResult = authenticate(context)
+
+    match result {
+        Allowed => return ValidationResult {
+            valid: true,
+            message: "authenticated"
+        }
+        Denied => return ValidationResult {
+            valid: false,
+            message: "authentication required"
+        }
+        Expired => return ValidationResult {
+            valid: false,
+            message: "authentication expired"
+        }
+    }
+}
+
+fn validateRequest(request: Request) -> ValidationResult {
+    if request.id == "" {
+        return ValidationResult {
+            valid: false,
+            message: "request id is required"
+        }
+    }
+
+    if request.path == "" {
+        return ValidationResult {
+            valid: false,
+            message: "request path is required"
+        }
+    }
+
+    return ValidationResult {
+        valid: true,
+        message: "request accepted"
+    }
+}
+
+fn validateUser(user: User) -> ValidationResult {
+    if user.id == "" {
+        return ValidationResult {
+            valid: false,
+            message: "user id is required"
+        }
+    }
+
+    if user.name == "" {
+        return ValidationResult {
+            valid: false,
+            message: "user name is required"
+        }
+    }
+
+    if user.email == "" {
+        return ValidationResult {
+            valid: false,
+            message: "email is required"
+        }
+    }
+
+    return ValidationResult {
+        valid: true,
+        message: "user accepted"
+    }
+}
+
+fn createUser(id: UserId, name: String, email: String) -> User {
+    return User {
+        id: id,
+        name: name,
+        email: email,
+        active: true,
+        createdAt: now()
+    }
+}
+
+fn publicUser(user: User) -> JsonValue {
+    return user.name
+}
+
+fn findUser(id: UserId) -> User? {
+    if id == "" {
+        return null
+    }
+
+    return createUser(
+        id,
+        "service-user",
+        "service@example.invalid"
+    )
+}
+
+fn userNotFound(id: UserId, requestId: RequestId) -> ApiError {
+    return apiError(
+        NotFound,
+        "user not found: " + id,
+        requestId
+    )
+}
+
+fn listUsers(context: RequestContext, pageInfo: Page) -> Response {
+    let auth: ValidationResult = requireAuthentication(context)
+
+    if !auth.valid {
+        return errorResponse(
+            apiError(
+                Unauthorized,
+                auth.message,
+                context.request.id
+            )
+        )
+    }
+
+    return jsonResponse(
+        200,
+        "users"
+    )
+}
+
+fn getUser(context: RequestContext, id: UserId) -> Response {
+    let auth: ValidationResult = requireAuthentication(context)
+
+    if !auth.valid {
+        return errorResponse(
+            apiError(
+                Unauthorized,
+                auth.message,
+                context.request.id
+            )
+        )
+    }
+
+    let user: User? = findUser(id)
+
+    if user == null {
+        return errorResponse(
+            userNotFound(id, context.request.id)
+        )
+    }
+
+    return jsonResponse(
+        200,
+        publicUser(user)
+    )
+}
+
+fn createUserResponse(context: RequestContext, user: User) -> Response {
+    let validation: ValidationResult = validateUser(user)
+
+    if !validation.valid {
+        return errorResponse(
+            apiError(
+                BadRequest,
+                validation.message,
+                context.request.id
+            )
+        )
+    }
+
+    return jsonResponse(
+        201,
+        publicUser(user)
+    )
+}
+
+fn updateUser(context: RequestContext, user: User) -> Response {
+    let auth: ValidationResult = requireAuthentication(context)
+
+    if !auth.valid {
+        return errorResponse(
+            apiError(
+                Unauthorized,
+                auth.message,
+                context.request.id
+            )
+        )
+    }
+
+    let validation: ValidationResult = validateUser(user)
+
+    if !validation.valid {
+        return errorResponse(
+            apiError(
+                BadRequest,
+                validation.message,
+                context.request.id
+            )
+        )
+    }
+
+    return jsonResponse(200, publicUser(user))
+}
+
+fn deleteUser(context: RequestContext, id: UserId) -> Response {
+    let auth: ValidationResult = requireAuthentication(context)
+
+    if !auth.valid {
+        return errorResponse(
+            apiError(
+                Unauthorized,
+                auth.message,
+                context.request.id
+            )
+        )
+    }
+
+    let user: User? = findUser(id)
+
+    if user == null {
+        return errorResponse(
+            userNotFound(id, context.request.id)
+        )
+    }
+
+    return jsonResponse(204, emptyBody())
+}
+
+fn healthReport(state: ServerState) -> HealthReport {
+    let errors: Int = state.errors.value
+    let requests: Int = state.requests.value
+    let status: HealthState = Healthy
+
+    if errors > 100 {
+        status = Degraded
+    }
+
+    if requests > 10000 && errors > 1000 {
+        status = Unavailable
+    }
+
+    return HealthReport {
+        state: status,
+        uptime: now() - state.startedAt,
+        requests: requests,
+        errors: errors
+    }
+}
+
+fn healthResponse(state: ServerState) -> Response {
+    let report: HealthReport = healthReport(state)
+
+    match report.state {
+        Healthy => return jsonResponse(200, "healthy")
+        Degraded => return jsonResponse(200, "degraded")
+        Unavailable => return jsonResponse(503, "unavailable")
+    }
+}
+
+fn readinessResponse(state: ServerState) -> Response {
+    if state.activeConnections.value >= DEFAULT_MAX_CONNECTIONS {
+        return textResponse(503, "not ready")
+    }
+
+    return textResponse(200, "ready")
+}
+
+fn livenessResponse() -> Response {
+    return textResponse(200, "live")
+}
+
+fn metric(name: String, value: Int, unit: String) -> Metric {
+    return Metric {
+        name: name,
+        value: value,
+        unit: unit
+    }
+}
+
+fn recordMetric(metricValue: Metric) -> Metric {
+    log.info(metricValue.name)
+    return metricValue
+}
+
+fn recordRequest(state: ServerState) -> ServerState {
+    return ServerState {
+        startedAt: state.startedAt,
+        requests: increment(state.requests, 1),
+        errors: state.errors,
+        activeConnections: state.activeConnections
+    }
+}
+
+fn recordError(state: ServerState) -> ServerState {
+    return ServerState {
+        startedAt: state.startedAt,
+        requests: state.requests,
+        errors: increment(state.errors, 1),
+        activeConnections: state.activeConnections
+    }
+}
+
+fn openConnection(state: ServerState) -> ServerState {
+    return ServerState {
+        startedAt: state.startedAt,
+        requests: state.requests,
+        errors: state.errors,
+        activeConnections: increment(state.activeConnections, 1)
+    }
+}
+
+fn closeConnection(state: ServerState) -> ServerState {
+    let next: Int = state.activeConnections.value - 1
+
+    if next < 0 {
+        return state
+    }
+
+    return ServerState {
+        startedAt: state.startedAt,
+        requests: state.requests,
+        errors: state.errors,
+        activeConnections: Counter {
+            name: state.activeConnections.name,
+            value: next
+        }
+    }
+}
+
+fn logRequest(context: RequestContext) -> Metric {
+    let elapsed: Int = now() - context.startedAt
+
+    log.info(context.request.id)
+    log.info(context.request.path)
+
+    return metric(
+        "request.duration",
+        elapsed,
+        "milliseconds"
+    )
+}
+
+fn routeMatches(routeValue: Route, request: Request) -> Bool {
+    if routeValue.method != request.method {
+        return false
+    }
+
+    if routeValue.path == request.path {
+        return true
+    }
+
+    return false
+}
+
+fn findRoute(router: Router, request: Request) -> Route? {
+    for routeValue in router.routes {
+        if routeMatches(routeValue, request) {
+            return routeValue
+        }
+    }
+
+    return null
+}
+
+fn dispatch(
+    context: RequestContext,
+    routeValue: Route,
+    state: ServerState
+) -> Response {
+    if routeValue.id == "health" {
+        return healthResponse(state)
+    }
+
+    if routeValue.id == "ready" {
+        return readinessResponse(state)
+    }
+
+    if routeValue.id == "users.list" {
+        return listUsers(context, page(0, DEFAULT_PAGE_SIZE))
+    }
+
+    if routeValue.id == "users.create" {
+        let user: User = createUser(
+            "generated",
+            "new-user",
+            "new@example.invalid"
+        )
+        return createUserResponse(context, user)
+    }
+
+    if routeValue.id == "users.get" {
+        return getUser(context, "generated")
+    }
+
+    if routeValue.id == "users.update" {
+        let user: User = createUser(
+            "generated",
+            "updated-user",
+            "updated@example.invalid"
+        )
+        return updateUser(context, user)
+    }
+
+    if routeValue.id == "users.delete" {
+        return deleteUser(context, "generated")
+    }
+
+    return errorResponse(
+        apiError(
+            NotFound,
+            "route not found",
+            context.request.id
+        )
+    )
+}
+
+fn dispatchRequest(
+    router: Router,
+    request: Request,
+    state: ServerState
+) -> Response {
+    let validation: ValidationResult = validateRequest(request)
+
+    if !validation.valid {
+        return errorResponse(
+            apiError(
+                BadRequest,
+                validation.message,
+                request.id
+            )
+        )
+    }
+
+    let routeValue: Route? = findRoute(router, request)
+
+    if routeValue == null {
+        return errorResponse(
+            apiError(
+                NotFound,
+                "no route matched",
+                request.id
+            )
+        )
+    }
+
+    let context: RequestContext = createContext(request)
+    return dispatch(context, routeValue, state)
+}
+
+fn handleRequest(
+    router: Router,
+    request: Request,
+    state: ServerState
+) -> Response {
+    let nextState: ServerState = recordRequest(state)
+    let response: Response = dispatchRequest(router, request, nextState)
+
+    if response.status >= 500 {
+        let errorState: ServerState = recordError(nextState)
+        log.info(errorState.errors.value)
+    }
+
+    return response
+}
+
+fn startServer(config: ServerConfig) -> Response {
+    let validation: ValidationResult = validateConfig(config)
+
+    if !validation.valid {
+        return errorResponse(
+            apiError(
+                Internal,
+                validation.message,
+                "startup"
+            )
+        )
+    }
+
+    log.info(SERVICE_NAME)
+    log.info(SERVICE_VERSION)
+    log.info(config.host)
+    log.info(config.port)
+    log.info(config.workers)
+
+    return textResponse(200, "server started")
+}
+
+fn shutdownServer(state: ServerState) -> Response {
+    if state.activeConnections.value > 0 {
+        log.info("draining active connections")
+    }
+
+    return textResponse(200, "server stopped")
+}
+
+fn environmentName(environment: Environment) -> String {
+    match environment {
+        Development => return "development"
+        Staging => return "staging"
+        Production => return "production"
+    }
+}
+
+fn logLevelName(level: LogLevel) -> String {
+    match level {
+        Debug => return "debug"
+        Info => return "info"
+        Warn => return "warn"
+        Error => return "error"
+    }
+}
+
+fn methodName(method: HttpMethod) -> String {
+    match method {
+        Get => return "GET"
+        Post => return "POST"
+        Put => return "PUT"
+        Delete => return "DELETE"
+    }
+}
+
+fn configureLogging(config: ServerConfig) -> Response {
+    let level: LogLevel = Info
+
+    if config.debug {
+        level = Debug
+    }
+
+    log.info(environmentName(config.environment))
+    log.info(logLevelName(level))
+
+    return textResponse(200, "logging configured")
+}
+
+fn bootstrap() -> ServerState {
+    let config: ServerConfig = productionConfig()
+    let validation: ValidationResult = validateConfig(config)
+
+    if !validation.valid {
+        log.info(validation.message)
+    }
+
+    let logging: Response = configureLogging(config)
+    log.info(logging.body)
+
+    let state: ServerState = initializeState(now())
+    let startup: Response = startServer(config)
+    log.info(startup.body)
+
+    return state
+}
+
+fn serveHealth(state: ServerState) -> Response {
+    return healthResponse(state)
+}
+
+fn serveReady(state: ServerState) -> Response {
+    return readinessResponse(state)
+}
+
+fn serveLive() -> Response {
+    return livenessResponse()
+}
+
+fn serveUsers(context: RequestContext) -> Response {
+    let result: ValidationResult = requireAuthentication(context)
+
+    if !result.valid {
+        return errorResponse(
+            apiError(
+                Unauthorized,
+                result.message,
+                context.request.id
+            )
+        )
+    }
+
+    let info: Page = page(0, DEFAULT_PAGE_SIZE)
+    return listUsers(context, info)
+}
+
+fn parseUser(context: RequestContext) -> User {
+    return createUser(
+        "request-user",
+        "request-name",
+        "request@example.invalid"
+    )
+}
+
+fn createFromRequest(context: RequestContext) -> Response {
+    let user: User = parseUser(context)
+    return createUserResponse(context, user)
+}
+
+fn updateFromRequest(context: RequestContext) -> Response {
+    let user: User = parseUser(context)
+    return updateUser(context, user)
+}
+
+fn handleKnownPath(context: RequestContext, state: ServerState) -> Response {
+    let path: String = context.request.path
+
+    if path == "/health" {
+        return serveHealth(state)
+    }
+
+    if path == "/ready" {
+        return serveReady(state)
+    }
+
+    if path == "/live" {
+        return serveLive()
+    }
+
+    if path == "/v1/users" {
+        if context.request.method == Get {
+            return serveUsers(context)
+        }
+
+        if context.request.method == Post {
+            return createFromRequest(context)
+        }
+    }
+
+    return errorResponse(
+        apiError(
+            NotFound,
+            "endpoint not found",
+            context.request.id
+        )
+    )
+}
+
+fn processRequest(request: Request, state: ServerState) -> Response {
+    let context: RequestContext = createContext(request)
+    return handleKnownPath(context, state)
+}
+

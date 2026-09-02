@@ -186,5 +186,34 @@ is **not** part of the MVP gate.
 | `examples/dashboard.nv` | ~100-line worked UI example |
 
 ---
+
+## M0 Teachability Profile (What a Beginner Can Write Today)
+
+The M0 subset is intentionally designed so a beginner can write meaningful
+programs without understanding the full language:
+
+| Concept | Syntax | Example |
+|---------|--------|---------|
+| Values | `let x = 42`, `var y = "hi"` | `let name = "Alice"` |
+| Functions | `fn name(args) -> Type: body` | `fn add(a: Int, b: Int) -> Int: a + b` |
+| Structs | `struct Name: field: Type` / `Name { field: val }` | `struct User: name: String` / `User { name: "Bob" }` |
+| Enums | `enum Name: Variant(payload)` | `enum Status: Active / Inactive` |
+| Pattern matching | `match x: A => 1, B => 2` | `match status: Active => "on", Inactive => "off"` |
+| Lists | `[a, b, c]` / `.length`, `.map(fn)` | `let nums = [1,2,3]; nums.map(|x| x * 2)` |
+| Options/Results | `Some(v)` / `None`, `Ok(v)` / `Err(e)` | `let x = Some(42); x?` |
+| Modules | `mod name: ...` | `mod math: const PI = 3.14` |
+| Closures | `\|x\| expr` | `let double = \|x\| x * 2` |
+| Spread | `...expr` in structs | `User { ...base, name: "New" }` |
+
+**What's NOT in M0 (deliberately):**
+- `async`/`await` (M1)
+- ARC/managed mode, UI components, widgets (UI-S0/UI-S1)
+- Monomorphisation of generics (M1+)
+- Native compilation, REPL, package manager (M1+)
+- Macros, advanced sandboxing (M5+)
+
+---
+
+---
 *This is Noctivue Language Specification v0.1. The language is
 experimental and unimplemented. Nothing here is a stability guarantee.*

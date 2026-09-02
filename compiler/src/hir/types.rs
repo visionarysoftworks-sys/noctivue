@@ -5,7 +5,7 @@
 //! `Named` until a later lowering pass (out of scope for M0).
 
 /// A resolved type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     // ── Primitives ─────────────────────────────────────────────────────────
     Int,

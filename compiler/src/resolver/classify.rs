@@ -214,6 +214,7 @@ fn is_function_statement(stmt: &Stmt) -> bool {
             | Stmt::Struct(_)
             | Stmt::State(_)
             | Stmt::Assign(_)
+            | Stmt::Decl(_)
     )
 }
 

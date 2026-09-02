@@ -13,12 +13,13 @@ use super::types::Ty;
 pub struct Module {
     pub structs: Vec<Struct>,
     pub enums: Vec<Enum>,
+    pub traits: Vec<Trait>,
     pub functions: Vec<Function>,
 }
 
 impl Module {
     pub fn empty() -> Self {
-        Module { structs: Vec::new(), enums: Vec::new(), functions: Vec::new() }
+        Module { structs: Vec::new(), enums: Vec::new(), traits: Vec::new(), functions: Vec::new() }
     }
 }
 
@@ -36,6 +37,13 @@ pub struct Enum {
     pub name: String,
     /// `(variant_name, payload_types)` pairs.
     pub variants: Vec<(String, Vec<Ty>)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Trait {
+    pub name: String,
+    /// `(method_name, (params, return_ty))` pairs.
+    pub methods: Vec<(String, (Vec<Ty>, Ty))>,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -64,6 +72,8 @@ pub enum TypedStmtKind {
     Let { name: String, ty: Ty, value: TypedExpr },
     /// `var name [: T] = value`
     Var { name: String, ty: Ty, value: TypedExpr },
+    /// `name: value` (bare declaration without type annotation)
+    Decl { name: String, ty: Ty, value: TypedExpr },
     /// A bare expression statement.
     Expr(TypedExpr),
     /// `return [expr]`
@@ -193,6 +203,12 @@ pub enum TypedExprKind {
     },
     /// Enum variant constructor, e.g. `Direction::North` (resolved).
     EnumVariant { enum_name: String, variant: String },
+    /// Struct literal `Name { field: val, … }`.
+    StructLit { name: String, fields: Vec<(String, TypedExpr)> },
+    /// Spread expression `...expr`
+    Spread(Box<TypedExpr>),
+    /// Closure: `|params| body`
+    Closure { params: Vec<String>, body: Box<TypedExpr> },
 }
 
 #[derive(Debug, Clone)]

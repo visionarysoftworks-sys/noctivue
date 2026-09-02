@@ -1,0 +1,572 @@
+//! NIR bytecode VM — executes NIR directly for faster iteration than native compilation.
+//!
+//! This is the M1 deliverable: a bytecode VM that consumes NIR and produces
+//! identical observable behavior to the M0 tree-walking interpreter.
+
+use crate::nir::instr::{CmpOp, ConstValue, Instr};
+use crate::nir::module::NirModule;
+use crate::nir::types::{BlockId, FuncId, ValueId};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub enum VmValue {
+    Int(i128),
+    Float(f64),
+    Bool(bool),
+    Char(char),
+    String(String),
+    Unit,
+    Struct { name: String, fields: HashMap<String, VmValue> },
+    Enum { variant: String, tag: u32, fields: Vec<VmValue> },
+    List(Vec<VmValue>),
+    Option(Option<Box<VmValue>>),
+    Result(Result<Box<VmValue>, Box<VmValue>>),
+    Function(FuncId),
+    Closure { func: FuncId, captured: Vec<VmValue> },
+    Tuple(Vec<VmValue>),
+    Range { start: Box<VmValue>, end: Box<VmValue>, inclusive: bool },
+    Pointer(usize),
+}
+
+impl VmValue {
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            VmValue::Bool(b) => *b,
+            VmValue::Int(i) => *i != 0,
+            VmValue::Float(f) => *f != 0.0,
+            VmValue::String(s) => !s.is_empty(),
+            VmValue::List(l) => !l.is_empty(),
+            VmValue::Option(Some(_)) => true,
+            VmValue::Option(None) => false,
+            VmValue::Result(Ok(_)) => true,
+            VmValue::Result(Err(_)) => false,
+            VmValue::Unit => false,
+            _ => true,
+        }
+    }
+}
+
+pub struct Vm {
+    module: NirModule,
+    call_stack: Vec<CallFrame>,
+    globals: HashMap<FuncId, VmValue>,
+    heap: Vec<VmValue>,
+}
+
+#[derive(Debug)]
+struct CallFrame {
+    func: FuncId,
+    block: BlockId,
+    pc: usize,
+    locals: Vec<VmValue>,
+    #[allow(dead_code)]
+    block_params: Vec<VmValue>,
+}
+
+impl Vm {
+    pub fn new(module: NirModule) -> Self {
+        let mut vm = Vm {
+            module,
+            call_stack: Vec::new(),
+            globals: HashMap::new(),
+            heap: Vec::new(),
+        };
+        for func in &vm.module.functions {
+            vm.globals.insert(func.id, VmValue::Function(func.id));
+        }
+        vm
+    }
+
+    pub fn run(&mut self) -> Result<VmValue, VmError> {
+        let main_id = self.module.get_function("main")
+            .map(|f| f.id)
+            .ok_or(VmError::NoMainFunction)?;
+        self.call(main_id, vec![])
+    }
+
+    pub fn call(&mut self, func_id: FuncId, args: Vec<VmValue>) -> Result<VmValue, VmError> {
+        let func = self.module.get_function_by_id(func_id)
+            .ok_or(VmError::FunctionNotFound(func_id))?;
+        let entry_block = func.entry_block()
+            .ok_or(VmError::NoEntryBlock(func_id))?
+            .id;
+
+        let mut locals = vec![VmValue::Unit; 1000];
+        for (i, arg) in args.into_iter().enumerate() {
+            locals[i] = arg;
+        }
+
+        let frame = CallFrame {
+            func: func_id,
+            block: entry_block,
+            pc: 0,
+            locals,
+            block_params: Vec::new(),
+        };
+        self.call_stack.push(frame);
+
+        self.run_current_frame()
+    }
+
+    fn run_current_frame(&mut self) -> Result<VmValue, VmError> {
+        loop {
+            let (func_id, block_id, pc) = {
+                let frame = self.call_stack.last().unwrap();
+                (frame.func, frame.block, frame.pc)
+            };
+
+            let func = self.module.get_function_by_id(func_id).unwrap();
+            let block = func.blocks.iter().find(|b| b.id == block_id).unwrap();
+
+            if pc < block.instrs.len() {
+                let instr = block.instrs[pc].clone();
+                self.call_stack.last_mut().unwrap().pc += 1;
+                let mut frame = self.call_stack.pop().unwrap();
+                self.execute_instr(&instr, &mut frame)?;
+                self.call_stack.push(frame);
+            } else if let Some(term) = block.terminator.clone() {
+                let mut frame = self.call_stack.pop().unwrap();
+                let ctrl = self.execute_terminator(&term, &mut frame)?;
+                match ctrl {
+                    ControlFlow::Continue => {
+                        self.call_stack.push(frame);
+                    }
+                    ControlFlow::Return(result) => {
+                        if self.call_stack.is_empty() {
+                            return Ok(result);
+                        }
+                        self.call_stack.push(frame);
+                        return Ok(VmValue::Unit);
+                    }
+                }
+            } else {
+                let func_name = func.name.clone();
+                return Err(VmError::NoTerminator(block_id, func_name));
+            }
+        }
+    }
+
+    fn execute_instr(&mut self, instr: &Instr, frame: &mut CallFrame) -> Result<(), VmError> {
+        match instr {
+            Instr::Add { dst, lhs, rhs, ty: _ } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.add_values(a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Sub { dst, lhs, rhs, ty: _ } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.sub_values(a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Mul { dst, lhs, rhs, ty: _ } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.mul_values(a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Div { dst, lhs, rhs, ty: _ } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.div_values(a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Rem { dst, lhs, rhs, ty: _ } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.rem_values(a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::ICmp { dst, op, lhs, rhs } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.icmp_values(*op, a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::FCmp { dst, op, lhs, rhs } => {
+                let a = self.get_value(frame, *lhs)?;
+                let b = self.get_value(frame, *rhs)?;
+                let result = self.fcmp_values(*op, a, b)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Neg { dst, src, ty: _ } => {
+                let a = self.get_value(frame, *src)?;
+                let result = self.neg_value(a)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Not { dst, src } => {
+                let a = self.get_value(frame, *src)?;
+                let result = self.not_value(a)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::Const { dst, value, ty: _ } => {
+                frame.locals[dst.0 as usize] = self.const_to_value(value)?;
+            }
+            Instr::StackAlloc { dst, ty: _ } => {
+                let ptr = self.heap.len();
+                self.heap.push(VmValue::Unit);
+                frame.locals[dst.0 as usize] = VmValue::Pointer(ptr);
+            }
+            Instr::HeapAlloc { dst, ty: _ } => {
+                let ptr = self.heap.len();
+                self.heap.push(VmValue::Unit);
+                frame.locals[dst.0 as usize] = VmValue::Pointer(ptr);
+            }
+            Instr::Load { dst, src, ty: _ } => {
+                let ptr_val = self.get_value(frame, *src)?;
+                if let VmValue::Pointer(idx) = ptr_val {
+                    if idx < self.heap.len() {
+                        frame.locals[dst.0 as usize] = self.heap[idx].clone();
+                    } else {
+                        frame.locals[dst.0 as usize] = VmValue::Unit;
+                    }
+                } else {
+                    frame.locals[dst.0 as usize] = ptr_val;
+                }
+            }
+            Instr::Store { val, ptr } => {
+                let ptr_val = self.get_value(frame, *ptr)?;
+                let store_val = self.get_value(frame, *val)?;
+                if let VmValue::Pointer(idx) = ptr_val {
+                    if idx < self.heap.len() {
+                        self.heap[idx] = store_val;
+                    }
+                }
+            }
+            Instr::Move { dst, src } => {
+                let val = self.get_value(frame, *src)?;
+                frame.locals[dst.0 as usize] = val;
+            }
+            Instr::ArcRetain { src } => {}
+            Instr::ArcRelease { src } => {}
+            Instr::WeakLoad { dst, src, ty: _ } => {
+                frame.locals[dst.0 as usize] = VmValue::Option(None);
+            }
+            Instr::StructNew { dst, fields, ty } => {
+                let field_values: Vec<VmValue> = fields.iter()
+                    .map(|f| self.get_value(frame, *f))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let name = match &ty.inner {
+                    crate::hir::types::Ty::Named(n, _) => n.clone(),
+                    _ => "unknown".to_string(),
+                };
+                let mut fields_map = HashMap::new();
+                for (i, val) in field_values.into_iter().enumerate() {
+                    fields_map.insert(format!("f{}", i), val);
+                }
+                frame.locals[dst.0 as usize] = VmValue::Struct { name, fields: fields_map };
+            }
+            Instr::FieldGet { dst, obj, field, ty: _ } => {
+                let obj_val = self.get_value(frame, *obj)?;
+                let result = if let VmValue::Struct { fields, .. } = obj_val {
+                    fields.get(field).cloned().unwrap_or(VmValue::Unit)
+                } else {
+                    VmValue::Unit
+                };
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::FieldSet { obj, field, val } => {
+                let obj_val = self.get_value(frame, *obj)?;
+                let val_val = self.get_value(frame, *val)?;
+                if let VmValue::Struct { fields, .. } = obj_val {
+                    let mut f = fields.clone();
+                    f.insert(field.clone(), val_val);
+                }
+            }
+            Instr::EnumTag { dst, src } => {
+                let src_val = self.get_value(frame, *src)?;
+                let tag = if let VmValue::Enum { tag, .. } = src_val {
+                    VmValue::Int(tag as i128)
+                } else {
+                    VmValue::Int(0)
+                };
+                frame.locals[dst.0 as usize] = tag;
+            }
+            Instr::EnumPayload { dst, src, ty: _ } => {
+                let src_val = self.get_value(frame, *src)?;
+                let payload = if let VmValue::Enum { fields, .. } = src_val {
+                    fields.get(0).cloned().unwrap_or(VmValue::Unit)
+                } else {
+                    VmValue::Unit
+                };
+                frame.locals[dst.0 as usize] = payload;
+            }
+            Instr::EnumNew { dst, tag, fields, ty: _ } => {
+                let tag_val = self.get_value(frame, *tag)?;
+                let tag = if let VmValue::Int(i) = tag_val { i as u32 } else { 0 };
+                let field_vals: Vec<VmValue> = fields.iter()
+                    .map(|f| self.get_value(frame, *f))
+                    .collect::<Result<Vec<_>, _>>()?;
+                frame.locals[dst.0 as usize] = VmValue::Enum { variant: String::new(), tag, fields: field_vals };
+            }
+            Instr::Call { dst, func, args, ret_ty: _ } => {
+                let arg_vals: Vec<VmValue> = args.iter()
+                    .map(|v| self.get_value(frame, *v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = self.call(*func, arg_vals)?;
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::CallIndirect { dst, func_ptr, args, ret_ty: _ } => {
+                let ptr = self.get_value(frame, *func_ptr)?;
+                if let VmValue::Function(fid) = ptr {
+                    let arg_vals: Vec<VmValue> = args.iter()
+                        .map(|v| self.get_value(frame, *v))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let result = self.call(fid, arg_vals)?;
+                    frame.locals[dst.0 as usize] = result;
+                } else {
+                    frame.locals[dst.0 as usize] = VmValue::Unit;
+                }
+            }
+            Instr::CondBranch { cond, then_block, else_block } => {
+                let cond_val = self.get_value(frame, *cond)?;
+                let target = if cond_val.is_truthy() { *then_block } else { *else_block };
+                frame.block = target;
+                frame.pc = 0;
+            }
+            Instr::Unreachable => {
+                return Err(VmError::Unreachable);
+            }
+            Instr::ResultOk { dst, val, ty: _ } => {
+                let v = self.get_value(frame, *val)?;
+                frame.locals[dst.0 as usize] = VmValue::Result(Ok(Box::new(v)));
+            }
+            Instr::ResultErr { dst, val, ty: _ } => {
+                let v = self.get_value(frame, *val)?;
+                frame.locals[dst.0 as usize] = VmValue::Result(Err(Box::new(v)));
+            }
+            Instr::TryUnwrap { dst, src, ty: _ } => {
+                let src_val = self.get_value(frame, *src)?;
+                let result = match src_val {
+                    VmValue::Option(Some(v)) => *v,
+                    VmValue::Option(None) => {
+                        return Err(VmError::OptionUnwrapNone);
+                    }
+                    VmValue::Result(Ok(v)) => *v,
+                    VmValue::Result(Err(e)) => {
+                        return Err(VmError::ResultUnwrapErr(e));
+                    }
+                    _ => VmValue::Unit,
+                };
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::OptionSome { dst, val, ty: _ } => {
+                let v = self.get_value(frame, *val)?;
+                frame.locals[dst.0 as usize] = VmValue::Option(Some(Box::new(v)));
+            }
+            Instr::OptionNone { dst, ty: _ } => {
+                frame.locals[dst.0 as usize] = VmValue::Option(None);
+            }
+            Instr::Phi { dst, incoming, ty: _ } => {
+                let result = incoming.last()
+                    .map(|(v, _)| self.get_value(frame, *v))
+                    .transpose()?
+                    .unwrap_or(VmValue::Unit);
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::ClosureNew { dst, func, captured, ty: _ } => {
+                let cap_vals: Vec<VmValue> = captured.iter()
+                    .map(|c| self.get_value(frame, *c))
+                    .collect::<Result<Vec<_>, _>>()?;
+                frame.locals[dst.0 as usize] = VmValue::Closure { func: *func, captured: cap_vals };
+            }
+            Instr::ClosureCall { dst, closure, args, ret_ty: _ } => {
+                let closure_val = self.get_value(frame, *closure)?;
+                if let VmValue::Closure { func, captured } = closure_val {
+                    let mut full_args = captured.clone();
+                    for arg in args {
+                        full_args.push(self.get_value(frame, *arg)?);
+                    }
+                    let result = self.call(func, full_args)?;
+                    frame.locals[dst.0 as usize] = result;
+                } else {
+                    frame.locals[dst.0 as usize] = VmValue::Unit;
+                }
+            }
+            Instr::Branch { target } => {
+                frame.block = *target;
+                frame.pc = 0;
+            }
+            Instr::Switch { .. } => {
+                return Err(VmError::UnimplementedTerminator("Switch used as instruction, not terminator".to_string()));
+            }
+            Instr::Return { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn execute_terminator(&mut self, term: &Instr, frame: &mut CallFrame) -> Result<ControlFlow, VmError> {
+        match term {
+            Instr::Return { val } => {
+                let result = if let Some(v) = val {
+                    self.get_value(frame, *v)?
+                } else {
+                    VmValue::Unit
+                };
+                self.call_stack.pop();
+                Ok(ControlFlow::Return(result))
+            }
+            Instr::Branch { target } => {
+                frame.block = *target;
+                frame.pc = 0;
+                Ok(ControlFlow::Continue)
+            }
+            Instr::CondBranch { cond, then_block, else_block } => {
+                let cond_val = self.get_value(frame, *cond)?;
+                let target = if cond_val.is_truthy() { *then_block } else { *else_block };
+                frame.block = target;
+                frame.pc = 0;
+                Ok(ControlFlow::Continue)
+            }
+            Instr::Switch { val, cases, default } => {
+                let val_val = self.get_value(frame, *val)?;
+                let tag = if let VmValue::Int(i) = val_val { i as u32 } else { 0 };
+                let target = cases.iter()
+                    .find(|(t, _)| *t == tag)
+                    .map(|(_, b)| *b)
+                    .unwrap_or(*default);
+                frame.block = target;
+                frame.pc = 0;
+                Ok(ControlFlow::Continue)
+            }
+            _ => Err(VmError::UnimplementedTerminator(format!("{:?}", term))),
+        }
+    }
+
+    fn get_value(&self, frame: &CallFrame, id: ValueId) -> Result<VmValue, VmError> {
+        let idx = id.0 as usize;
+        if idx < frame.locals.len() {
+            Ok(frame.locals[idx].clone())
+        } else {
+            Err(VmError::InvalidValueId(id))
+        }
+    }
+
+    fn add_values(&self, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        match (a, b) {
+            (VmValue::Int(a), VmValue::Int(b)) => Ok(VmValue::Int(a + b)),
+            (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Float(a + b)),
+            (VmValue::String(a), VmValue::String(b)) => Ok(VmValue::String(a + &b)),
+            _ => Err(VmError::TypeMismatch("add".to_string())),
+        }
+    }
+
+    fn sub_values(&self, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        match (a, b) {
+            (VmValue::Int(a), VmValue::Int(b)) => Ok(VmValue::Int(a - b)),
+            (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Float(a - b)),
+            _ => Err(VmError::TypeMismatch("sub".to_string())),
+        }
+    }
+
+    fn mul_values(&self, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        match (a, b) {
+            (VmValue::Int(a), VmValue::Int(b)) => Ok(VmValue::Int(a * b)),
+            (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Float(a * b)),
+            _ => Err(VmError::TypeMismatch("mul".to_string())),
+        }
+    }
+
+    fn div_values(&self, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        match (a, b) {
+            (VmValue::Int(a), VmValue::Int(b)) => {
+                if b == 0 { return Err(VmError::DivisionByZero); }
+                Ok(VmValue::Int(a / b))
+            }
+            (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Float(a / b)),
+            _ => Err(VmError::TypeMismatch("div".to_string())),
+        }
+    }
+
+    fn rem_values(&self, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        match (a, b) {
+            (VmValue::Int(a), VmValue::Int(b)) => Ok(VmValue::Int(a % b)),
+            (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Float(a % b)),
+            _ => Err(VmError::TypeMismatch("rem".to_string())),
+        }
+    }
+
+    fn icmp_values(&self, op: CmpOp, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        let result = match (op, a, b) {
+            (CmpOp::Eq, VmValue::Int(a), VmValue::Int(b)) => a == b,
+            (CmpOp::Ne, VmValue::Int(a), VmValue::Int(b)) => a != b,
+            (CmpOp::Lt, VmValue::Int(a), VmValue::Int(b)) => a < b,
+            (CmpOp::Le, VmValue::Int(a), VmValue::Int(b)) => a <= b,
+            (CmpOp::Gt, VmValue::Int(a), VmValue::Int(b)) => a > b,
+            (CmpOp::Ge, VmValue::Int(a), VmValue::Int(b)) => a >= b,
+            (CmpOp::Eq, VmValue::Float(a), VmValue::Float(b)) => a == b,
+            (CmpOp::Ne, VmValue::Float(a), VmValue::Float(b)) => a != b,
+            (CmpOp::Lt, VmValue::Float(a), VmValue::Float(b)) => a < b,
+            (CmpOp::Le, VmValue::Float(a), VmValue::Float(b)) => a <= b,
+            (CmpOp::Gt, VmValue::Float(a), VmValue::Float(b)) => a > b,
+            (CmpOp::Ge, VmValue::Float(a), VmValue::Float(b)) => a >= b,
+            (CmpOp::Eq, VmValue::Bool(a), VmValue::Bool(b)) => a == b,
+            (CmpOp::Ne, VmValue::Bool(a), VmValue::Bool(b)) => a != b,
+            _ => false,
+        };
+        Ok(VmValue::Bool(result))
+    }
+
+    fn fcmp_values(&self, op: CmpOp, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        self.icmp_values(op, a, b)
+    }
+
+    fn neg_value(&self, a: VmValue) -> Result<VmValue, VmError> {
+        match a {
+            VmValue::Int(i) => Ok(VmValue::Int(-i)),
+            VmValue::Float(f) => Ok(VmValue::Float(-f)),
+            _ => Err(VmError::TypeMismatch("neg".to_string())),
+        }
+    }
+
+    fn not_value(&self, a: VmValue) -> Result<VmValue, VmError> {
+        match a {
+            VmValue::Bool(b) => Ok(VmValue::Bool(!b)),
+            VmValue::Int(i) => Ok(VmValue::Int(!i)),
+            _ => Err(VmError::TypeMismatch("not".to_string())),
+        }
+    }
+
+    fn const_to_value(&self, c: &ConstValue) -> Result<VmValue, VmError> {
+        match c {
+            ConstValue::Int(v) => Ok(VmValue::Int(*v)),
+            ConstValue::Float(v) => Ok(VmValue::Float(*v)),
+            ConstValue::Bool(v) => Ok(VmValue::Bool(*v)),
+            ConstValue::Char(c) => Ok(VmValue::Char(*c)),
+            ConstValue::String(s) => Ok(VmValue::String(s.clone())),
+            ConstValue::Unit => Ok(VmValue::Unit),
+        }
+    }
+}
+
+enum ControlFlow {
+    Continue,
+    Return(VmValue),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VmError {
+    #[error("no main function found")]
+    NoMainFunction,
+    #[error("function {0:?} not found")]
+    FunctionNotFound(FuncId),
+    #[error("no entry block for function {0:?}")]
+    NoEntryBlock(FuncId),
+    #[error("no terminator for block {0:?} in function {1}")]
+    NoTerminator(BlockId, String),
+    #[error("invalid value ID {0:?}")]
+    InvalidValueId(ValueId),
+    #[error("type mismatch in {0}")]
+    TypeMismatch(String),
+    #[error("division by zero")]
+    DivisionByZero,
+    #[error("unimplemented terminator: {0}")]
+    UnimplementedTerminator(String),
+    #[error("unreachable code executed")]
+    Unreachable,
+    #[error("option unwrap on None")]
+    OptionUnwrapNone,
+    #[error("result unwrap on Err")]
+    ResultUnwrapErr(Box<VmValue>),
+}

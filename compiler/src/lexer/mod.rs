@@ -391,7 +391,7 @@ impl<'src, 'sink> Lexer<'src, 'sink> {
                 if self.eat('|') {
                     self.push(Token::PipePipe, start, self.pos);
                 } else {
-                    self.err_unrecognised('|', start);
+                    self.push(Token::Pipe, start, self.pos);
                 }
             }
             '?' => {
@@ -406,6 +406,9 @@ impl<'src, 'sink> Lexer<'src, 'sink> {
                     self.advance();
                     if self.eat('=') {
                         self.push(Token::DotDotEq, start, self.pos);
+                    } else if self.peek() == Some('.') {
+                        self.advance();
+                        self.push(Token::DotDotDot, start, self.pos);
                     } else {
                         self.push(Token::DotDot, start, self.pos);
                     }
@@ -955,8 +958,10 @@ fn keyword_or_ident(s: &str) -> Token {
         "let"      => Token::Let,
         "loop"     => Token::Loop,
         "match"    => Token::Match,
+        "mod"      => Token::Mod,
         "return"   => Token::Return,
         "true"     => Token::BoolLit(true),
+        "use"      => Token::Use,
         "var"      => Token::Var,
         "while"    => Token::While,
 

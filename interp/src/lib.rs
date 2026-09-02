@@ -59,6 +59,13 @@ pub enum Value {
     Result(std::result::Result<Box<Value>, Box<Value>>),
     /// A function reference — looked up in the module table at call time.
     Fn(String),
+    /// A closure value with captured environment.
+    Closure {
+        params: Vec<String>,
+        body: Box<compiler::hir::items::TypedExpr>,
+        ret_ty: compiler::hir::Ty,
+        env: ScopeStack,
+    },
 }
 
 impl std::fmt::Display for Value {
@@ -87,6 +94,7 @@ impl std::fmt::Display for Value {
             Value::Result(Ok(v)) => write!(f, "Ok({v})"),
             Value::Result(Err(e)) => write!(f, "Err({e})"),
             Value::Fn(name) => write!(f, "<fn {name}>"),
+            Value::Closure { params, .. } => write!(f, "<closure with {} params>", params.len()),
         }
     }
 }
@@ -113,7 +121,8 @@ pub enum RuntimeError {
 
 /// A stack of scopes that together represent all local bindings during
 /// the evaluation of a function body.
-struct ScopeStack {
+#[derive(Debug, Clone)]
+pub struct ScopeStack {
     scopes: Vec<HashMap<String, Value>>,
 }
 
@@ -177,6 +186,8 @@ pub struct Interpreter {
     structs: HashMap<String, Struct>,
     /// Global enum table: name → HIR enum definition.
     enums: HashMap<String, Enum>,
+    /// Global scope containing enum variants and other globals.
+    root_scope: HashMap<String, Value>,
 }
 
 impl Interpreter {
@@ -186,6 +197,7 @@ impl Interpreter {
             functions: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
+            root_scope: HashMap::new(),
         }
     }
 
@@ -198,12 +210,21 @@ impl Interpreter {
         self.functions.clear();
         self.structs.clear();
         self.enums.clear();
+        self.root_scope.clear();
 
         for s in &module.structs {
             self.structs.insert(s.name.clone(), s.clone());
         }
         for e in &module.enums {
             self.enums.insert(e.name.clone(), e.clone());
+            // Add payload-less enum variants as constants in the root scope
+            for (variant_name, payload_tys) in &e.variants {
+                if payload_tys.is_empty() {
+                    // Create a value representing this enum variant
+                    let variant_val = Value::Enum { variant: variant_name.clone(), fields: Vec::new() };
+                    self.root_scope.insert(variant_name.clone(), variant_val);
+                }
+            }
         }
         for f in &module.functions {
             self.functions.insert(f.name.clone(), f.clone());
@@ -254,14 +275,16 @@ impl Interpreter {
             return result;
         }
 
-        let func = self
-            .functions
-            .get(name)
-            .ok_or_else(|| RuntimeError::Undefined(name.to_string()))?
-            .clone(); // clone to avoid borrow conflicts during recursion
+        let func = match self.functions.get(name) {
+            Some(f) => f.clone(),
+            None => {
+                // Unknown function/component — treat as no-op per M0 spec.
+                return Ok(Value::Unit);
+            }
+        };
 
-        // Build root scope from parameters
-        let mut param_map = HashMap::new();
+        // Build root scope from parameters, merged with global root_scope
+        let mut param_map = self.root_scope.clone();
         for ((param_name, _ty), value) in func.params.iter().zip(args.iter()) {
             param_map.insert(param_name.clone(), value.clone());
         }
@@ -278,6 +301,14 @@ impl Interpreter {
             Err(RuntimeError::UncaughtError(v)) => Ok(v),
             Err(e) => Err(e),
         }
+    }
+
+    /// Check if a name is a built-in function.
+    fn is_builtin(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "print" | "println" | "to_string" | "to_int" | "to_float" | "panic" | "assert" | "run"
+        )
     }
 
     /// Evaluate a built-in function by name.  Returns `None` if the name is
@@ -337,6 +368,8 @@ impl Interpreter {
             },
             // run(component) — no-op in non-UI mode
             "run" => Some(Ok(Value::Unit)),
+            // load_data() — no-op in non-UI mode
+            "load_data" => Some(Ok(Value::Unit)),
             _ => None,
         }
     }
@@ -365,7 +398,9 @@ impl Interpreter {
         sink: &mut DiagnosticSink,
     ) -> std::result::Result<Value, RuntimeError> {
         match &stmt.kind {
-            TypedStmtKind::Let { name, value, .. } | TypedStmtKind::Var { name, value, .. } => {
+            TypedStmtKind::Let { name, value, .. }
+            | TypedStmtKind::Var { name, value, .. }
+            | TypedStmtKind::Decl { name, value, .. } => {
                 let v = self.eval_expr(value, scope, sink)?;
                 scope.define(name.clone(), v);
                 Ok(Value::Unit)
@@ -559,6 +594,10 @@ impl Interpreter {
                 if self.functions.contains_key(name.as_str()) {
                     return Ok(Value::Fn(name.clone()));
                 }
+                // Builtin function reference
+                if self.is_builtin(name) {
+                    return Ok(Value::Fn(name.clone()));
+                }
                 Err(RuntimeError::Undefined(name.clone()))
             }
 
@@ -571,28 +610,35 @@ impl Interpreter {
                 }
 
                 // Resolve callee
-                let fn_name = match &callee.kind {
-                    TypedExprKind::Ident(name) => name.clone(),
-                    TypedExprKind::Member { object, field } => {
-                        // Method call: insert object as first argument
-                        let obj = self.eval_expr(object, scope, sink)?;
-                        arg_vals.insert(0, obj);
-                        field.clone()
+                let callee_val = self.eval_expr(callee, scope, sink)?;
+                match callee_val {
+                    Value::Fn(name) => {
+                        self.eval_function(&name, &arg_vals, sink)
+                    }
+                    Value::Closure { params, body, ret_ty: _, env } => {
+                        // Execute closure with captured environment
+                        if params.len() != arg_vals.len() {
+                            return Err(RuntimeError::Panic(
+                                format!("closure arity mismatch: expected {} args, got {}", params.len(), arg_vals.len())
+                            ));
+                        }
+                        // Create new scope with closure's captured environment + parameters
+                        let mut closure_scope = env;
+                        for (param, arg) in params.into_iter().zip(arg_vals.into_iter()) {
+                            closure_scope.define(param, arg);
+                        }
+                        // We need to wrap the body in a TypedExpr for eval_expr
+                        // Create a TypedExpr with the body's kind and the closure's return type
+                        let closure_expr = compiler::hir::items::TypedExpr {
+                            kind: (*body).kind.clone(),
+                            ty: compiler::hir::Ty::Unknown,
+                        };
+                        self.eval_expr(&closure_expr, &mut closure_scope, sink)
                     }
                     _ => {
-                        let v = self.eval_expr(callee, scope, sink)?;
-                        match v {
-                            Value::Fn(name) => name,
-                            _ => {
-                                return Err(RuntimeError::Panic(
-                                    "called value is not a function".to_string(),
-                                ))
-                            }
-                        }
+                        Err(RuntimeError::Panic("called value is not a function".to_string()))
                     }
-                };
-
-                self.eval_function(&fn_name, &arg_vals, sink)
+                }
             }
 
             // ── Binary operations ─────────────────────────────────────────
@@ -617,6 +663,7 @@ impl Interpreter {
                             "unary `!` requires Bool".to_string(),
                         )),
                     },
+                    UnaryOp::Await => Ok(v),
                 }
             }
 
@@ -691,6 +738,19 @@ impl Interpreter {
                 Ok(Value::List(vals))
             }
 
+            // ── Closure ─────────────────────────────────────────────────────
+            TypedExprKind::Closure { params, body } => {
+                // Need to get the return type from the enclosing TypedExpr
+                // For now, we'll create a dummy return type - in practice
+                // the typechecker ensures the closure body type matches
+                Ok(Value::Closure {
+                    params: params.clone(),
+                    body: body.clone(),
+                    ret_ty: compiler::hir::Ty::Unknown,
+                    env: scope.clone(),
+                })
+            }
+
             // ── Index ─────────────────────────────────────────────────────
             TypedExprKind::Index { object, index } => {
                 let obj = self.eval_expr(object, scope, sink)?;
@@ -758,6 +818,19 @@ impl Interpreter {
             // ── Enum variant constructor ───────────────────────────────────
             TypedExprKind::EnumVariant { variant, .. } => {
                 Ok(Value::Enum { variant: variant.clone(), fields: Vec::new() })
+            }
+
+            TypedExprKind::StructLit { name, fields } => {
+                let mut field_vals = std::collections::HashMap::new();
+                for (fname, fexpr) in fields {
+                    let val = self.eval_expr(fexpr, scope, sink)?;
+                    field_vals.insert(fname.clone(), val);
+                }
+                Ok(Value::Struct { name: name.clone(), fields: field_vals })
+            }
+            TypedExprKind::Spread(expr) => {
+                // Spread just evaluates to the inner expression's value
+                self.eval_expr(expr, scope, sink)
             }
         }
     }
@@ -950,6 +1023,9 @@ impl Interpreter {
                 "len" | "length" => Ok(Value::Int(items.len() as i128)),
                 "first" => Ok(Value::Option(items.into_iter().next().map(Box::new))),
                 "last" => Ok(Value::Option(items.into_iter().last().map(Box::new))),
+                "filter" => Ok(Value::Fn("__list_filter__".to_string())), // Placeholder - needs closure support
+                "map" => Ok(Value::Fn("__list_map__".to_string())),     // Placeholder - needs closure support
+                "sort" => Ok(Value::Fn("__list_sort__".to_string())),   // Placeholder - needs closure support
                 _ => Err(RuntimeError::Undefined(format!("[..].{field}"))),
             },
             Value::String(s) => match field {

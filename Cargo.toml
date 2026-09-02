@@ -11,3 +11,20 @@ version = "0.0.1"
 edition = "2021"
 authors = ["Noctivue Contributors"]
 license = "MIT"
+
+# Root package — hosts the workspace-level integration test.
+[package]
+name = "noctivue"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Noctivue language workspace root"
+
+[dependencies]
+compiler = { path = "compiler" }
+interp    = { path = "interp" }
+
+[[test]]
+name = "integration"
+path = "tests/integration_test.rs"

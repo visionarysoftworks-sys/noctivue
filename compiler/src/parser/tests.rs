@@ -389,3 +389,13 @@ fn if_else_call_condition() {
     assert!(!sink.has_errors(), "errors: {:?}", sink.diagnostics());
     let _ = prog;
 }
+
+
+#[test]
+fn parse_dashboard_nonui_fixture() {
+    let src = include_str!("../../../tests/fixtures/dashboard_nonui.nv");
+    let prog = parse_clean(src);
+    assert!(!prog.items.is_empty(), "expected items");
+}
+
+

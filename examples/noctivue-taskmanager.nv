@@ -1,0 +1,202 @@
+// ============================================================
+// Noctivue: Minimal Task Manager (M0 working subset)
+// ============================================================
+
+// ─── Types ───
+enum Priority:
+    Low
+    Medium
+    High
+
+enum Status:
+    Todo
+    InProgress
+    Done
+
+struct Task:
+    id: String
+    title: String
+    description: String
+    priority: Priority
+    status: Status
+    created_at: Int
+
+struct AppState:
+    tasks: [Task]
+
+// ─── Helpers ───
+
+fn now_timestamp() -> Int:
+    1234567890
+
+fn make_id() -> String:
+    "task_123"
+
+fn new_task(title: String, description: String, priority: Priority) -> Task:
+    Task {
+        id: make_id()
+        title: title
+        description: description
+        priority: priority
+        status: Todo
+        created_at: now_timestamp()
+    }
+
+fn add_task(state: AppState, task: Task) -> AppState:
+    AppState { tasks: state.tasks + [task] }
+
+fn find_task(state: AppState, id: String) -> Option<Task>:
+    for task in state.tasks:
+        if task.id == id:
+            return Some(task)
+    None
+
+fn delete_task(state: AppState, id: String) -> AppState:
+    let new_tasks = state.tasks.filter(|t| t.id != id)
+    AppState { tasks: new_tasks }
+
+fn complete_task(state: AppState, id: String) -> AppState:
+    let task_opt = find_task(state, id)
+    match task_opt:
+        Some(t):
+            let updated = Task { id: t.id, title: t.title, description: t.description, priority: t.priority, status: Done, created_at: t.created_at }
+            let new_tasks = state.tasks.filter(|t2| t2.id != id)
+            add_task(AppState { tasks: new_tasks }, updated)
+        None:
+            state
+
+fn start_task(state: AppState, id: String) -> AppState:
+    let task_opt = find_task(state, id)
+    match task_opt:
+        Some(t):
+            let updated = Task { id: t.id, title: t.title, description: t.description, priority: t.priority, status: InProgress, created_at: t.created_at }
+            let new_tasks = state.tasks.filter(|t2| t2.id != id)
+            add_task(AppState { tasks: new_tasks }, updated)
+        None:
+            state
+
+fn filter_tasks(tasks: [Task], status: Status) -> [Task]:
+    tasks.filter(|t| t.status == status)
+
+fn sort_by_priority(tasks: [Task]) -> [Task]:
+    tasks.sort(|a, b| priority_rank(b.priority) - priority_rank(a.priority))
+
+fn priority_rank(p: Priority) -> Int:
+    match p:
+        High: 3
+        Medium: 2
+        Low: 1
+
+// ─── Display ───
+
+fn task_to_string(task: Task) -> String:
+    let status_icon = match task.status:
+        Todo: "[ ]"
+        InProgress: "[~]"
+        Done: "[x]"
+    let priority_icon = match task.priority:
+        High: "!!"
+        Medium: "!"
+        Low: ""
+    status_icon + " " + priority_icon + " " + task.title
+
+fn print_tasks(tasks: [Task]) -> Unit:
+    for task in tasks:
+        print(task_to_string(task))
+
+fn print_help() -> Unit:
+    print("=== TaskMaster v1.0.0 ===")
+    print("Commands:")
+    print("  add <title> [priority]  - Add a new task")
+    print("  list [status]           - List tasks (all/todo/inprogress/done)")
+    print("  start <id>              - Mark task as in progress")
+    print("  done <id>               - Mark task as complete")
+    print("  delete <id>             - Remove a task")
+    print("  help                    - Show this help")
+
+fn parse_priority(s: String) -> Priority:
+    if s == "high": High
+    else if s == "low": Low
+    else: Medium
+
+fn parse_status(s: String) -> Option<Status>:
+    if s == "todo": Some(Todo)
+    else if s == "inprogress": Some(InProgress)
+    else if s == "done": Some(Done)
+    else if s == "all": None
+    else: None
+
+// ─── Main Loop ───
+
+fn run_command(state: AppState, args: [String]) -> AppState:
+    if args.length == 0:
+        print_help()
+        return state
+
+    match args[0]:
+        "add":
+            if args.length < 2:
+                print("Usage: add <title> [priority]")
+                return state
+            let title = args[1]
+            let priority = if args.length >= 3: parse_priority(args[2]) else: Medium
+            let task = new_task(title, "", priority)
+            print("Added: " + task_to_string(task))
+            add_task(state, task)
+
+        "list":
+            let status_filter = if args.length >= 2: parse_status(args[1]) else: None
+            let tasks = match status_filter:
+                Some(s): filter_tasks(state.tasks, s)
+                None: state.tasks
+            let sorted = sort_by_priority(tasks)
+            print("--- Tasks ---")
+            print_tasks(sorted)
+            state
+
+        "start":
+            if args.length < 2:
+                print("Usage: start <id>")
+                return state
+            print("Started: " + args[1])
+            start_task(state, args[1])
+
+        "done":
+            if args.length < 2:
+                print("Usage: done <id>")
+                return state
+            print("Completed: " + args[1])
+            complete_task(state, args[1])
+
+        "delete":
+            if args.length < 2:
+                print("Usage: delete <id>")
+                return state
+            print("Deleted: " + args[1])
+            delete_task(state, args[1])
+
+        "help":
+            print_help()
+            state
+
+        _:
+            print("Unknown command: " + args[0])
+            print_help()
+            state
+
+// ─── Entry Point ───
+
+main():
+    let initial_state = AppState { tasks: [] }
+    
+    // Demo tasks
+    let state1 = run_command(initial_state, ["add", "Learn Noctivue", "high"])
+    let state2 = run_command(state1, ["add", "Write tests", "medium"])
+    let state3 = run_command(state2, ["add", "Deploy", "low"])
+    let state4 = run_command(state3, ["start", "task_123"])
+    let state5 = run_command(state4, ["done", "task_123"])
+    
+    print("\n--- Final Task List ---")
+    let final_state = run_command(state5, ["list"])
+    
+    print("\nDone!")
