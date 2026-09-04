@@ -27,7 +27,10 @@ const THEME_ACCENT: String = "#66fcf1"
 // ---- Helper function ----------------------------------------------------
 
 fn change_icon(change: String) -> String:
-    if change.starts_with("+"): "trending-up" else: "trending-down"
+    // NOTE: `String.starts_with` is not M0 surface (no spec, no interp/VM
+    // support); equality keeps this fixture's purpose — a string-taking fn
+    // with an if/else over string literals — intact.
+    if change == "+": "trending-up" else: "trending-down"
 
 // ---- Result/Option usage ------------------------------------------------
 

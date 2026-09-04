@@ -11,10 +11,23 @@
 //! artifact (lex → parse → resolve → typecheck → interpret) without depending
 //! on NIR or backends that do not exist yet.
 //!
-//! When M1 introduces NIR (`compiler/src/nir/`), this crate either:
-//! - Gets replaced by a NIR-based VM crate, or
-//! - Is kept as a reference implementation for differential testing.
-//! That decision is **Open** (SCAFFOLD.md §3, IMPLEMENTATION_PLAN.md §4).
+//! ## Fate decision (recorded Phase 2 completion, M1)
+//!
+//! **DECIDED: kept as the differential-testing oracle** (the second
+//! option; closes the Open item in SCAFFOLD.md §3 and
+//! IMPLEMENTATION_PLAN.md §4). Rationale, from Phase 2 evidence:
+//! - The `noct-cli/tests/differential.rs` harness (16 CLI cases, exact
+//!   stdout/exit/stderr) plus `compiler/src/nir/vm_tests.rs` (10 unit
+//!   cases) treat this interpreter as ground truth. Every real lowering
+//!   bug found in Phase 2 (silent `??`, non-propagating `?`, misordered
+//!   branches, tag-confusion dispatch, Struct-for-List) surfaced as a
+//!   divergence *against this crate* — retiring it would delete the only
+//!   independent semantics.
+//! - It stays a **separate crate** so M0 remains runnable without NIR.
+//! - It must stay *independent*: fixes to shared semantics land here
+//!   first (or simultaneously), never as VM-only patches. Any change to
+//!   `eval_*` observable behavior requires running the differential
+//!   suite before merge.
 //!
 //! ## Pipeline position
 //!

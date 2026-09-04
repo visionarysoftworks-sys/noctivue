@@ -95,8 +95,9 @@ pub enum Instr {
     ListIndex { dst: ValueId, src: ValueId, index: ValueId },
     /// `%dst = enum_tag %src` — get enum variant tag
     EnumTag { dst: ValueId, src: ValueId },
-    /// `%dst = enum_payload %src` — get enum payload
-    EnumPayload { dst: ValueId, src: ValueId, ty: NirTy },
+    /// `%dst = enum_payload %src[i]` — get enum payload field `i`
+    /// (also extracts `Option`/`Result` payloads, which hold one value).
+    EnumPayload { dst: ValueId, src: ValueId, index: u32, ty: NirTy },
     /// `%dst = enum_new %tag, [field0, field1, ...]` — construct enum variant
     EnumNew { dst: ValueId, tag: ValueId, fields: Vec<ValueId>, ty: NirTy },
 
@@ -189,7 +190,7 @@ impl fmt::Display for Instr {
             Instr::ListLen { dst, src } => write!(f, "{} = list_len {}", dst, src),
             Instr::ListIndex { dst, src, index } => write!(f, "{} = list_index {}, {}", dst, src, index),
             Instr::EnumTag { dst, src } => write!(f, "{} = enum_tag {}", dst, src),
-            Instr::EnumPayload { dst, src, ty } => write!(f, "{} = enum_payload {} : {}", dst, src, ty),
+            Instr::EnumPayload { dst, src, index, ty } => write!(f, "{} = enum_payload {}[{}] : {}", dst, src, index, ty),
             Instr::EnumNew { dst, tag, fields, ty } => write!(f, "{} = enum_new {} [{}] : {}", dst, tag, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
             Instr::Call { dst, func, args, ret_ty } => write!(f, "{} = call {}({}) : {}", dst, func, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
             Instr::CallIndirect { dst, func_ptr, args, ret_ty } => write!(f, "{} = call_indirect {}({}) : {}", dst, func_ptr, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),

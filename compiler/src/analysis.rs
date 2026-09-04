@@ -578,6 +578,9 @@ fn prelude_hover(name: &str) -> Option<HoverInfo> {
 }
 
 /// File label used in `Declared in ...` lines (basename, not full path).
+/// Currently exercised by the `analysis::tests` hover tests; the LSP server
+/// derives its own labels from document URIs.
+#[allow(dead_code)]
 fn file_label_of(file_path: &str) -> String {
     file_path
         .rsplit(['/', '\\'])

@@ -1,8 +1,11 @@
 # NIR.md — Noctivue Intermediate Representation
 
-**Status:** Structural shape Proposed; do not treat as frozen (design
-brief §19 explicitly warns against overdesigning NIR before language
-semantics stabilize).
+**Status:** Instruction set **frozen for M1** (Phase 2 completion
+record, IMPLEMENTATION_PLAN.md §4). The inventory in §4 is exhaustive
+for the M0 language surface: adding an instruction now requires a
+DECISIONS.md amendment naming the HIR construct that cannot be expressed
+with the existing set. Structural questions beyond M1 (async lowering,
+generics strategy, closure calling convention) remain Open per §6.
 
 ## 1. Design Goals
 
@@ -40,38 +43,141 @@ Module
   └── functions
         ├── signature (params, return type, mode tag)
         └── basic blocks
-              ├── block params (SSA block arguments, phi-free style)
-              └── instructions (terminated by exactly one control-flow instruction)
+              ├── block params (populated on entry blocks; reserved, VM ignores them)
+              ├── Phi nodes (merges use explicit Phi — see §4 control-flow discipline)
+              └── instructions (see §4 for the terminated-block rules)
 ```
 
-## 4. Instruction Categories (illustrative, not exhaustive)
+## 4. Instruction Set (frozen for M1)
+
+The complete inventory, grouped by category. Names are the canonical
+textual form (see `Instr`'s `Display` impl, the single source of truth
+alongside `compiler/src/nir/instr.rs`).
 
 ```text
-Arithmetic / comparison    add, sub, mul, div, icmp, fcmp, ...
-Memory (native)            stack_alloc, load, store, move, borrow
+Arithmetic / comparison    add, sub, mul, div, rem,
+                           icmp, fcmp, neg, not,
+                           const
+Memory (native)            stack_alloc, load, store, move
 Memory (managed)           heap_alloc, arc_retain, arc_release, weak_load
-Aggregate                  struct_new, field_get, field_set, enum_tag, enum_payload
-Calls                      call, call_indirect, tail_call?
-Control flow (terminators) branch, cond_branch, switch, return, unreachable
-Error handling             result_ok, result_err, try_unwrap (lowering of `?`)
+Aggregate                  struct_new, field_get, field_set,
+                           list_len, list_index,
+                           enum_tag, enum_payload (indexed), enum_new
+Calls                      call, call_indirect,
+                           closure_new, closure_call
+I/O                        print
+Control flow (terminators) branch, cond_branch, switch, return,
+                           early_return, unreachable
+Error handling             result_ok, result_err, try_unwrap,
+                           option_some, option_none
+Conversion                 to_string
+SSA merge                  phi
 ```
+
+Notes and deliberate deviations from the v0.1 sketch:
+
+- There is **no `borrow` instruction**: borrow checking is a Phase 3
+  (M2) static analysis over this IR, not an instruction. There is no
+  `tail_call` either (no user-facing tail-call construct in M0).
+- `switch` exists but match lowering currently uses test chains
+  (`cond_branch` + tag/ICmp tests); `switch` is reserved for a future
+  jump-table optimization and the Cranelift backend.
+- Merges use explicit **`phi`** nodes (not phi-free block params):
+  block `params` are populated on entry blocks and otherwise reserved.
+- `enum_payload` takes a field **index** (multi-payload variants).
+- `early_return` terminates `?`-propagation paths; it behaves like
+  `return` in the VM but marks propagation sites for later backends.
+- `print` exists because M0's `print`/`println` builtins lower directly
+  (no stdlib to call into yet); the remaining builtins
+  (`panic`/`assert`/`to_int`/…) are **not** representable yet — see §6.
+
+### 4.1 Control-flow discipline (load-bearing invariants)
+
+Every lowering path must uphold these; the differential suite
+(`noct-cli/tests/differential.rs`) exists to catch violations as
+*wrong output*, since most of them execute without errors:
+
+1. **Every reachable block is terminated.** The VM errors only on
+   blocks it actually visits, so an unterminated dead block is latent,
+   not safe — terminate dead blocks anyway (`unreachable`).
+2. **After a split, later code emits into the merge/continue block,
+   never into the terminated pre-split block.** (The `split_current_block`
+   helper swaps the merge block into the emission cursor.) Appending
+   past a terminator silently reorders code *before* the branch.
+3. **`?` splits before unwrapping**: `cond_branch` on the Option/Result
+   value itself (Some/Ok are truthy), `early_return` of a reconstructed
+   `None`/`Err(original payload)` on the else edge, infallible
+   `try_unwrap` on the continue edge. `try_unwrap` on None/Err is a VM
+   trap (`OptionUnwrapNone`/`ResultUnwrapErr`), never a silent Unit.
+4. **`??` short-circuits**: the right side is evaluated solely in the
+   else block; the merge `phi` takes the *unwrapped* payload on the
+   taken edge, never the Option wrapper.
+5. **Match is a test chain**, not positional-`switch` dispatch: arms in
+   order, wildcard/identifier arms unconditional, literal arms via
+   `icmp Eq`, variant arms via `enum_tag` compare (prelude `Some`/`Ok`
+   via truthiness, `None`/`Err` via inverted truthiness), guards as
+   in-arm branches to the next test, bindings via indexed payload
+   extraction, no-match falls through to an `unreachable` trap. Arm
+   bodies are lowered exactly once (never re-lowered for the Phi value).
+6. **Loops thread state through `phi`**: the `for` index is a
+   header-Phi (init on entry, incremented value on back-edge). Loop
+   exits converge on a merge block; `for` exit is a branch, never a
+   `return` (the old `Return None` discarded accumulators).
+7. **Values thread like the interpreter's `eval_body`**: every statement
+   updates the running value (`Unit` for non-value statements); an
+   explicit `return` ends the list. Previously stale values leaked
+   through trailing `let`s.
+8. **Structural equality/comparison** (`icmp`) mirrors the
+   interpreter's `values_equal`/`value_cmp` (including `String`/`Char`
+   and mixed numerics); incomparable pairs are runtime errors, never
+   quiet `false`.
+9. **No silent recovery inside the VM**: unknown callees are
+   `FuncId::UNRESOLVED` and fail lookup loudly (the old `FuncId(0)`
+   fallback called an arbitrary function); list literals build `List`
+   values (the old always-`Struct` made every `for` over a literal run
+   zero iterations).
 
 Ownership metadata (native) and reference-count operations (managed)
 are represented as explicit instructions rather than implicit
 side-effects, so both backends and analysis/optimization passes can
 reason about them directly.
 
-## 5. Async Lowering — Deferred
+## 5. Async Lowering — Validation Outcome (Phase 2 record)
 
-`async`/`await`/`task` lowering to an explicit state-machine
-representation in NIR is Deferred until M1 concurrency work begins
-(CONCURRENCY.md §7); no instruction set is specified here yet.
+CONCURRENCY.md §7's state-machine hypothesis was validated against the
+real M1 NIR as Phase 2 requires — and the honest outcome is that §7 is
+too thin to validate *against*: it specifies no suspend-point shape, no
+resume dispatch, and no state representation beyond "explicit
+state-machine, implementation detail". What Phase 2 *does* establish:
+
+- No new instructions look necessary: suspend points are block splits,
+  resume is `cond_branch`/`switch` dispatch on a state tag, carried
+  state is `phi` nodes, and suspension returns are `early_return` —
+  all exercised daily by `?`/`??`/match lowering now.
+- No design work beyond that starts here: the executor, scheduler, and
+  `task` semantics belong to M4/M5 (IMPLEMENTATION_PLAN.md Phases 5–6),
+  and CONCURRENCY.md §7 stays Deferred until then. If that design ever
+  needs an instruction the §4 set cannot express, it goes through the
+  amendment process in the §4 header.
 
 ## 6. Not Yet Specified
 
-Per the design brief's explicit caution against overdesigning NIR
-early, the following are intentionally left unspecified in v0.1:
-generics monomorphization strategy vs. generic-template retention in
-NIR, exact calling-convention lowering for closures, and the precise
-instruction encoding for VM (M1) vs. native (M2) consumption. These are
-tracked as **Open** and will be specified once M1 implementation begins.
+- Generics monomorphization strategy vs. generic-template retention in
+  NIR: still Open.
+- Exact calling-convention lowering for closures: still Open
+  (`closure_new`/`closure_call` carry captures opaquely for now).
+- Builtin coverage beyond `print`: `panic`/`assert`/`to_int`/
+  `to_float`/`to_string` have no NIR representation yet — valid
+  programs using them fail only at lowering/VM time, and only with a
+  loud `UNRESOLVED` error, never silently. Owned by a future milestone
+  with the stdlib surface (M3+).
+- Nested-variant and literal *sub*patterns in match arms (e.g.
+  `Circle(0)`): valid code the lowerer rejects loudly via
+  `unimplemented!` rather than miscompiling. Owned by whoever extends
+  match lowering next.
+- Unguarded-`Bool` match guards are not verified by typeck (the
+  interpreter panics, the VM truthiness-branches): a frontend gap,
+  recorded here so it isn't rediscovered.
+- `break`/`continue` have no HIR nodes (typeck drops them): loops with
+  early exits are not representable yet. Prerequisite for real loop
+  ergonomics; tracked Open.

@@ -1185,15 +1185,26 @@ impl<'s> TypeChecker<'s> {
             BinOp::Range | BinOp::RangeInclusive => Ty::Unknown,
 
             // Coalesce `??` — left must be Option<T>, result is T.
+            // Produces the dedicated HIR `Coalesce` node (not a generic
+            // `BinOp`): NIR lowering and the interpreter both key off that
+            // node for short-circuit evaluation. Lowering `??` as a plain
+            // binary op would evaluate both sides and miscompile the merge.
             BinOp::Coalesce => {
-                match &left.ty {
+                let inner_ty = match &left.ty {
                     Ty::Option(inner) => *inner.clone(),
                     Ty::Unknown | Ty::Error => right.ty.clone(),
                     _ => {
                         // Not Option; still recover with right type.
                         right.ty.clone()
                     }
-                }
+                };
+                return TypedExpr {
+                    ty: inner_ty,
+                    kind: TypedExprKind::Coalesce {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                };
             }
         };
 

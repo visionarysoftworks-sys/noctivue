@@ -301,25 +301,37 @@ impl Vm {
                 let field_values: Vec<VmValue> = fields.iter()
                     .map(|f| self.get_value(frame, *f))
                     .collect::<Result<Vec<_>, _>>()?;
-                let name = match &ty.inner {
-                    crate::hir::types::Ty::Named(n, _) => n.clone(),
-                    _ => "unknown".to_string(),
-                };
-                let mut fields_map = HashMap::new();
-                if field_names.is_empty() {
-                    for (i, val) in field_values.into_iter().enumerate() {
-                        fields_map.insert(format!("f{}", i), val);
-                    }
-                } else {
-                    for (i, val) in field_values.into_iter().enumerate() {
-                        if i < field_names.len() {
-                            fields_map.insert(field_names[i].clone(), val);
+                // Lowering reuses StructNew for list/tuple literals (empty
+                // field_names, List/Tuple type). They must come back out as
+                // List/Tuple values — previously everything became Struct,
+                // so `ListLen` saw length 0 and every for-loop over a
+                // literal silently ran zero iterations.
+                let value = match &ty.inner {
+                    crate::hir::types::Ty::List(_) => VmValue::List(field_values),
+                    crate::hir::types::Ty::Tuple(_) => VmValue::Tuple(field_values),
+                    _ => {
+                        let name = match &ty.inner {
+                            crate::hir::types::Ty::Named(n, _) => n.clone(),
+                            _ => "unknown".to_string(),
+                        };
+                        let mut fields_map = HashMap::new();
+                        if field_names.is_empty() {
+                            for (i, val) in field_values.into_iter().enumerate() {
+                                fields_map.insert(format!("f{}", i), val);
+                            }
                         } else {
-                            fields_map.insert(format!("f{}", i), val);
+                            for (i, val) in field_values.into_iter().enumerate() {
+                                if i < field_names.len() {
+                                    fields_map.insert(field_names[i].clone(), val);
+                                } else {
+                                    fields_map.insert(format!("f{}", i), val);
+                                }
+                            }
                         }
+                        VmValue::Struct { name, fields: fields_map }
                     }
-                }
-                frame.locals[dst.0 as usize] = VmValue::Struct { name, fields: fields_map };
+                };
+                frame.locals[dst.0 as usize] = value;
             }
             Instr::FieldGet { dst, obj, field, ty: _ } => {
                 let obj_val = self.get_value(frame, *obj)?;
@@ -378,12 +390,21 @@ impl Vm {
                 };
                 frame.locals[dst.0 as usize] = tag;
             }
-            Instr::EnumPayload { dst, src, ty: _ } => {
+            Instr::EnumPayload { dst, src, index, ty: _ } => {
                 let src_val = self.get_value(frame, *src)?;
-                let payload = if let VmValue::Enum { fields, .. } = src_val {
-                    fields.get(0).cloned().unwrap_or(VmValue::Unit)
-                } else {
-                    VmValue::Unit
+                // Option/Result payloads extract just like enum-variant
+                // payloads (used by `?`-on-Err lowering to forward the
+                // original error value). Previously these fell through to
+                // Unit, silently dropping payloads.
+                let payload = match src_val {
+                    VmValue::Enum { fields, .. } => {
+                        fields.get(*index as usize).cloned().unwrap_or(VmValue::Unit)
+                    }
+                    VmValue::Option(Some(v)) => *v,
+                    VmValue::Option(None) => VmValue::Unit,
+                    VmValue::Result(Ok(v)) => *v,
+                    VmValue::Result(Err(e)) => *e,
+                    _ => VmValue::Unit,
                 };
                 frame.locals[dst.0 as usize] = payload;
             }
@@ -437,19 +458,20 @@ impl Vm {
                 frame.locals[dst.0 as usize] = VmValue::Result(Err(Box::new(v)));
             }
             Instr::TryUnwrap { dst, src, ty: _ } => {
+                // Contract: lowering guarantees the operand is Some/Ok here
+                // (`?` splits control flow *before* reaching this instruction,
+                // routing None/Err to an early return). Hitting None/Err means
+                // a lowering bug — trap loudly instead of continuing with a
+                // silent Unit, which used to produce wrong values downstream.
                 let src_val = self.get_value(frame, *src)?;
                 let result = match src_val {
                     VmValue::Option(Some(v)) => *v,
                     VmValue::Option(None) => {
-                        frame.locals[dst.0 as usize] = VmValue::Unit;
-                        frame.pc += 1;
-                        return Ok(());
+                        return Err(VmError::OptionUnwrapNone);
                     }
                     VmValue::Result(Ok(v)) => *v,
-                    VmValue::Result(Err(_)) => {
-                        frame.locals[dst.0 as usize] = VmValue::Unit;
-                        frame.pc += 1;
-                        return Ok(());
+                    VmValue::Result(Err(e)) => {
+                        return Err(VmError::ResultUnwrapErr(e));
                     }
                     other => {
                         return Err(VmError::TypeMismatch(format!("expected Option/Result, got {:?}", other)));
@@ -641,24 +663,64 @@ impl Vm {
     }
 
     fn icmp_values(&self, op: CmpOp, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {
+        // Mirrors the interpreter's `values_equal` / `value_cmp` exactly:
+        // structural equality for Eq/Ne (NOT just numerics — previously
+        // everything non-numeric silently compared `false`), ordering for
+        // Int/Float (mixed included), Char, and String. Anything else is a
+        // runtime error, matching the interpreter's panic — never a quiet
+        // `false`.
         let result = match (op, a, b) {
-            (CmpOp::Eq, VmValue::Int(a), VmValue::Int(b)) => a == b,
-            (CmpOp::Ne, VmValue::Int(a), VmValue::Int(b)) => a != b,
-            (CmpOp::Lt, VmValue::Int(a), VmValue::Int(b)) => a < b,
-            (CmpOp::Le, VmValue::Int(a), VmValue::Int(b)) => a <= b,
-            (CmpOp::Gt, VmValue::Int(a), VmValue::Int(b)) => a > b,
-            (CmpOp::Ge, VmValue::Int(a), VmValue::Int(b)) => a >= b,
-            (CmpOp::Eq, VmValue::Float(a), VmValue::Float(b)) => a == b,
-            (CmpOp::Ne, VmValue::Float(a), VmValue::Float(b)) => a != b,
-            (CmpOp::Lt, VmValue::Float(a), VmValue::Float(b)) => a < b,
-            (CmpOp::Le, VmValue::Float(a), VmValue::Float(b)) => a <= b,
-            (CmpOp::Gt, VmValue::Float(a), VmValue::Float(b)) => a > b,
-            (CmpOp::Ge, VmValue::Float(a), VmValue::Float(b)) => a >= b,
-            (CmpOp::Eq, VmValue::Bool(a), VmValue::Bool(b)) => a == b,
-            (CmpOp::Ne, VmValue::Bool(a), VmValue::Bool(b)) => a != b,
-            _ => false,
+            (CmpOp::Eq, x, y) => Self::values_equal(&x, &y),
+            (CmpOp::Ne, x, y) => !Self::values_equal(&x, &y),
+            (CmpOp::Lt, x, y) => Self::value_cmp(&x, &y)? == std::cmp::Ordering::Less,
+            (CmpOp::Le, x, y) => matches!(Self::value_cmp(&x, &y)?, std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
+            (CmpOp::Gt, x, y) => Self::value_cmp(&x, &y)? == std::cmp::Ordering::Greater,
+            (CmpOp::Ge, x, y) => matches!(Self::value_cmp(&x, &y)?, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
         };
         Ok(VmValue::Bool(result))
+    }
+
+    fn values_equal(a: &VmValue, b: &VmValue) -> bool {
+        match (a, b) {
+            (VmValue::Int(x), VmValue::Int(y)) => x == y,
+            (VmValue::Float(x), VmValue::Float(y)) => x == y,
+            (VmValue::Bool(x), VmValue::Bool(y)) => x == y,
+            (VmValue::Char(x), VmValue::Char(y)) => x == y,
+            (VmValue::String(x), VmValue::String(y)) => x == y,
+            (VmValue::Unit, VmValue::Unit) => true,
+            (VmValue::Enum { variant: va, fields: fa, .. }, VmValue::Enum { variant: vb, fields: fb, .. }) => {
+                va == vb && fa.len() == fb.len() && fa.iter().zip(fb.iter()).all(|(x, y)| Self::values_equal(x, y))
+            }
+            (VmValue::Option(x), VmValue::Option(y)) => match (x, y) {
+                (None, None) => true,
+                (Some(x), Some(y)) => Self::values_equal(x, y),
+                _ => false,
+            },
+            (VmValue::List(x), VmValue::List(y)) => {
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(x, y)| Self::values_equal(x, y))
+            }
+            // NOTE: mirrors the interpreter, which has no Result arm either
+            // (Result == Result is always false there too).
+            _ => false,
+        }
+    }
+
+    fn value_cmp(a: &VmValue, b: &VmValue) -> Result<std::cmp::Ordering, VmError> {
+        match (a, b) {
+            (VmValue::Int(x), VmValue::Int(y)) => Ok(x.cmp(y)),
+            (VmValue::Float(x), VmValue::Float(y)) => {
+                x.partial_cmp(y).ok_or_else(|| VmError::TypeMismatch("comparison of NaN".to_string()))
+            }
+            (VmValue::Float(x), VmValue::Int(y)) => {
+                (*x).partial_cmp(&(*y as f64)).ok_or_else(|| VmError::TypeMismatch("comparison of NaN".to_string()))
+            }
+            (VmValue::Int(x), VmValue::Float(y)) => {
+                (*x as f64).partial_cmp(y).ok_or_else(|| VmError::TypeMismatch("comparison of NaN".to_string()))
+            }
+            (VmValue::Char(x), VmValue::Char(y)) => Ok(x.cmp(y)),
+            (VmValue::String(x), VmValue::String(y)) => Ok(x.cmp(y)),
+            _ => Err(VmError::TypeMismatch("values are not comparable".to_string())),
+        }
     }
 
     fn fcmp_values(&self, op: CmpOp, a: VmValue, b: VmValue) -> Result<VmValue, VmError> {

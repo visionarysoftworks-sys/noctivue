@@ -107,6 +107,24 @@ advanced sandboxing.
 - Adversarial disambiguation fixtures from Phase 0 still hold under
   NIR lowering (no new ambiguity introduced by mode-tagging).
 
+**Completion record (M1):** met, with receipts.
+- Differential coverage: `noct-cli/tests/differential.rs` (16 CLI
+  cases — byte-identical stdout, exit codes, stderr over `run` vs
+  `run-vm`, incl. print-ordering, `??` short-circuit observability,
+  `?`/`Err` propagation, match dispatch, loops, fixtures) and
+  `compiler/src/nir/vm_tests.rs` (10 unit cases incl. the single-IR
+  mode-tag shape test). All `#[ignore]`d repros resolved and un-ignored.
+- `interp/` fate: **kept as differential-testing oracle** (see
+  `interp/src/lib.rs` header) — closes the Open item, retires nothing.
+- Instruction set frozen in NIR.md §4 (with the §4.1 lowering
+  discipline and §5 async-validation outcome recorded there).
+- Known boundaries carried forward, not hidden: runtime-failure stderr
+  *text* parity (HIR has no spans for the VM to cite — needs unified
+  runtime diagnostics); builtins beyond `print` unrepresentable (loud
+  `UNRESOLVED`, never silent); nested-variant/literal match
+  subpatterns rejected loudly; `break`/`continue` have no HIR nodes;
+  match-guard `Bool` unchecked by typeck (all in NIR.md §6).
+
 ## 5. Phase 3 — M2: Native Compilation (Cranelift)
 
 **Preconditions:** Phase 2 exit criteria met.

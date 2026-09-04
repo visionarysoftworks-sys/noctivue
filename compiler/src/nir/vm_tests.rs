@@ -84,29 +84,33 @@ main():
         );
     }
 
-    /// Repro A from Task 2 - ?? operator produces wrong value
+    /// `??` with a None left side yields the right side's value.
     #[test]
-    #[ignore = "see Task 2 / NIR-??: Coalesce produces silently wrong value"]
     fn differential_repro_a_coalesce() {
         let source = r#"
 main():
     let x: Option<Int> = None
-    let y = x ?? 5
-    let _ = y
+    x ?? 5
 "#;
-        // Interpreter: y = 5
-        // VM: produces wrong value
         let result = run_vm(source);
-        assert!(
-            result.result.is_ok(),
-            "VM should handle ?? operator correctly: {:?}",
-            result.result
-        );
+        assert_eq!(result.result.as_deref(), Ok("5"), "None ?? 5 must be 5");
     }
 
-    /// Repro B from Task 2 - ? doesn't propagate, it crashes
+    /// `??` with a Some left side yields the unwrapped payload (not the
+    /// Option wrapper) — and must not evaluate the right side observably.
     #[test]
-    #[ignore = "see Task 2 / NIR-?: Try operator doesn't propagate None"]
+    fn differential_coalesce_some_yields_payload() {
+        let source = r#"
+main():
+    let x: Option<Int> = Some(3)
+    x ?? 5
+"#;
+        let result = run_vm(source);
+        assert_eq!(result.result.as_deref(), Ok("3"), "Some(3) ?? 5 must be 3");
+    }
+
+    /// `?` propagates None out of the enclosing function as None.
+    #[test]
     fn differential_repro_b_try_propagate() {
         let source = r#"
 find_user(id: Int) -> Option<Int>:
@@ -120,24 +124,53 @@ get(id: Int) -> Option<Int>:
     Some(x + 1)
 
 main():
-    let a = get(1)
-    let b = get(99)
-    let _ = a
-    let _ = b
+    get(99)
 "#;
-        // Interpreter: get(99) returns None cleanly
-        // VM: hard errors with OptionUnwrapNone
         let result = run_vm(source);
-        assert!(
-            result.result.is_ok(),
-            "VM should propagate None from ? operator: {:?}",
-            result.result
-        );
+        assert_eq!(result.result.as_deref(), Ok("None"), "get(99) must be None");
+    }
+
+    /// `?` on Some unwraps and continues in the same function.
+    #[test]
+    fn differential_try_some_continues() {
+        let source = r#"
+find_user(id: Int) -> Option<Int>:
+    if id == 1:
+        Some(id)
+    else:
+        None
+
+get(id: Int) -> Option<Int>:
+    let x = find_user(id)?
+    Some(x + 1)
+
+main():
+    get(1)
+"#;
+        let result = run_vm(source);
+        assert_eq!(result.result.as_deref(), Ok("Some(2)"), "get(1) must be Some(2)");
+    }
+
+    /// `?` on Err forwards the original error value (not Unit, not a trap).
+    #[test]
+    fn differential_try_err_forwards_payload() {
+        let source = r#"
+fail() -> Result<Int, String>:
+    Err("boom")
+
+get2() -> Result<Int, String>:
+    let x = fail()?
+    Ok(x + 1)
+
+main():
+    get2()
+"#;
+        let result = run_vm(source);
+        assert_eq!(result.result.as_deref(), Ok("Err(boom)"), "Err must propagate unchanged");
     }
 
     /// Test that m0_demo.nv runs through VM without crashing
     #[test]
-    #[ignore = "see Task 2 / NIR-?: Various lowering issues in complex programs"]
     fn differential_m0_demo() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest.parent().expect("workspace root");
@@ -156,7 +189,6 @@ main():
 
     /// Test dashboard_nonui.nv fixture
     #[test]
-    #[ignore = "see Task 2 / NIR-?: Various lowering issues"]
     fn differential_dashboard_nonui() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest.parent().expect("workspace root");
@@ -171,6 +203,105 @@ main():
             "dashboard_nonui.nv should run in VM: {:?}",
             result.result
         );
+    }
+
+
+
+    /// Single-IR validation (NIR.md §2, DECISIONS.md Issue 6): lowering
+    /// the same HIR under `native` and `managed` tags must produce the
+    /// same instruction *shape* — mode may only affect memory-operation
+    /// selection, never fork the instruction set. Any future mode-specific
+    /// lowering rule that changes shape outside memory ops trips this.
+    #[test]
+    fn mode_tag_shape_parity() {
+        use crate::nir::instr::Instr;
+        use crate::nir::types::Mode;
+
+        fn is_memory_op(instr: &Instr) -> bool {
+            matches!(
+                instr,
+                Instr::StackAlloc { .. }
+                    | Instr::Load { .. }
+                    | Instr::Store { .. }
+                    | Instr::Move { .. }
+                    | Instr::HeapAlloc { .. }
+                    | Instr::ArcRetain { .. }
+                    | Instr::ArcRelease { .. }
+                    | Instr::WeakLoad { .. }
+            )
+        }
+
+        let source = r#"
+Point:
+    x: Int
+    y: Int
+
+fn dist_squared(p: Point) -> Int:
+    let dx = p.x
+    let total = dx + p.y
+    total
+
+main():
+    let p = Point { x: 3, y: 4 }
+    print("{dist_squared(p)}")
+"#;
+        let (hir_module, sink) = source_to_hir(source);
+        assert!(!sink.has_errors(), "frontend errors: {:?}", sink.diagnostics());
+
+        let native =
+            LoweringContext::new(hir_module.clone()).with_mode(Mode::Native).lower_module();
+        let managed =
+            LoweringContext::new(hir_module).with_mode(Mode::Managed).lower_module();
+
+        assert_eq!(native.functions.len(), managed.functions.len(), "function count");
+        for (nf, mf) in native.functions.iter().zip(managed.functions.iter()) {
+            assert_eq!(nf.name, mf.name);
+            assert_eq!(nf.sig.mode, Mode::Native);
+            assert_eq!(mf.sig.mode, Mode::Managed);
+            assert_eq!(nf.blocks.len(), mf.blocks.len(), "block count in {}", nf.name);
+            for (nb, mb) in nf.blocks.iter().zip(mf.blocks.iter()) {
+                assert_eq!(nb.id, mb.id, "block order in {}", nf.name);
+                assert_eq!(
+                    nb.instrs.len(),
+                    mb.instrs.len(),
+                    "instr count in {} block{}",
+                    nf.name,
+                    nb.id.0
+                );
+                for (ni, mi) in nb.instrs.iter().zip(mb.instrs.iter()) {
+                    // Same shape everywhere except memory ops, which are
+                    // explicitly allowed to diverge by mode.
+                    if is_memory_op(ni) || is_memory_op(mi) {
+                        assert!(
+                            is_memory_op(ni) && is_memory_op(mi),
+                            "memory/non-memory divergence in {} block{}: {:?} vs {:?}",
+                            nf.name,
+                            nb.id.0,
+                            ni,
+                            mi
+                        );
+                    } else {
+                        assert_eq!(
+                            std::mem::discriminant(ni),
+                            std::mem::discriminant(mi),
+                            "instruction shape divergence in {} block{}: {:?} vs {:?}",
+                            nf.name,
+                            nb.id.0,
+                            ni,
+                            mi
+                        );
+                    }
+                }
+                // Terminators must match exactly (control flow is mode-free).
+                assert_eq!(
+                    nb.terminator.as_ref().map(std::mem::discriminant),
+                    mb.terminator.as_ref().map(std::mem::discriminant),
+                    "terminator divergence in {} block{}",
+                    nf.name,
+                    nb.id.0
+                );
+            }
+        }
     }
 
     /// Test simple_vm_test.nv fixture
