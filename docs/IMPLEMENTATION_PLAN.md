@@ -108,7 +108,7 @@ advanced sandboxing.
   NIR lowering (no new ambiguity introduced by mode-tagging).
 
 **Completion record (M1):** met, with receipts.
-- Differential coverage: `noct-cli/tests/differential.rs` (16 CLI
+- Differential coverage: `noct-cli/tests/differential.rs` (22 CLI
   cases — byte-identical stdout, exit codes, stderr over `run` vs
   `run-vm`, incl. print-ordering, `??` short-circuit observability,
   `?`/`Err` propagation, match dispatch, loops, fixtures) and

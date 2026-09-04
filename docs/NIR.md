@@ -137,6 +137,27 @@ Every lowering path must uphold these; the differential suite
    values (the old always-`Struct` made every `for` over a literal run
    zero iterations).
 
+### 4.1 Control-flow discipline (load-bearing invariants) — Amendment (2026-09-04)
+
+Item 1 ("every reachable block is terminated... terminate dead blocks
+anyway") is extended to cover Phi completeness explicitly, since the
+VM's original Phi handler defaulted to `Unit` on an incomplete
+`incoming` list rather than trapping — the same failure signature this
+section already warns about ("most of them execute without errors"),
+just not yet listed as its own numbered rule:
+
+10. **Every Phi's `incoming` list must cover every actual predecessor
+    that can reach it.** A Phi reached via a predecessor block with no
+    corresponding `incoming` entry — or reached with no predecessor
+    recorded at all — is a lowering bug. The VM traps
+    (`VmError::MalformedCfg`) rather than defaulting to `Unit`, matching
+    `try_unwrap`'s existing "no silent recovery" discipline (item 3).
+    Any future control-flow construct that adds a new edge into an
+    existing merge block MUST add the corresponding `incoming` entry at
+    the same time — this is the concrete failure mode `break`/`continue`
+    lowering (NIR.md §6) needs to watch for once implemented, since it
+    adds new edges into existing loop-exit merge blocks.
+
 Ownership metadata (native) and reference-count operations (managed)
 are represented as explicit instructions rather than implicit
 side-effects, so both backends and analysis/optimization passes can

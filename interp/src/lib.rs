@@ -16,7 +16,7 @@
 //! **DECIDED: kept as the differential-testing oracle** (the second
 //! option; closes the Open item in SCAFFOLD.md §3 and
 //! IMPLEMENTATION_PLAN.md §4). Rationale, from Phase 2 evidence:
-//! - The `noct-cli/tests/differential.rs` harness (16 CLI cases, exact
+//! - The `noct-cli/tests/differential.rs` harness (22 CLI cases, exact
 //!   stdout/exit/stderr) plus `compiler/src/nir/vm_tests.rs` (10 unit
 //!   cases) treat this interpreter as ground truth. Every real lowering
 //!   bug found in Phase 2 (silent `??`, non-propagating `?`, misordered
@@ -645,6 +645,7 @@ impl Interpreter {
                         let closure_expr = compiler::hir::items::TypedExpr {
                             kind: (*body).kind.clone(),
                             ty: compiler::hir::Ty::Unknown,
+                            span: (*body).span.clone(),
                         };
                         self.eval_expr(&closure_expr, &mut closure_scope, sink)
                     }

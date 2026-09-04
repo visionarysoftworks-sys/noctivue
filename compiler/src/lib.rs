@@ -7,6 +7,7 @@
 
 pub mod analysis;
 pub mod ast;
+pub mod backends;
 pub mod diagnostics;
 pub mod hir;
 pub mod lexer;

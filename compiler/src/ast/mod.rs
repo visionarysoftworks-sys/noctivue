@@ -373,6 +373,26 @@ pub enum Expr {
     Spread(SpreadExpr),
 }
 
+impl Expr {
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Literal(_, s) | Expr::Ident(_, s) => s.clone(),
+            Expr::Call(e) => e.span.clone(),
+            Expr::Member(e) => e.span.clone(),
+            Expr::Index(e) => e.span.clone(),
+            Expr::BinOp(e) => e.span.clone(),
+            Expr::UnaryOp(e) => e.span.clone(),
+            Expr::Try(e) => e.span.clone(),
+            Expr::Range(e) => e.span.clone(),
+            Expr::StringInterp(e) => e.span.clone(),
+            Expr::StructLit(e) => e.span.clone(),
+            Expr::ListLit(e) => e.span.clone(),
+            Expr::Closure(e) => e.span.clone(),
+            Expr::Spread(e) => e.span.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CallExpr {
     pub callee: Box<Expr>,

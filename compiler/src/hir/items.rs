@@ -4,6 +4,7 @@
 //! has been confirmed to exist in some scope (or `Ty::Error` has been emitted).
 
 use super::types::Ty;
+use crate::diagnostics::Span;
 
 // ── Module ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,10 @@ pub struct TypedStmt {
     /// The statement's "type" — generally `Unit` for statements that produce
     /// no value, but used for expression-statements and for diagnostic recovery.
     pub ty: Ty,
+    /// Source span of this statement, threaded from the AST. Needed so later
+    /// passes (borrow checker, VM-trap diagnostics) can cite a location
+    /// without re-deriving one — HIR previously carried none at all.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +109,9 @@ pub struct TypedArm {
     pub guard: Option<TypedExpr>,
     pub body: Vec<TypedStmt>,
     pub ty: Ty,
+    /// Span of the arm (pattern + `=>`/`:` + body), for guard-type-mismatch
+    /// diagnostics and future exhaustiveness warnings.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +138,8 @@ pub struct TypedExpr {
     pub kind: TypedExprKind,
     /// The resolved type of this expression.
     pub ty: Ty,
+    /// Source span, threaded from the AST. See `TypedStmt::span`.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

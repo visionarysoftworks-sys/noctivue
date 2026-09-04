@@ -364,7 +364,7 @@ impl<'s> TypeChecker<'s> {
                             self.emit_mismatch(
                                 &return_ty,
                                 &last.ty,
-                                &dummy_span(),
+                                &last.span,
                                 "implicit return value",
                             );
                         }
@@ -374,19 +374,21 @@ impl<'s> TypeChecker<'s> {
             }
             FunctionBody::Expr(expr) => {
                 // Single-expression body — treat as `return expr`.
+                let expr_span = expr.span();
                 let typed_expr = self.infer_expr(expr, &mut env);
                 // Check return type compatibility.
                 if !typed_expr.ty.compatible_with(&return_ty) {
                     self.emit_mismatch(
                         &return_ty,
                         &typed_expr.ty,
-                        &dummy_span(),
+                        &expr_span,
                         "single-expression body type",
                     );
                 }
                 vec![TypedStmt {
                     ty: typed_expr.ty.clone(),
                     kind: TypedStmtKind::Return(Some(typed_expr)),
+                    span: expr_span,
                 }]
             }
         };
@@ -428,6 +430,7 @@ impl<'s> TypeChecker<'s> {
                         ty: bind_ty,
                         value: value_expr,
                     },
+                    span: ls.span.clone(),
                 })
             }
 
@@ -451,6 +454,7 @@ impl<'s> TypeChecker<'s> {
                         ty: bind_ty,
                         value: value_expr,
                     },
+                    span: vs.span.clone(),
                 })
             }
 
@@ -466,6 +470,7 @@ impl<'s> TypeChecker<'s> {
                         ty: bind_ty,
                         value: value_expr,
                     },
+                    span: ss.span.clone(),
                 })
             }
 
@@ -481,6 +486,7 @@ impl<'s> TypeChecker<'s> {
                         ty: bind_ty,
                         value: value_expr,
                     },
+                    span: ds.span.clone(),
                 })
             }
 
@@ -501,6 +507,7 @@ impl<'s> TypeChecker<'s> {
                 Some(TypedStmt {
                     ty: ret_ty,
                     kind: TypedStmtKind::Return(typed_val),
+                    span: rs.span.clone(),
                 })
             }
 
@@ -514,14 +521,16 @@ impl<'s> TypeChecker<'s> {
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::Assign { target, value },
+                    span: as_.span.clone(),
                 })
             }
 
             // ── bare expression statement ────────────────────────────────────
             Stmt::Expr(expr) => {
+                let span = expr.span();
                 let typed = self.infer_expr(expr, env);
                 let ty = typed.ty.clone();
-                Some(TypedStmt { ty, kind: TypedStmtKind::Expr(typed) })
+                Some(TypedStmt { ty, kind: TypedStmtKind::Expr(typed), span })
             }
 
             // ── if ───────────────────────────────────────────────────────────
@@ -556,6 +565,7 @@ impl<'s> TypeChecker<'s> {
                                 then_body: ei_body,
                                 else_body: None,
                             },
+                            span: is_.span.clone(),
                         });
                     }
                     if let Some(else_block) = &is_.else_block {
@@ -571,6 +581,7 @@ impl<'s> TypeChecker<'s> {
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::If { condition: cond, then_body, else_body },
+                    span: is_.span.clone(),
                 })
             }
 
@@ -585,6 +596,7 @@ impl<'s> TypeChecker<'s> {
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::While { condition: cond, body },
+                    span: ws.span.clone(),
                 })
             }
 
@@ -592,7 +604,7 @@ impl<'s> TypeChecker<'s> {
             Stmt::Loop(ls) => {
                 let mut child = env.child();
                 let body = self.check_block(&ls.body, &mut child);
-                Some(TypedStmt { ty: Ty::Unit, kind: TypedStmtKind::Loop { body } })
+                Some(TypedStmt { ty: Ty::Unit, kind: TypedStmtKind::Loop { body }, span: ls.span.clone() })
             }
 
             // ── for ──────────────────────────────────────────────────────────
@@ -613,6 +625,7 @@ impl<'s> TypeChecker<'s> {
                         iterable: iter_expr,
                         body,
                     },
+                    span: fs.span.clone(),
                 })
             }
 
@@ -627,6 +640,7 @@ impl<'s> TypeChecker<'s> {
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::Match { scrutinee, arms },
+                    span: ms.span.clone(),
                 })
             }
 
@@ -683,14 +697,15 @@ impl<'s> TypeChecker<'s> {
         let body = match &arm.body {
             MatchBody::Block(block) => self.check_block(block, &mut arm_env),
             MatchBody::Expr(expr) => {
+                let span = expr.span();
                 let typed = self.infer_expr(expr, &mut arm_env);
                 let ty = typed.ty.clone();
-                vec![TypedStmt { ty, kind: TypedStmtKind::Expr(typed) }]
+                vec![TypedStmt { ty, kind: TypedStmtKind::Expr(typed), span }]
             }
         };
 
         let arm_ty = body.last().map(|s| s.ty.clone()).unwrap_or(Ty::Unit);
-        TypedArm { pattern, guard, body, ty: arm_ty }
+        TypedArm { pattern, guard, body, ty: arm_ty, span: arm.span.clone() }
     }
 
     fn check_pattern(
@@ -771,7 +786,7 @@ impl<'s> TypeChecker<'s> {
     fn infer_expr(&mut self, expr: &Expr, env: &mut LocalEnv) -> TypedExpr {
         match expr {
             // ── Literals ─────────────────────────────────────────────────────
-            Expr::Literal(lit, _) => self.infer_literal(lit),
+            Expr::Literal(lit, span) => self.infer_literal(lit, span),
 
             // ── Identifiers ──────────────────────────────────────────────────
             Expr::Ident(name, span) => {
@@ -780,31 +795,35 @@ impl<'s> TypeChecker<'s> {
                     return TypedExpr {
                         ty: Ty::Option(Box::new(Ty::Unknown)),
                         kind: TypedExprKind::None,
+                        span: span.clone(),
                     };
                 }
 
                 if let Some(ty) = env.lookup(name) {
-                    TypedExpr { ty: ty.clone(), kind: TypedExprKind::Ident(name.clone()) }
+                    TypedExpr { ty: ty.clone(), kind: TypedExprKind::Ident(name.clone()), span: span.clone() }
                 } else if let Some((params, ret)) = self.fn_sigs.get(name).cloned() {
                     TypedExpr {
                         ty: Ty::Fn(params, Box::new(ret)),
                         kind: TypedExprKind::Ident(name.clone()),
+                        span: span.clone(),
                     }
                 } else if let Some(TypeDef::Enum(_variants)) = self.type_defs.get(name.as_str()) {
                     // This is an enum type name used as a value (not a variant)
                     TypedExpr {
                         ty: Ty::Named(name.clone(), Vec::new()),
                         kind: TypedExprKind::Ident(name.clone()),
+                        span: span.clone(),
                     }
                 } else if let Some((enum_name, payload_tys)) = self.enum_variants.get(name).cloned() {
                     // Payload-less enum variant - it's a value of the enum type
                     TypedExpr {
                         ty: Ty::Named(enum_name, payload_tys),
                         kind: TypedExprKind::Ident(name.clone()),
+                        span: span.clone(),
                     }
                 } else {
                     self.emit_unknown_ident(name, span);
-                    TypedExpr { ty: Ty::Error, kind: TypedExprKind::Ident(name.clone()) }
+                    TypedExpr { ty: Ty::Error, kind: TypedExprKind::Ident(name.clone()), span: span.clone() }
                 }
             }
 
@@ -821,6 +840,7 @@ impl<'s> TypeChecker<'s> {
                         object: Box::new(obj),
                         field: me.field.clone(),
                     },
+                    span: me.span.clone(),
                 }
             }
 
@@ -839,6 +859,7 @@ impl<'s> TypeChecker<'s> {
                         object: Box::new(obj),
                         index: Box::new(idx),
                     },
+                    span: ie.span.clone(),
                 }
             }
 
@@ -859,6 +880,7 @@ impl<'s> TypeChecker<'s> {
                         op: uo.op.clone(),
                         operand: Box::new(operand),
                     },
+                    span: uo.span.clone(),
                 }
             }
 
@@ -869,11 +891,13 @@ impl<'s> TypeChecker<'s> {
                     TypedExpr {
                         ty: unwrapped,
                         kind: TypedExprKind::Try(Box::new(inner)),
+                        span: te.span.clone(),
                     }
                 } else if inner.ty.is_error() || inner.ty.is_unknown() {
                     TypedExpr {
                         ty: Ty::Unknown,
                         kind: TypedExprKind::Try(Box::new(inner)),
+                        span: te.span.clone(),
                     }
                 } else {
                     self.sink.emit(
@@ -884,7 +908,7 @@ impl<'s> TypeChecker<'s> {
                         .with_span(te.span.clone(), "here")
                         .with_code("E0203"),
                     );
-                    TypedExpr { ty: Ty::Error, kind: TypedExprKind::Try(Box::new(inner)) }
+                    TypedExpr { ty: Ty::Error, kind: TypedExprKind::Try(Box::new(inner)), span: te.span.clone() }
                 }
             }
 
@@ -900,7 +924,7 @@ impl<'s> TypeChecker<'s> {
                         }
                     })
                     .collect();
-                TypedExpr { ty: Ty::String, kind: TypedExprKind::StringInterp(parts) }
+                TypedExpr { ty: Ty::String, kind: TypedExprKind::StringInterp(parts), span: si.span.clone() }
             }
 
             // ── Range ─────────────────────────────────────────────────────────
@@ -914,6 +938,7 @@ impl<'s> TypeChecker<'s> {
                         end: Box::new(end),
                         inclusive: re.inclusive,
                     },
+                    span: re.span.clone(),
                 }
             }
 
@@ -938,16 +963,19 @@ impl<'s> TypeChecker<'s> {
                         name: sl.name.clone(),
                         fields,
                     },
+                    span: sl.span.clone(),
                 }
             }
 
             // ── Spread expression: `...expr` ────────────────────────────────
             Expr::Spread(spread) => {
                 let expr = self.infer_expr(&spread.expr, env);
+                let span = spread.span.clone();
                 // Spread propagates the inner expression's type
                 TypedExpr {
                     ty: expr.ty.clone(),
                     kind: TypedExprKind::Spread(Box::new(expr)),
+                    span,
                 }
             }
 
@@ -963,6 +991,7 @@ impl<'s> TypeChecker<'s> {
                 TypedExpr {
                     ty: Ty::List(Box::new(elem_ty)),
                     kind: TypedExprKind::List(elements),
+                    span: ll.span.clone(),
                 }
             }
 
@@ -992,27 +1021,28 @@ impl<'s> TypeChecker<'s> {
                         params: cl.params.clone(),
                         body: Box::new(body_expr),
                     },
+                    span: cl.span.clone(),
                 }
             }
         }
     }
 
-    fn infer_literal(&self, lit: &ast::Literal) -> TypedExpr {
+    fn infer_literal(&self, lit: &ast::Literal, span: &Span) -> TypedExpr {
         match lit {
             ast::Literal::Int(v) => {
-                TypedExpr { ty: Ty::Int, kind: TypedExprKind::IntLit(*v) }
+                TypedExpr { ty: Ty::Int, kind: TypedExprKind::IntLit(*v), span: span.clone() }
             }
             ast::Literal::Float(v) => {
-                TypedExpr { ty: Ty::Float, kind: TypedExprKind::FloatLit(*v) }
+                TypedExpr { ty: Ty::Float, kind: TypedExprKind::FloatLit(*v), span: span.clone() }
             }
             ast::Literal::Bool(v) => {
-                TypedExpr { ty: Ty::Bool, kind: TypedExprKind::BoolLit(*v) }
+                TypedExpr { ty: Ty::Bool, kind: TypedExprKind::BoolLit(*v), span: span.clone() }
             }
             ast::Literal::Char(v) => {
-                TypedExpr { ty: Ty::Char, kind: TypedExprKind::CharLit(*v) }
+                TypedExpr { ty: Ty::Char, kind: TypedExprKind::CharLit(*v), span: span.clone() }
             }
             ast::Literal::String(v) => {
-                TypedExpr { ty: Ty::String, kind: TypedExprKind::StringLit(v.clone()) }
+                TypedExpr { ty: Ty::String, kind: TypedExprKind::StringLit(v.clone()), span: span.clone() }
             }
         }
     }
@@ -1031,11 +1061,13 @@ impl<'s> TypeChecker<'s> {
                         .unwrap_or_else(|| TypedExpr {
                             ty: Ty::Unknown,
                             kind: TypedExprKind::Ident("_".into()),
+                            span: call.span.clone(),
                         });
                     let inner_ty = arg.ty.clone();
                     return TypedExpr {
                         ty: Ty::Option(Box::new(inner_ty)),
                         kind: TypedExprKind::Some(Box::new(arg)),
+                        span: call.span.clone(),
                     };
                 }
                 "Ok" => {
@@ -1046,11 +1078,13 @@ impl<'s> TypeChecker<'s> {
                         .unwrap_or_else(|| TypedExpr {
                             ty: Ty::Unknown,
                             kind: TypedExprKind::Ident("_".into()),
+                            span: call.span.clone(),
                         });
                     let inner_ty = arg.ty.clone();
                     return TypedExpr {
                         ty: Ty::Result(Box::new(inner_ty), Box::new(Ty::Unknown)),
                         kind: TypedExprKind::Ok(Box::new(arg)),
+                        span: call.span.clone(),
                     };
                 }
                 "Err" => {
@@ -1061,11 +1095,13 @@ impl<'s> TypeChecker<'s> {
                         .unwrap_or_else(|| TypedExpr {
                             ty: Ty::Unknown,
                             kind: TypedExprKind::Ident("_".into()),
+                            span: call.span.clone(),
                         });
                     let err_ty = arg.ty.clone();
                     return TypedExpr {
                         ty: Ty::Result(Box::new(Ty::Unknown), Box::new(err_ty)),
                         kind: TypedExprKind::Err(Box::new(arg)),
+                        span: call.span.clone(),
                     };
                 }
                 _ => {}
@@ -1118,6 +1154,7 @@ impl<'s> TypeChecker<'s> {
         TypedExpr {
             ty: ret_ty,
             kind: TypedExprKind::Call { callee: Box::new(callee), args },
+            span: call.span.clone(),
         }
     }
 
@@ -1204,6 +1241,7 @@ impl<'s> TypeChecker<'s> {
                         left: Box::new(left),
                         right: Box::new(right),
                     },
+                    span: bo.span.clone(),
                 };
             }
         };
@@ -1215,6 +1253,7 @@ impl<'s> TypeChecker<'s> {
                 left: Box::new(left),
                 right: Box::new(right),
             },
+            span: bo.span.clone(),
         }
     }
 
@@ -1345,14 +1384,6 @@ impl LocalEnv {
         }
         None
     }
-}
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
-
-/// A zero-length span used when no source position is available (single-expr
-/// function bodies, synthetic nodes).
-fn dummy_span() -> Span {
-    Span { start: 0, end: 0 }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

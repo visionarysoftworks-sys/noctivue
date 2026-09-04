@@ -186,6 +186,43 @@ fn coalesce_none_evaluates_rhs() {
 }
 
 #[test]
+fn logical_and_false_false() {
+    // The specific corner where the old `icmp eq` catch-all diverged from
+    // correct `&&` semantics: eq(false,false) = true, but false&&false = false.
+    check_source(
+        "and_false_false",
+        "main():\n    let a = false\n    let b = false\n    print(\"{a && b}\")\n",
+    );
+}
+
+#[test]
+fn logical_or_false_false() {
+    // Same corner for `||`: eq(false,false) = true, but false||false = false.
+    check_source(
+        "or_false_false",
+        "main():\n    let a = false\n    let b = false\n    print(\"{a || b}\")\n",
+    );
+}
+
+#[test]
+fn logical_and_short_circuits() {
+    // RHS must NOT evaluate when LHS is false (no "rhs" on stdout).
+    check_source(
+        "and_short_circuit",
+        "fn eff() -> Bool:\n    print(\"rhs\")\n    true\n\nmain():\n    let a = false\n    print(\"{a && eff()}\")\n",
+    );
+}
+
+#[test]
+fn logical_or_short_circuits() {
+    // RHS must NOT evaluate when LHS is true (no "rhs" on stdout).
+    check_source(
+        "or_short_circuit",
+        "fn eff() -> Bool:\n    print(\"rhs\")\n    false\n\nmain():\n    let a = true\n    print(\"{a || eff()}\")\n",
+    );
+}
+
+#[test]
 fn try_propagates_and_prints() {
     check_source(
         "try_print",

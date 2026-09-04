@@ -492,20 +492,28 @@ impl Vm {
                 frame.locals[dst.0 as usize] = VmValue::String(s);
             }
             Instr::Phi { dst, incoming, ty: _ } => {
-                let prev = frame.prev_block;
-                let result = if let Some(p) = prev {
-                    incoming.iter()
-                        .find(|(_, b)| *b == p)
-                        .map(|(v, _)| self.get_value(frame, *v))
-                        .transpose()?
-                        .unwrap_or(VmValue::Unit)
-                } else {
-                    incoming.last()
-                        .map(|(v, _)| self.get_value(frame, *v))
-                        .transpose()?
-                        .unwrap_or(VmValue::Unit)
-                };
-                frame.locals[dst.0 as usize] = result;
+                // Contract: a Phi only exists at a merge point that by construction
+                // has been reached via some predecessor recorded in `prev_block`,
+                // and every predecessor that can reach this Phi must have a
+                // corresponding `incoming` entry (this is `lowering.rs`'s job to
+                // guarantee — every merge-block Phi's `incoming` vec is built
+                // alongside the branches that target it). Previously this defaulted
+                // to `VmValue::Unit` in both failure modes below, silently
+                // continuing with wrong data instead of surfacing the lowering bug —
+                // exactly the failure signature NIR.md §4.1 warns "most of them
+                // execute without errors." Trap loudly instead, matching
+                // `TryUnwrap`'s existing discipline.
+                let prev = frame.prev_block.ok_or_else(|| {
+                    VmError::MalformedCfg(format!(
+                        "phi {} reached with no predecessor block recorded", dst
+                    ))
+                })?;
+                let (val, _) = incoming.iter().find(|(_, b)| *b == prev).ok_or_else(|| {
+                    VmError::MalformedCfg(format!(
+                        "phi {} has no incoming entry for predecessor {}", dst, prev
+                    ))
+                })?;
+                frame.locals[dst.0 as usize] = self.get_value(frame, *val)?;
             }
             Instr::ClosureNew { dst, func, captured, ty: _ } => {
                 let cap_vals: Vec<VmValue> = captured.iter()
@@ -784,4 +792,11 @@ pub enum VmError {
     OptionUnwrapNone,
     #[error("result unwrap on Err")]
     ResultUnwrapErr(Box<VmValue>),
+    /// A Phi (or, in the future, any other CFG-shape-dependent instruction)
+    /// was reached in a state its `incoming`/predecessor bookkeeping
+    /// doesn't cover — a lowering bug, never a valid program. Mirrors
+    /// `TryUnwrap`'s existing "trap loudly, never default" discipline,
+    /// which this variant previously lacked (see landmine (c)).
+    #[error("malformed CFG: {0}")]
+    MalformedCfg(String),
 }

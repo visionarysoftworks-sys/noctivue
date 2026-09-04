@@ -103,6 +103,79 @@ impl LoweringContext {
         id
     }
 
+    /// Lower `&&`/`||` as short-circuiting control flow, mirroring
+    /// `interp::eval_binop`'s special-cased And/Or evaluation exactly:
+    /// `&&`'s right side is evaluated only when the left is `true`; `||`'s
+    /// right side is evaluated only when the left is `false`. Both operands
+    /// must be Bool — typeck emits a mismatch otherwise but still produces
+    /// HIR, so a non-Bool operand here follows truthiness while the
+    /// interpreter panics: that divergence is confined to ill-typed
+    /// programs (see `CondBranch` truthiness vs interp strict-Bool panic).
+    ///
+    /// Shape (`is_and = true` shown; `is_and = false` swaps which branch
+    /// short-circuits and what the short-circuit constant is):
+    ///
+    ///   current:  ...; l = <left>; cond_branch l -> eval_rhs | short
+    ///   short:    short_const = const false; branch merge
+    ///   eval_rhs: rv = <right>; branch merge
+    ///   merge:    dst = phi [(short_const, short), (rv, eval_rhs)]; ...
+    fn lower_short_circuit(
+        &mut self,
+        left: &TypedExpr,
+        right: &TypedExpr,
+        is_and: bool,
+        expr: &TypedExpr,
+        nir_block: &mut crate::nir::module::Block,
+    ) -> ValueId {
+        let left_val = self.lower_expr(left, nir_block);
+
+        let short_id = self.module.new_block_id();
+        let eval_rhs_id = self.module.new_block_id();
+        let merge_id = self.module.new_block_id();
+
+        let dst = self.fresh_value();
+
+        let mut short = crate::nir::module::Block::new(short_id);
+        let short_const = self.fresh_value();
+        short.add_instr(Instr::Const {
+            dst: short_const,
+            value: ConstValue::Bool(!is_and), // && short-circuits to false, || to true
+            ty: NirTy::new(Ty::Bool, self.mode),
+        });
+        short.set_terminator(Instr::Branch { target: merge_id });
+        self.add_block_to_current_func(short);
+
+        let mut eval_rhs = crate::nir::module::Block::new(eval_rhs_id);
+        let rhs_val = self.lower_expr(right, &mut eval_rhs);
+        let eval_rhs_actual = eval_rhs.id;
+        eval_rhs.set_terminator(Instr::Branch { target: merge_id });
+        self.add_block_to_current_func(eval_rhs);
+
+        // `&&`: true takes the eval_rhs branch, false short-circuits.
+        // `||`: false takes the eval_rhs branch, true short-circuits.
+        // Uses the re-read block id: lowering `right` may itself split
+        // (nested `?`/`??`/match), swapping the temp's identity.
+        let (then_block, else_block) = if is_and {
+            (eval_rhs_actual, short_id)
+        } else {
+            (short_id, eval_rhs_actual)
+        };
+        nir_block.set_terminator(Instr::CondBranch {
+            cond: left_val,
+            then_block,
+            else_block,
+        });
+
+        let mut merge = crate::nir::module::Block::new(merge_id);
+        merge.add_instr(Instr::Phi {
+            dst,
+            incoming: vec![(short_const, short_id), (rhs_val, eval_rhs_actual)],
+            ty: NirTy::new(expr.ty.clone(), self.mode),
+        });
+        self.split_current_block(nir_block, merge);
+        dst
+    }
+
     pub fn lower_module(mut self) -> NirModule {
         let functions: Vec<Function> = self.hir_functions.drain(..).collect();
 
@@ -964,6 +1037,20 @@ impl LoweringContext {
                 });
                 dst
             }
+            // `&&` / `||` are short-circuiting (matches interp::eval_binop's explicit
+            // special-case) and MUST be lowered as control flow, not a value-level
+            // instruction — the previous catch-all silently mapped both to
+            // `icmp eq lhs, rhs`, which is wrong at (false,false) for `&&` (should be
+            // false, ICmp Eq gives true) and at (false,false) for `||` (should be
+            // false, ICmp Eq gives true). Handled before the generic arithmetic/
+            // comparison dispatch, mirroring the interpreter's eval_binop structure
+            // exactly (short-circuit check happens first there too).
+            TypedExprKind::BinOp { op: crate::ast::BinOp::And, left, right } => {
+                self.lower_short_circuit(left, right, /*is_and=*/true, expr, nir_block)
+            }
+            TypedExprKind::BinOp { op: crate::ast::BinOp::Or, left, right } => {
+                self.lower_short_circuit(left, right, /*is_and=*/false, expr, nir_block)
+            }
             TypedExprKind::BinOp { op, left, right } => {
                 let lhs = self.lower_expr(left, nir_block);
                 let rhs = self.lower_expr(right, nir_block);
@@ -985,7 +1072,8 @@ impl LoweringContext {
                     crate::ast::BinOp::Rem => nir_block.add_instr(Instr::Rem {
                         dst, lhs, rhs, ty: NirTy::new(expr.ty.clone(), self.mode)
                     }),
-                    _ => {
+                    crate::ast::BinOp::Eq | crate::ast::BinOp::Ne | crate::ast::BinOp::Lt
+                    | crate::ast::BinOp::Le | crate::ast::BinOp::Gt | crate::ast::BinOp::Ge => {
                         nir_block.add_instr(Instr::ICmp {
                             dst, op: match op {
                                 crate::ast::BinOp::Eq => CmpOp::Eq,
@@ -994,10 +1082,20 @@ impl LoweringContext {
                                 crate::ast::BinOp::Le => CmpOp::Le,
                                 crate::ast::BinOp::Gt => CmpOp::Gt,
                                 crate::ast::BinOp::Ge => CmpOp::Ge,
-                                _ => CmpOp::Eq,
+                                _ => unreachable!(),
                             }, lhs, rhs
                         });
                     }
+                    // And/Or are handled above, before this arm is ever reached.
+                    // Range/RangeInclusive as a BinOp (rather than the dedicated
+                    // ast::Expr::Range production) and Coalesce (dedicated
+                    // TypedExprKind::Coalesce, never reaches here) have no lowering
+                    // yet — fail loudly rather than silently emitting a wrong ICmp,
+                    // per NIR.md §4's "no silent recovery" discipline.
+                    other => unreachable!(
+                        "BinOp {:?} has no NIR lowering (see NIR.md §6 / landmine (b))",
+                        other
+                    ),
                 };
                 dst
             }
