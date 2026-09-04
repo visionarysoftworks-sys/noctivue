@@ -99,6 +99,22 @@ pub enum TypedStmtKind {
     For { binding: String, iterable: TypedExpr, body: Vec<TypedStmt> },
     /// `match scrutinee { … }`
     Match { scrutinee: TypedExpr, arms: Vec<TypedArm> },
+    /// `break [value]` — exits the innermost enclosing loop.
+    ///
+    /// `value`, if present, is type-checked (so errors inside it are still
+    /// caught), evaluated for side effects by lowering, and then discarded:
+    /// `while`/`loop`/`for` are statement-position constructs typed
+    /// `Ty::Unit` (they are not loop-expressions), so there is no
+    /// loop-result slot for a value to flow into. Because discarding is
+    /// silent by nature, typeck emits a warning whenever a `break` value
+    /// is present (a bare `break` needs no warning — it is fully honored).
+    /// `break` outside any loop is a hard `E0205` error, never a silent
+    /// drop — see `TypeChecker::check_stmt`'s `Stmt::Break` arm.
+    Break(Option<TypedExpr>),
+    /// `continue` — jumps to the next iteration of the innermost enclosing
+    /// loop (the loop's condition re-check / index increment, not its body
+    /// start). Like `break`, rejected with `E0205` outside a loop.
+    Continue,
 }
 
 // ── Match arms ────────────────────────────────────────────────────────────────

@@ -122,7 +122,8 @@ advanced sandboxing.
   *text* parity (HIR has no spans for the VM to cite — needs unified
   runtime diagnostics); builtins beyond `print` unrepresentable (loud
   `UNRESOLVED`, never silent); nested-variant/literal match
-  subpatterns rejected loudly; `break`/`continue` have no HIR nodes;
+  subpatterns rejected loudly; `break`/`continue` lowered (E0205 outside
+  loops, value-discard warning; labeled breaks still open);
   match-guard `Bool` unchecked by typeck (all in NIR.md §6).
 
 ## 5. Phase 3 — M2: Native Compilation (Cranelift)

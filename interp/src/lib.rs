@@ -124,6 +124,13 @@ pub enum RuntimeError {
     UncaughtError(Value),
     /// `return expr` — unwound to the nearest function call.
     EarlyReturn(Value),
+    /// `break` — unwound to the nearest enclosing loop, which exits.
+    /// (A `break` value, if present, is evaluated for side effects and
+    /// then discarded — loops have no value channel.)
+    Break,
+    /// `continue` — unwound to the nearest enclosing loop, which starts
+    /// its next iteration.
+    Continue,
     /// Explicit `panic(...)` or interpreter-detected invalid operation.
     Panic(String),
     /// An identifier was not found in scope or the global tables.
@@ -269,6 +276,15 @@ impl Interpreter {
             Err(RuntimeError::Undefined(name)) => {
                 sink.emit(
                     Diagnostic::error(format!("undefined name `{name}`")).with_code("E1003"),
+                );
+                1
+            }
+            // Unreachable for typeck-valid programs (E0205 rejects these at
+            // compile time); a leaked loop signal here means an invalid
+            // program slipped through, so fail loudly, not silently.
+            Err(RuntimeError::Break) | Err(RuntimeError::Continue) => {
+                sink.emit(
+                    Diagnostic::error("`break`/`continue` outside of a loop").with_code("E1002"),
                 );
                 1
             }
@@ -433,6 +449,17 @@ impl Interpreter {
                 Err(RuntimeError::EarlyReturn(v))
             }
 
+            // `break` / `continue` unwind to the nearest enclosing loop
+            // (handled above); a value, if present, is evaluated for side
+            // effects and discarded, mirroring NIR lowering.
+            TypedStmtKind::Break(value) => {
+                if let Some(v) = value {
+                    self.eval_expr(v, scope, sink)?;
+                }
+                Err(RuntimeError::Break)
+            }
+            TypedStmtKind::Continue => Err(RuntimeError::Continue),
+
             TypedStmtKind::Expr(expr) => self.eval_expr(expr, scope, sink),
 
             TypedStmtKind::If { condition, then_body, else_body } => {
@@ -473,6 +500,11 @@ impl Interpreter {
                                 Err(RuntimeError::EarlyReturn(v)) => {
                                     return Err(RuntimeError::EarlyReturn(v));
                                 }
+                                // `break` exits the loop (yielding Unit like
+                                // a normally-completed loop); `continue`
+                                // starts the next iteration.
+                                Err(RuntimeError::Break) => break,
+                                Err(RuntimeError::Continue) => continue,
                                 Err(e) => return Err(e),
                             }
                         }
@@ -496,6 +528,8 @@ impl Interpreter {
                     Err(RuntimeError::EarlyReturn(v)) => {
                         return Err(RuntimeError::EarlyReturn(v))
                     }
+                    Err(RuntimeError::Break) => break Ok(Value::Unit),
+                    Err(RuntimeError::Continue) => continue,
                     Err(e) => return Err(e),
                 }
             },
@@ -513,6 +547,8 @@ impl Interpreter {
                         Err(RuntimeError::EarlyReturn(v)) => {
                             return Err(RuntimeError::EarlyReturn(v))
                         }
+                        Err(RuntimeError::Break) => break,
+                        Err(RuntimeError::Continue) => continue,
                         Err(e) => return Err(e),
                     }
                 }

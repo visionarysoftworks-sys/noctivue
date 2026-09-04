@@ -17,6 +17,7 @@
 //! | E0202 | Missing return-type annotation on function   |
 //! | E0203 | `?` applied to non-`Result`/`Option` type    |
 //! | E0204 | Unknown struct field                         |
+//! | E0205 | `break`/`continue` outside a loop              |
 
 use std::collections::HashMap;
 
@@ -56,6 +57,10 @@ struct TypeChecker<'s> {
     fn_sigs: HashMap<String, (Vec<Ty>, Ty)>,
     /// Maps enum variant names to (enum_name, payload_tys) for payload-less variants.
     enum_variants: HashMap<String, (String, Vec<Ty>)>,
+    /// Loop-nesting depth, for validating `break`/`continue`. Reset on
+    /// every function entry (a `break` inside a nested `fn` does not see
+    /// the outer loop); match arms do not touch it (transparent).
+    loop_depth: usize,
 }
 
 /// A collected type definition used for field resolution.
@@ -67,7 +72,7 @@ enum TypeDef {
 
 impl<'s> TypeChecker<'s> {
     fn new(sink: &'s mut DiagnosticSink) -> Self {
-        let mut tc = TypeChecker { sink, type_defs: HashMap::new(), trait_defs: HashMap::new(), fn_sigs: HashMap::new(), enum_variants: HashMap::new() };
+        let mut tc = TypeChecker { sink, type_defs: HashMap::new(), trait_defs: HashMap::new(), fn_sigs: HashMap::new(), enum_variants: HashMap::new(), loop_depth: 0 };
         // Register built-in functions so calls to them type-check.
         tc.fn_sigs.insert("print".to_string(), (vec![Ty::String], Ty::Unit));
         tc.fn_sigs.insert("println".to_string(), (vec![Ty::String], Ty::Unit));
@@ -341,6 +346,10 @@ impl<'s> TypeChecker<'s> {
             }
         };
 
+        // A nested `fn` starts outside all loops: a `break` inside it must
+        // not see the outer function's loop nesting.
+        self.loop_depth = 0;
+
         // Build the local environment seeded with parameters.
         let params: Vec<(String, Ty)> = f
             .params
@@ -592,7 +601,9 @@ impl<'s> TypeChecker<'s> {
                     self.emit_mismatch(&Ty::Bool, &cond.ty, &ws.span, "while condition");
                 }
                 let mut child = env.child();
+                self.loop_depth += 1;
                 let body = self.check_block(&ws.body, &mut child);
+                self.loop_depth -= 1;
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::While { condition: cond, body },
@@ -603,7 +614,9 @@ impl<'s> TypeChecker<'s> {
             // ── loop ─────────────────────────────────────────────────────────
             Stmt::Loop(ls) => {
                 let mut child = env.child();
+                self.loop_depth += 1;
                 let body = self.check_block(&ls.body, &mut child);
+                self.loop_depth -= 1;
                 Some(TypedStmt { ty: Ty::Unit, kind: TypedStmtKind::Loop { body }, span: ls.span.clone() })
             }
 
@@ -617,7 +630,9 @@ impl<'s> TypeChecker<'s> {
                 };
                 let mut child = env.child();
                 child.bind(fs.binding.clone(), elem_ty);
+                self.loop_depth += 1;
                 let body = self.check_block(&fs.body, &mut child);
+                self.loop_depth -= 1;
                 Some(TypedStmt {
                     ty: Ty::Unit,
                     kind: TypedStmtKind::For {
@@ -662,7 +677,12 @@ impl<'s> TypeChecker<'s> {
                 env.bind(f.name.clone(), fn_ty);
 
                 // Type-check the nested function (errors go to sink; we discard body).
+                // `check_function` resets loop depth for the nested scope —
+                // restore the outer depth afterwards so a later `break` in
+                // the enclosing loop still validates.
+                let outer_depth = self.loop_depth;
                 self.check_function(f.clone());
+                self.loop_depth = outer_depth;
                 None // Local fn defs don't produce a statement in the parent body.
             }
 
@@ -674,8 +694,50 @@ impl<'s> TypeChecker<'s> {
                 None
             }
 
-            // ── break / continue ─────────────────────────────────────────────
-            Stmt::Break(_) | Stmt::Continue(_) => None,
+            // ── break / continue ─────────────────────────────────────────
+            // Validated against `loop_depth` (a `break` inside a nested
+            // `fn` is outside every loop — see `check_function`'s reset).
+            // A `break` value is type-checked (errors inside it still
+            // surface) but only warned about: loops are statement-position
+            // with no value channel, so the value is evaluated for side
+            // effects and discarded (see `TypedStmtKind::Break` docs).
+            Stmt::Break(bs) => {
+                if self.loop_depth == 0 {
+                    self.sink.emit(
+                        Diagnostic::error("`break` outside of a loop")
+                            .with_span(bs.span.clone(), "here")
+                            .with_code("E0205"),
+                    );
+                    return None;
+                }
+                let value = bs.value.as_ref().map(|e| self.infer_expr(e, env));
+                if value.is_some() {
+                    self.sink.emit(
+                        Diagnostic::warning("`break` value is discarded (loops have no value channel yet)")
+                            .with_span(bs.span.clone(), "here"),
+                    );
+                }
+                Some(TypedStmt {
+                    ty: Ty::Unit,
+                    kind: TypedStmtKind::Break(value),
+                    span: bs.span.clone(),
+                })
+            }
+            Stmt::Continue(span) => {
+                if self.loop_depth == 0 {
+                    self.sink.emit(
+                        Diagnostic::error("`continue` outside of a loop")
+                            .with_span(span.clone(), "here")
+                            .with_code("E0205"),
+                    );
+                    return None;
+                }
+                Some(TypedStmt {
+                    ty: Ty::Unit,
+                    kind: TypedStmtKind::Continue,
+                    span: span.clone(),
+                })
+            }
 
             // ── bare field (only valid inside BareDecl body; skip in fn) ─────
             Stmt::BareField(_) => None,
@@ -692,7 +754,19 @@ impl<'s> TypeChecker<'s> {
     ) -> TypedArm {
         let mut arm_env = env.child();
         let pattern = self.check_pattern(&arm.pattern, scrutinee_ty, &mut arm_env);
-        let guard = arm.guard.as_ref().map(|g| self.infer_expr(g, &mut arm_env));
+        let guard = arm.guard.as_ref().map(|g| {
+            let typed_guard = self.infer_expr(g, &mut arm_env);
+            // NIR.md §6: previously unchecked here, so a non-Bool guard
+            // type-checked successfully and diverged at runtime (the
+            // interpreter panics on a non-Bool guard value, the VM instead
+            // truthiness-branches on it via `CondBranch`/`is_truthy`).
+            // Same discipline as `while`'s condition check just above in
+            // this file (`emit_mismatch(&Ty::Bool, &cond.ty, ...)`).
+            if !typed_guard.ty.compatible_with(&Ty::Bool) {
+                self.emit_mismatch(&Ty::Bool, &typed_guard.ty, &typed_guard.span, "match guard");
+            }
+            typed_guard
+        });
 
         let body = match &arm.body {
             MatchBody::Block(block) => self.check_block(block, &mut arm_env),

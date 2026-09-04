@@ -282,3 +282,44 @@ fn bad_try(x: Int) -> Int:
         codes
     );
 }
+
+// ─── E0205 — break/continue outside a loop ───────────────────────────────────
+
+#[test]
+fn typeck_e0205_break_outside_loop() {
+    let src = r#"
+main():
+    break
+"#;
+    let mut sink = DiagnosticSink::new();
+    let tokens = lexer::lex(src, &mut sink);
+    let program = parse(&tokens, &mut sink);
+    let program = resolve(program, &mut sink);
+    typecheck(program, &mut sink);
+    let codes = error_codes(&sink);
+    assert!(
+        codes.contains(&"E0205".to_string()),
+        "expected E0205, got: {:?}",
+        codes
+    );
+}
+
+#[test]
+fn typeck_break_inside_loop_no_error() {
+    let src = r#"
+main():
+    loop:
+        break
+"#;
+    let mut sink = DiagnosticSink::new();
+    let tokens = lexer::lex(src, &mut sink);
+    let program = parse(&tokens, &mut sink);
+    let program = resolve(program, &mut sink);
+    typecheck(program, &mut sink);
+    let codes = error_codes(&sink);
+    assert!(
+        !codes.contains(&"E0205".to_string()),
+        "unexpected E0205, got: {:?}",
+        codes
+    );
+}

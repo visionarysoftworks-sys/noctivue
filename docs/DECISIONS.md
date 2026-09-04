@@ -202,6 +202,38 @@ at ecosystem scale given reflection/`eval`/dynamic-typing semantics),
 distinguishing this ADR's actual scope from that stronger, unsupported
 claim.
 
+### ADR-016 — NIR Phi-Completeness Is a Trap, Not a Default (Amendment)
+**Status:** Accepted (retroactively documents a change already made in
+NIR.md §4.1 item 10 and `compiler/src/nir/vm.rs`'s `VmError::MalformedCfg`
+on 2026-09-04; recorded here per the Amendment process below, which that
+change should have gone through at the time instead of landing as a
+NIR.md-only edit.)
+**Conflicting requirement:** NIR.md §4.1 rule 1 ("every reachable block
+is terminated... terminate dead blocks anyway") and the VM's general
+"no silent recovery" discipline (rule 9, `try_unwrap`'s trap-on-None/Err)
+did not, until this amendment, cover the case of a `Phi` reached via a
+predecessor block with no corresponding `incoming` entry. The VM's
+original `Phi` handler defaulted to `VmValue::Unit` in that case,
+producing a wrong-but-non-erroring result — precisely the failure
+signature §4.1's header already warns about ("most of them execute
+without errors") but that this specific case wasn't yet listed against.
+**Why the original scope no longer holds:** a lowering bug that
+silently substitutes `Unit` for a real value is strictly worse than one
+that traps, because it can propagate through arithmetic/printing before
+surfacing (if it surfaces at all), and the differential suite only
+catches it as *wrong output*, not as a distinguishable failure. Any
+future control-flow construct that adds a new edge into an existing
+merge block (this session's `break`/`continue` lowering is the first
+one) needs a loud failure mode here, not a silent one, to be safe to
+implement incrementally.
+**Amended text:** NIR.md §4.1 gains rule 10 (already present in the
+current doc): every Phi's `incoming` list must cover every actual
+predecessor that can reach it; a Phi reached via an unrecorded
+predecessor — or with no predecessor recorded at all — traps as
+`VmError::MalformedCfg` rather than defaulting to `Unit`. No ISA change
+(no new `Instr` variant); this is a VM-behavior and documentation
+amendment only.
+
 **Amendment process:** Any change to a Confirmed ADR must (1) name the
 conflicting requirement, (2) explain why the original decision no longer
 holds, (3) propose the amended text, and (4) be marked "Requires

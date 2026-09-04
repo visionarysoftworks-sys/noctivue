@@ -223,6 +223,32 @@ fn logical_or_short_circuits() {
 }
 
 #[test]
+fn break_exits_loop_early() {
+    // Without a working `break`, this loop never terminates (harness
+    // timeout); with it, output is exactly one line.
+    check_source(
+        "break_while",
+        "main():\n    let i = 0\n    while true:\n        print(\"once\")\n        break\n        print(\"unreached\")\n",
+    );
+}
+
+#[test]
+fn break_exits_for_early() {
+    check_source(
+        "break_for",
+        "main():\n    for n in [1, 2, 3, 4, 5]:\n        print(\"{n}\")\n        break\n    print(\"done\")\n",
+    );
+}
+
+#[test]
+fn continue_skips_iteration() {
+    check_source(
+        "continue_for",
+        "main():\n    for n in [1, 2, 3]:\n        if n == 2:\n            continue\n        print(\"{n}\")\n    print(\"done\")\n",
+    );
+}
+
+#[test]
 fn try_propagates_and_prints() {
     check_source(
         "try_print",

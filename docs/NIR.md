@@ -199,6 +199,10 @@ state-machine, implementation detail". What Phase 2 *does* establish:
 - Unguarded-`Bool` match guards are not verified by typeck (the
   interpreter panics, the VM truthiness-branches): a frontend gap,
   recorded here so it isn't rediscovered.
-- `break`/`continue` have no HIR nodes (typeck drops them): loops with
-  early exits are not representable yet. Prerequisite for real loop
-  ergonomics; tracked Open.
+- `break`/`continue` are now fully lowered (HIR nodes +
+  `loop_exit`/`loop_cont` lowering cursors + interpreter unwind signals;
+  `E0205` outside loops, warning on discarded `break` values). Remaining
+  limits, still Open: no *labeled* break/continue (multi-level loops exit
+  one level only — check LANGUAGE_SPEC.md before assuming that is
+  sufficient), and `break` values are evaluated-then-discarded (loops
+  have no value channel).

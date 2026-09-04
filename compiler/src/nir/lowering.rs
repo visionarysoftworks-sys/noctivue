@@ -21,10 +21,12 @@ pub struct LoweringContext {
     /// under either mode yields the same instruction *shape* — mode may
     /// only affect memory-operation selection, never the instruction set.
     mode: Mode,
-    // NOTE: no loop-fallthrough cursor. `break`/`continue` have no HIR
-    // nodes (typeck drops them), so there is currently no producer that
-    // could read one; when HIR gains control-flow exits, the plumbing for
-    // targeting loop header/exit blocks goes here.
+    /// Loop-exit target for `break`, set while lowering a loop body.
+    /// Saved/restored around nesting (like typeck's `loop_depth`).
+    loop_exit: Option<BlockId>,
+    /// Loop-continue target for `continue`: the re-check header for
+    /// `while`/`loop`, the increment block for `for`.
+    loop_cont: Option<BlockId>,
 }
 
 impl LoweringContext {
@@ -56,6 +58,8 @@ impl LoweringContext {
             next_local_index: 0,
             enum_variants,
             mode: Mode::Native,
+            loop_exit: None,
+            loop_cont: None,
         }
     }
 
@@ -256,9 +260,12 @@ impl LoweringContext {
     }
 
     fn lower_stmts(&mut self, stmts: &[TypedStmt], nir_block: &mut crate::nir::module::Block) {
-        for stmt in stmts {
-            self.lower_stmt(stmt, nir_block);
-        }
+        // Same value-threading and early-exit behavior as
+        // `lower_stmts_with_result`; the value is just discarded (loop and
+        // arm bodies don't produce one). In particular this stops the list
+        // at `return`/`break`/`continue` instead of appending dead code
+        // past a terminator.
+        let _ = self.lower_stmts_with_result(stmts, nir_block);
     }
 
     fn lower_stmts_with_result(&mut self, stmts: &[TypedStmt], nir_block: &mut crate::nir::module::Block) -> Option<ValueId> {
@@ -282,6 +289,14 @@ impl LoweringContext {
                     result = self.lower_match(scrut_val, arms, nir_block);
                 }
                 crate::hir::items::TypedStmtKind::Return(_) => {
+                    self.lower_stmt(stmt, nir_block);
+                    result = None;
+                    break;
+                }
+                crate::hir::items::TypedStmtKind::Break(_)
+                | crate::hir::items::TypedStmtKind::Continue => {
+                    // Like `return`: control leaves; the rest of this list
+                    // is dead (the interpreter aborts the body the same way).
                     self.lower_stmt(stmt, nir_block);
                     result = None;
                     break;
@@ -368,7 +383,11 @@ impl LoweringContext {
                 });
 
                 let mut body_nir_block = crate::nir::module::Block::new(body_block);
+                let prev_exit = self.loop_exit.replace(exit_block);
+                let prev_cont = self.loop_cont.replace(header_block);
                 self.lower_stmts(body, &mut body_nir_block);
+                self.loop_exit = prev_exit;
+                self.loop_cont = prev_cont;
                 if !body_nir_block.has_terminator() {
                     body_nir_block.set_terminator(Instr::Branch { target: header_block });
                 }
@@ -411,14 +430,17 @@ impl LoweringContext {
                 });
 
                 let mut body_nir_block = crate::nir::module::Block::new(body_block);
+                let prev_exit = self.loop_exit.replace(exit_block);
+                let prev_cont = self.loop_cont.replace(header_block);
                 self.lower_stmts(body, &mut body_nir_block);
+                self.loop_exit = prev_exit;
+                self.loop_cont = prev_cont;
                 if !body_nir_block.has_terminator() {
                     body_nir_block.set_terminator(Instr::Branch { target: header_block });
                 }
 
-                // Reachable only via `break` (no HIR node yet — typeck drops
-                // break/continue today); still terminated so the block is
-                // never a NoTerminator hazard, then converged like While.
+                // Reachable only via `break`; still terminated so the block
+                // is never a NoTerminator hazard, then converged like While.
                 let merge_block = self.module.new_block_id();
                 let mut exit_nir_block = crate::nir::module::Block::new(exit_block);
                 exit_nir_block.set_terminator(Instr::Branch { target: merge_block });
@@ -499,9 +521,17 @@ impl LoweringContext {
                 });
                 self.local_values.insert(binding.clone(), elem_val);
 
+                let prev_exit = self.loop_exit.replace(exit_block);
+                let prev_cont = self.loop_cont.replace(cont_block);
                 let _body_result = self.lower_stmts_with_result(body, &mut body_nir_block);
+                self.loop_exit = prev_exit;
+                self.loop_cont = prev_cont;
 
-                if !body_nir_block.has_return_terminator() {
+                // Never overwrite an existing terminator: the body may end
+                // in `return`/`break`/`continue`, whose targets were chosen
+                // deliberately. (Checking only for Return here used to
+                // clobber `break`/`continue` branches back into the loop.)
+                if !body_nir_block.has_terminator() {
                     body_nir_block.set_terminator(Instr::Branch { target: cont_block });
                 }
 
@@ -547,6 +577,26 @@ impl LoweringContext {
                 let scrut_val = self.lower_expr(scrutinee, nir_block);
                 let _ = self.lower_match(scrut_val, arms, nir_block);
             }
+            // `break [value]` — evaluate the value for side effects, discard
+            // it (loops have no value channel), and jump to the loop exit.
+            // Outside a loop this is unreachable: typeck rejects it (E0205),
+            // so a missing cursor here means an invalid program slipped
+            // through — trap loudly rather than falling through.
+            TypedStmtKind::Break(value) => {
+                if let Some(v) = value {
+                    self.lower_expr(v, nir_block);
+                }
+                match self.loop_exit {
+                    Some(target) => nir_block.set_terminator(Instr::Branch { target }),
+                    None => nir_block.set_terminator(Instr::Unreachable),
+                }
+            }
+            // `continue` — jump to the loop's continue point (re-check
+            // header for `while`/`loop`, increment block for `for`).
+            TypedStmtKind::Continue => match self.loop_cont {
+                Some(target) => nir_block.set_terminator(Instr::Branch { target }),
+                None => nir_block.set_terminator(Instr::Unreachable),
+            },
         }
     }
 
@@ -1346,15 +1396,36 @@ impl LoweringContext {
                 });
                 dst
             }
-            TypedExprKind::Range { start, end, inclusive: _ } => {
+            TypedExprKind::Range { start, end, inclusive } => {
+                // NOTE: `for x in a..b` / `for x in a..=b` never reaches this
+                // arm — `TypedStmtKind::For` lowering special-cases a
+                // directly-written Range iterable below to avoid the
+                // ListLen/ListIndex path (a Range isn't a List, so it can't
+                // go through that machinery). This arm only fires when a
+                // Range is used in a non-for-iterable position (e.g. bound
+                // to a `let`) — there is no `Ty::Range`/`VmValue::Range`
+                // wiring yet (typeck assigns `Ty::Unknown` to Range
+                // expressions — see typeck/mod.rs's `Expr::Range` arm), so
+                // this still degrades to a plain struct-shaped value rather
+                // than a real VmValue::Range. Previously `inclusive` was
+                // discarded entirely (`inclusive: _`), making `1..5` and
+                // `1..=5` indistinguishable once lowered; it is now
+                // preserved as a third field so the data survives even
+                // though nothing downstream interprets it yet.
                 let start_val = self.lower_expr(start, nir_block);
                 let end_val = self.lower_expr(end, nir_block);
+                let inclusive_val = self.fresh_value();
+                nir_block.add_instr(Instr::Const {
+                    dst: inclusive_val,
+                    value: ConstValue::Bool(*inclusive),
+                    ty: NirTy::new(Ty::Bool, self.mode),
+                });
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
                 nir_block.add_instr(Instr::StructNew {
                     dst,
-                    fields: vec![start_val, end_val],
-                    field_names: vec!["start".to_string(), "end".to_string()],
+                    fields: vec![start_val, end_val, inclusive_val],
+                    field_names: vec!["start".to_string(), "end".to_string(), "inclusive".to_string()],
                     ty: NirTy::new(expr.ty.clone(), self.mode),
                 });
                 dst
@@ -1466,20 +1537,29 @@ impl LoweringContext {
                 self.lower_expr(inner, nir_block)
             }
             TypedExprKind::Closure { params: _, body: _ } => {
-                let captured: Vec<ValueId> = Vec::new();
-                let dst = ValueId(self.next_local_index);
-                self.next_local_index += 1;
-                let func_id = self.func_infos.iter()
-                    .find(|(n, _, _)| n == &self.current_func.clone().unwrap_or_default())
-                    .map(|(_, id, _)| *id)
-                    .unwrap_or(FuncId::UNRESOLVED);
-                nir_block.add_instr(Instr::ClosureNew {
-                    dst,
-                    func: func_id,
-                    captured,
-                    ty: NirTy::new(expr.ty.clone(), self.mode),
-                });
-                dst
+                // Closure lowering is not implemented: there is no per-closure
+                // synthesized NirFunction and no free-variable capture
+                // analysis yet (NIR.md §6 "closure calling convention: still
+                // Open"). This arm previously aliased `ClosureNew`'s `func`
+                // to whatever function is *currently being lowered*
+                // (`self.current_func`) and always emitted an empty
+                // `captured` — i.e. the closure's own params/body were
+                // silently discarded and `ClosureCall` would re-invoke the
+                // *enclosing* function with the wrong arguments, with no
+                // panic and no `UNRESOLVED` to signal it. That is a silent
+                // wrong-answer, not a scope gap communicated loudly, and it
+                // is the one place this file violated its own §4.1 item 9
+                // discipline (used everywhere else: nested-variant match
+                // subpatterns, `Range`/`RangeInclusive` as a `BinOp`).
+                // Fail loudly until real closure lowering lands: see the
+                // gap-analysis note on this file/line.
+                unimplemented!(
+                    "closure lowering not yet implemented — captures and \
+                     body would be silently discarded (see NIR.md §6); \
+                     needs a synthesized NirFunction per closure literal \
+                     plus free-variable capture analysis before this can \
+                     produce a correct ClosureNew"
+                )
             }
         }
     }
