@@ -77,6 +77,109 @@ integrations (see STYLE_GUIDE.md §6 for the file-identity/branding
 requirements editors should also honor: icon, syntax highlighting,
 language mode, etc.).
 
+### 6.1 Hover standard
+
+Hover (`textDocument/hover`) **MUST** resolve the specific identifier
+under the cursor — not merely report the enclosing top-level item — and
+render a card in this fixed section order:
+
+```text
+```noctivue
+<signature>
+```
+
+Type: <type>
+
+Declared in <location>.
+
+<documentation>
+```
+
+- **Signature** (fenced `noctivue` block): the item's declaration shape
+  (`fn greet(name: String) -> String`, `struct User { ... }`,
+  `const MAX: Int`, `let user: String` for locals).
+- **Type** (functions and locals only): the HIR-resolved type
+  (`Type: (String) -> String`). Struct/enum/trait/const cards omit this
+  line — their signature already carries the type information.
+- **Declared in**: the file basename for user items and locals
+  (`Declared in demo.nv.`; locals add `(local binding)`), or
+  `Declared in std (builtin).` for built-ins.
+- **Documentation**: the consecutive `///` doc-comment lines immediately
+  above the item (STYLE_GUIDE.md §5), verbatim. Built-ins carry
+  hand-written behavioral notes **verified against the interpreter**
+  (`interp::eval_builtin`) — e.g. `print` writes *without* a trailing
+  newline while `println` adds one; `to_int` returns `None` on parse
+  failure; `assert` panics on `false`.
+- Lookup order is definitions, then locals, then built-ins, then
+  keywords, then reserved words, then prelude items: a user-defined item
+  always shadows a builtin of the same name. Keywords cannot be shadowed,
+  so their table position is load-independence, not precedence.
+- **Keywords (present and future).** Every keyword the language defines
+  MUST have a hover entry consisting of a usage template as the
+  signature plus a one-to-two-line role summary (`Declared in keyword.`).
+  Adding a new keyword to the lexer without its hover entry is an
+  **incomplete change** — the entry lives in `keyword_hover` in
+  `compiler/src/analysis.rs`, next to the grammar's keyword lists in
+  `gen_syntax_highlighting.rs`, so the two stay in sync by proximity.
+  Reserved words share one explicit note (`Declared in keyword
+  (reserved).`: recognized by the lexer, not part of the language, do
+  not use as identifiers). Prelude literals and constructors
+  (`true`/`false`/`None`/`Some`/`Ok`/`Err`) carry signatures plus a
+  `Type:` line under `Declared in prelude.`
+- If no identifier is under the cursor, or the identifier is unknown,
+  the server returns **nothing**. There is deliberately no "enclosing
+  item" fallback — hovering whitespace inside `main` showing
+  `fn main()` is a bug, not a feature. The server **MUST NOT** echo raw
+  source text as "documentation" either.
+- Covered by unit tests in `compiler/src/analysis.rs` (`analysis::tests`):
+  call-site hover, builtin card, definition hover, local hover, `Type:`
+  / `Declared in` lines, doc comments at definition and call sites,
+  keyword templates, reserved-word notes, prelude literals, and the
+  whitespace/unknown-shows-nothing cases.
+
+### 6.2 TextMate grammar source of truth
+
+The VS Code TextMate grammar (`editors/vscode/syntaxes/
+noctivue.tmLanguage.json`) is **generated**, not hand-maintained, from
+the compiler's token definitions:
+
+```text
+cargo run -p compiler --bin gen_syntax_highlighting
+```
+
+The generator writes keys in **camelCase** (`scopeName`, `fileTypes`),
+which is what `vscode-textmate` reads — snake_case keys (`scope_name`,
+`file_types`) fail grammar registration **silently**, with VS Code
+reporting "No TM Grammar registered for this language" and only
+bracket-pair colorization working. Operator patterns use
+`regex::escape` output verbatim (no extra backslash prefix): a doubled
+escape (`\\(`) is a hard Oniguruma compile error that likewise kills the
+whole grammar load. Multi-character operators are emitted before their
+single-character prefixes (`->` before `-`), and the function-call
+pattern before the generic variable pattern, because TextMate applies
+the first match in order.
+
+### 6.3 Theme compatibility (scope-naming convention)
+
+The extension must color correctly under **whatever theme the user runs**,
+not just the bundled Noctivue Dark theme. The mechanism is scope naming,
+not per-theme rules:
+
+- Every emitted scope uses a **standard TextMate prefix** plus a
+  `.noctivue` suffix (`keyword.control.noctivue`, `string.quoted.double.
+  noctivue`, `entity.name.type.noctivue`, ...). Stock themes match on the
+  prefix, so 21 of 23 scopes resolve to colors in Dark+, Light+, Dark
+  Modern, and High Contrast Black with zero Noctivue-specific rules.
+- The 2 remaining scopes are both `punctuation.*`, which stock themes
+  deliberately leave at the default foreground **for every language**
+  (same as Rust/Python/Go) — this is conventional, not a gap.
+- The bundled Noctivue Dark theme (`editors/vscode/themes/`) covers all
+  23 scopes exactly, including interpolation punctuation and escapes.
+- `editors/vscode/audit-theme.js` re-verifies this: it loads the grammar,
+  enumerates every emitted scope, and reports the best-matching rule in
+  any theme JSON (`node audit-theme.js <theme.json>...`), following
+  `"include"` chains. Re-run it after any grammar change.
+
 ## 7. Security Posture
 
 Sophisticated capability-oriented sandboxing is explicitly **Deferred**

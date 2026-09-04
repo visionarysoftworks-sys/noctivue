@@ -1,0 +1,414 @@
+{
+  "scopeName": "source.noctivue",
+  "name": "Noctivue",
+  "fileTypes": [
+    "nv"
+  ],
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.noctivue",
+      "match": "//.*$"
+    },
+    {
+      "name": "comment.block.noctivue",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [
+        {
+          "name": "comment.block.noctivue",
+          "match": "[^*]*\\*+([^/*][^*]*\\*+)*"
+        }
+      ]
+    },
+    {
+      "name": "comment.documentation.noctivue",
+      "match": "///.*$"
+    },
+    {
+      "name": "string.quoted.double.noctivue",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.noctivue",
+          "match": "\\[\"nrt]"
+        },
+        {
+          "name": "punctuation.definition.interpolation.begin.noctivue",
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [
+            {
+              "name": "entity.name.type.noctivue",
+              "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+            },
+            {
+              "name": "variable.other.noctivue",
+              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+            },
+            {
+              "name": "constant.numeric.integer.noctivue",
+              "match": "\\b\\d[\\d_]*\\b"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single.noctivue",
+      "match": "'([^'\\\\]|\\\\.)*'"
+    },
+    {
+      "name": "constant.numeric.float.noctivue",
+      "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b"
+    },
+    {
+      "name": "constant.numeric.integer.noctivue",
+      "match": "\\b(0x[0-9a-fA-F_]+|0b[01_]+|0o[0-7_]+|\\d[\\d_]*)\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bas\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\basync\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bawait\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bbreak\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bconst\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bcontinue\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\belse\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bexport\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bfor\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bif\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bimport\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bin\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\blet\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bloop\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bmatch\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bmod\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\breturn\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\buse\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bvar\\b"
+    },
+    {
+      "name": "keyword.control.noctivue",
+      "match": "\\bwhile\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\benum\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\bfn\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\bimpl\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\bstruct\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\btrait\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\btype\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
+      "match": "\\bunsafe\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\bowned\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\bborrow\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\bmanaged\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\bweak\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\bunowned\\b"
+    },
+    {
+      "name": "keyword.other.memory.noctivue",
+      "match": "\\btask\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bactor\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bdefer\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bextern\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bmacro\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bnative\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\boperator\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bprotocol\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\breflect\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bspawn\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bstatic\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\bwhere\\b"
+    },
+    {
+      "name": "keyword.other.reserved.noctivue",
+      "match": "\\byield\\b"
+    },
+    {
+      "name": "constant.language.noctivue",
+      "match": "\\btrue\\b"
+    },
+    {
+      "name": "constant.language.noctivue",
+      "match": "\\bfalse\\b"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "=="
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "!="
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "<="
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": ">="
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "\\&\\&"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "\\|\\|"
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "\\+="
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "\\-="
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "\\*="
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "/="
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "%="
+    },
+    {
+      "name": "keyword.operator.range.noctivue",
+      "match": "\\.\\.="
+    },
+    {
+      "name": "keyword.operator.range.noctivue",
+      "match": "\\.\\."
+    },
+    {
+      "name": "keyword.operator.optional.noctivue",
+      "match": "\\?\\?"
+    },
+    {
+      "name": "keyword.operator.arrow.noctivue",
+      "match": "\\->"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "::"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "\\+"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "\\-"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "\\*"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "/"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "%"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "<"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": ">"
+    },
+    {
+      "name": "keyword.operator.arithmetic.noctivue",
+      "match": "!"
+    },
+    {
+      "name": "keyword.operator.assignment.noctivue",
+      "match": "="
+    },
+    {
+      "name": "keyword.operator.optional.noctivue",
+      "match": "\\?"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\."
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": ":"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": ","
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": ";"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\("
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\)"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\["
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\]"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\{"
+    },
+    {
+      "name": "punctuation.separator.noctivue",
+      "match": "\\}"
+    },
+    {
+      "name": "entity.name.function.noctivue",
+      "match": "\\b[a-z_][a-zA-Z0-9_]*\\b(?=\\()"
+    },
+    {
+      "name": "entity.name.type.noctivue",
+      "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+    },
+    {
+      "name": "variable.other.noctivue",
+      "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+    }
+  ]
+}

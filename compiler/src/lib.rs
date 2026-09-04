@@ -5,6 +5,7 @@
 //! Structured diagnostics are emitted by every stage through [`diagnostics`] and are
 //! available as machine-readable JSON via `noct diagnostics --json` (AI_TOOLING.md).
 
+pub mod analysis;
 pub mod ast;
 pub mod diagnostics;
 pub mod hir;

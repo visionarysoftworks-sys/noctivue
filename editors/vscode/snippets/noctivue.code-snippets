@@ -1,0 +1,34 @@
+{
+  "Noctivue Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:param}: ${3:Type}) -> ${4:ReturnType}:",
+      "  ${0}"
+    ],
+    "description": "Function declaration"
+  },
+  "Noctivue Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name}:",
+      "  ${2:field}: ${3:Type}"
+    ],
+    "description": "Struct declaration"
+  },
+  "Noctivue Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name}:",
+      "  ${2:Variant}"
+    ],
+    "description": "Enum declaration"
+  },
+  "Noctivue Main": {
+    "prefix": "main",
+    "body": [
+      "main():",
+      "  ${0}"
+    ],
+    "description": "Main entry point"
+  }
+}

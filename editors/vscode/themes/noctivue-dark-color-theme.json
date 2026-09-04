@@ -1,0 +1,102 @@
+{
+  "name": "Noctivue Dark",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#0b0c10",
+    "editor.foreground": "#c5c6c7",
+    "editor.lineHighlightBackground": "#1f2833",
+    "editor.selectionBackground": "#45a29e40",
+    "editorCursor.foreground": "#66fcf1",
+    "editorWhitespace.foreground": "#1f2833"
+  },
+  "tokenColors": [
+    {
+      "scope": [
+        "comment",
+        "comment.line.double-slash.noctivue",
+        "comment.block.noctivue",
+        "comment.documentation.noctivue"
+      ],
+      "settings": {
+        "foreground": "#6a9955"
+      }
+    },
+    {
+      "scope": [
+        "keyword.control.noctivue",
+        "keyword.other.noctivue",
+        "keyword.other.memory.noctivue",
+        "keyword.other.reserved.noctivue"
+      ],
+      "settings": {
+        "foreground": "#c586c0"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type.noctivue"
+      ],
+      "settings": {
+        "foreground": "#4ec9b0"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function.noctivue"
+      ],
+      "settings": {
+        "foreground": "#dcdcaa"
+      }
+    },
+    {
+      "scope": [
+        "variable.other.noctivue",
+        "variable.parameter.noctivue"
+      ],
+      "settings": {
+        "foreground": "#9cdcfe"
+      }
+    },
+    {
+      "scope": [
+        "constant.numeric.integer.noctivue",
+        "constant.numeric.float.noctivue",
+        "constant.language.noctivue"
+      ],
+      "settings": {
+        "foreground": "#b5cea8"
+      }
+    },
+    {
+      "scope": [
+        "string.quoted.double.noctivue",
+        "string.quoted.single.noctivue"
+      ],
+      "settings": {
+        "foreground": "#ce9178"
+      }
+    },
+    {
+      "scope": [
+        "constant.character.escape.noctivue",
+        "punctuation.definition.interpolation.begin.noctivue"
+      ],
+      "settings": {
+        "foreground": "#d7ba7d"
+      }
+    },
+    {
+      "scope": [
+        "keyword.operator.arithmetic.noctivue",
+        "keyword.operator.assignment.noctivue",
+        "keyword.operator.range.noctivue",
+        "keyword.operator.optional.noctivue",
+        "keyword.operator.arrow.noctivue",
+        "punctuation.separator.noctivue"
+      ],
+      "settings": {
+        "foreground": "#d4d4d4"
+      }
+    }
+  ]
+}

@@ -534,6 +534,31 @@ impl TypeExpr {
     }
 }
 
+/// Convert a TypeExpr to a human-readable string (for diagnostics, hover, etc.)
+pub fn type_expr_to_string(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Named(name, args, _) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let arg_strs: Vec<String> = args.iter().map(type_expr_to_string).collect();
+                format!("{}<{}>", name, arg_strs.join(", "))
+            }
+        }
+        TypeExpr::Tuple(elems, _) => {
+            let parts: Vec<String> = elems.iter().map(type_expr_to_string).collect();
+            format!("({})", parts.join(", "))
+        }
+        TypeExpr::Collection(inner, _) => {
+            format!("[{}]", type_expr_to_string(inner))
+        }
+        TypeExpr::Function(params, ret, _) => {
+            let param_strs: Vec<String> = params.iter().map(type_expr_to_string).collect();
+            format!("({}) -> {}", param_strs.join(", "), type_expr_to_string(ret))
+        }
+    }
+}
+
 // ── Generics ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

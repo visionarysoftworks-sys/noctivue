@@ -1,0 +1,101 @@
+{
+  "name": "noctivue",
+  "displayName": "Noctivue",
+  "description": "Language support for Noctivue (.nv files) - syntax highlighting, LSP, Outline",
+  "version": "0.0.4",
+  "publisher": "noctivue",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "noctivue",
+    "nv",
+    "syntax",
+    "highlighting",
+    "language"
+  ],
+  "icon": "icons/noctivue.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noctivue/noctivue"
+  },
+  "activationEvents": [
+    "onLanguage:noctivue"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "noctivue",
+        "aliases": [
+          "Noctivue",
+          "nv"
+        ],
+        "extensions": [
+          ".nv"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "dark": "./icons/noctivue-file-128.png",
+          "light": "./icons/noctivue-file-128.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "noctivue",
+        "scopeName": "source.noctivue",
+        "path": "./syntaxes/noctivue.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Noctivue Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/noctivue-dark-color-theme.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "noctivue",
+        "path": "./snippets/noctivue.code-snippets"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Noctivue",
+      "properties": {
+        "noctivue.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Noctivue Language Server"
+        },
+        "noctivue.lsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the noctivue-lsp binary (empty = use bundled)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc --noEmit -p ./ && node esbuild.js && node copy-grammar.js",
+    "watch": "node esbuild.js watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.0.0",
+    "vscode-languageclient": "^8.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.0.0"
+  }
+}

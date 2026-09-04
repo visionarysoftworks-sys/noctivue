@@ -4,6 +4,7 @@ members = [
     "compiler",
     "interp",
     "noct-cli",
+    "noctivue-lsp",
 ]
 
 [workspace.package]

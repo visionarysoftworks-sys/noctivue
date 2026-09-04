@@ -28,16 +28,19 @@ fn main() {
 
     let literals = ["true", "false"];
 
-    // Operators from lexer/token.rs
+    // Operators from lexer/token.rs.
+    // NOTE: multi-character operators MUST come before their single-character
+    // prefixes — TextMate tries patterns in order at each position, so `->`
+    // would otherwise tokenize as `-` + `>` and `==` as `=` + `=`.
     let operators = [
+        "==", "!=", "<=", ">=", "&&", "||",
+        "+=", "-=", "*=", "/=", "%=",
+        "..=", "..",
+        "??", "->", "::",
         "+", "-", "*", "/", "%",
-        "==", "!=", "<", "<=", ">", ">=",
-        "&&", "||", "!",
-        "=", "+=", "-=", "*=", "/=", "%=",
-        "..", "..=",
-        "?", "??",
-        "->",
-        ".", "::",
+        "<", ">", "!",
+        "=",
+        "?", ".",
         ":", ",", ";",
         "(", ")",
         "[", "]",
@@ -63,7 +66,18 @@ fn main() {
         r#"""#,
         vec![
             Pattern::simple("constant.character.escape.noctivue", r#"\["nrt]"#),
-            Pattern::complex("punctuation.definition.interpolation.begin.noctivue", r"\{", r"\}", vec![]),
+            // Interpolation `{expr}`: inner identifiers get variable scope
+            // rather than inheriting the punctuation scope.
+            Pattern::complex(
+                "punctuation.definition.interpolation.begin.noctivue",
+                r"\{",
+                r"\}",
+                vec![
+                    Pattern::simple("entity.name.type.noctivue", r"\b[A-Z][a-zA-Z0-9_]*\b"),
+                    Pattern::simple("variable.other.noctivue", r"\b[a-z_][a-zA-Z0-9_]*\b"),
+                    Pattern::simple("constant.numeric.integer.noctivue", r"\b\d[\d_]*\b"),
+                ],
+            ),
         ],
     ));
 
@@ -107,15 +121,19 @@ fn main() {
         } else {
             "punctuation.separator.noctivue"
         };
-        patterns.push(Pattern::simple(scope, format!(r"\{}", escaped)));
+        // NOTE: `regex::escape` output is already a complete, correct regex
+        // (`(` -> `\(`). Do NOT prepend another backslash — that produces
+        // `\\(` which is a hard Oniguruma compile error ("unmatched
+        // parenthesis") and silently breaks the whole TextMate grammar load.
+        patterns.push(Pattern::simple(scope, escaped));
     }
 
-    // 7. Identifiers (types start with uppercase, functions/variables lowercase)
+    // 7. Identifiers (types start with uppercase, functions/variables lowercase).
+    // NOTE: the function-call pattern comes first so `name(` tokenizes as a
+    // function, not a plain variable — TextMate uses the first match in order.
+    patterns.push(Pattern::simple("entity.name.function.noctivue", r"\b[a-z_][a-zA-Z0-9_]*\b(?=\()"));
     patterns.push(Pattern::simple("entity.name.type.noctivue", r"\b[A-Z][a-zA-Z0-9_]*\b"));
     patterns.push(Pattern::simple("variable.other.noctivue", r"\b[a-z_][a-zA-Z0-9_]*\b"));
-
-    // 8. Function calls
-    patterns.push(Pattern::simple("entity.name.function.noctivue", r"\b[a-z_][a-zA-Z0-9_]*\b(?=\()"));
 
     // Build the grammar
     let grammar = Grammar {
@@ -126,7 +144,11 @@ fn main() {
     };
 
     let json = serde_json::to_string_pretty(&grammar).expect("serialize grammar");
-    let output_path = std::path::Path::new(r"E:\Projects\Noctivue\noctivue-syntax\syntaxes\noctivue.tmLanguage.json");
+    // Write into the workspace's VS Code extension (editors/vscode), resolved
+    // from this crate's manifest dir so it works on any machine/checkout.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output_path =
+        manifest_dir.join("../editors/vscode/syntaxes/noctivue.tmLanguage.json");
     // Ensure parent directory exists
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).expect("create syntaxes dir");
@@ -136,6 +158,7 @@ fn main() {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Grammar {
     scope_name: String,
     name: String,

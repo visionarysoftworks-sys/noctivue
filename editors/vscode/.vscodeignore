@@ -1,0 +1,12 @@
+.vscode/**
+src/**
+tsconfig.json
+copy-grammar.js
+audit-theme.js
+esbuild.js
+gen-icon.js
+**/*.map
+**/*.ts
+.eslintrc*
+.gitignore
+node_modules/**
