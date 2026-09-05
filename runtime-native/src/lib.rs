@@ -130,18 +130,27 @@ pub unsafe extern "C" fn noctivue_rt_str_concat(a: *const u8, b: *const u8) -> *
     alloc_str(&buf)
 }
 
+/// The one exit code every native-mode runtime trap uses. Decided
+/// (IMPLEMENTATION_PLAN.md Phase 3, Step 1/2 boundary): every runtime
+/// trap on every backend exits with the SAME code regardless of trap
+/// kind — this matches the ALREADY-SHIPPED behavior of both other
+/// backends (every `VmError` variant collapses to exit 1 in
+/// `cmd_run_vm.rs`; every `RuntimeError` variant collapses to exit 1 in
+/// `interp/src/lib.rs`'s `run`). There is no precedent anywhere in this
+/// codebase for a differentiated exit code per trap kind, so native
+/// does not invent one. Every future trap call site (Step 2's
+/// `try_unwrap`-on-None/Err, `unreachable`, etc.) MUST pass this
+/// constant, never a literal. Revisiting this is a new three-way
+/// contract requiring a DECISIONS.md entry and changes to all three
+/// backends together, not a native-only choice.
+pub const NOCTIVUE_TRAP_EXIT_CODE: i32 = 1;
+
 /// `noctivue_rt_panic(str, exit_code)` — print a message to stderr and
 /// terminate with `exit_code`. The native backend's equivalent of the
 /// VM's `Err(VmError::...)` path (NIR.md §4.1 item 3's "no silent
-/// recovery" discipline).
-///
-/// `exit_code` is a native-mode convention, not yet unified with the
-/// VM/interpreter's process exit codes for the same failure classes —
-/// unifying them (e.g. a `NoctivueTrapKind -> i32` table) is required
-/// before the three-way differential harness can assert exit-code parity
-/// for runtime traps. Exit code `101` is a placeholder (matches Rust's
-/// own panic exit code by convention; pick deliberately, don't just
-/// keep this).
+/// recovery" discipline). `exit_code` should be
+/// `NOCTIVUE_TRAP_EXIT_CODE` for every current and future call site —
+/// see that constant's doc comment.
 ///
 /// # Safety
 /// `str` must be a header pointer produced by this module's constructors.
@@ -164,14 +173,15 @@ pub unsafe extern "C" fn noctivue_rt_panic(str_header: *const u8, exit_code: i32
 /// with the VM's `VmError::DivisionByZero` `Display` text than
 /// duplicating the string at every Cranelift call site).
 ///
-/// Exit code is 1, matching `noct run-vm`'s trap path (`cmd_run_vm.rs`
-/// returns 1 on `VmError`). Stderr prefixes intentionally differ by
-/// backend (`VM error:` vs `noctivue: runtime error:`) — the differential
-/// harness normalizes the prefix and asserts on trap class + exit code.
+/// Exit code is `NOCTIVUE_TRAP_EXIT_CODE` (`1`), matching `noct run-vm`'s
+/// trap path (`cmd_run_vm.rs` returns 1 on `VmError`). Stderr prefixes
+/// intentionally differ by backend (`VM error:` vs `noctivue: runtime
+/// error:`) — the differential harness normalizes the prefix and asserts
+/// on trap class + exit code.
 #[no_mangle]
 pub extern "C" fn noctivue_rt_div_by_zero() -> ! {
     eprintln!("noctivue: runtime error: division by zero");
-    std::process::exit(1);
+    std::process::exit(NOCTIVUE_TRAP_EXIT_CODE);
 }
 
 /// Checked integer division for native code: the Cranelift backend has
