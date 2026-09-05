@@ -20,3 +20,15 @@ Thumbs.db
 # Noctivue compiler artifacts (future)
 *.nvir
 *.nvc
+
+# Native toolchain outputs — never commit binaries (removed a batch of
+# accidentally-pushed debug_*.exe/.pdb in the past; this rule exists so
+# it cannot recur). Scratch single-file debug scripts (debug_*.rs) and
+# captured logs (*_output.txt) belong outside the repo too.
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.obj
+debug_*.rs
+*_output.txt
