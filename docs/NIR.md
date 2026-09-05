@@ -206,3 +206,14 @@ state-machine, implementation detail". What Phase 2 *does* establish:
   one level only — check LANGUAGE_SPEC.md before assuming that is
   sufficient), and `break` values are evaluated-then-discarded (loops
   have no value channel).
+- Lists are fixed-size: literals, `l[i]`, `.len`, `.first`/`.last`,
+  `for` — no push, concat, or construction beyond literals, so
+  `map`/`filter`/`reverse` cannot be written in user code today (the
+  `.map`/`.filter`/`.sort` members are acknowledged placeholders, not
+  implementations). Growth needs the ownership story (borrowck, Phase 3
+  Step 3) first, then M3 collections. Owned by whoever does either.
+- Strings are opaque past `len`/`==`/concat/interpolation: no indexing,
+  slicing, iteration, or chars, so `contains`/`split`/`trim` cannot be
+  written in user code today. Needs a String method-call story (M3
+  string helpers, FFI.md §7), not just new builtins. Owned by whoever
+  takes M3 strings.

@@ -115,6 +115,57 @@ fn check_source(name: &str, source: &str) {
     check_paths(name, &path, true);
 }
 
+/// Multi-file variant: write `lib_source` + `main_source` as two temp
+/// files and run both CLIs with both paths (libraries first, entry last
+/// — the pre-module concatenation convention). Covers the multi-file
+/// intake AND the per-label owning-file diagnostics (`owner_file`): an
+/// error in the second file must name the second file on BOTH backends,
+/// byte-identically.
+fn check_sources_multi(
+    name: &str,
+    lib_source: &str,
+    main_source: &str,
+) -> (std::process::Output, std::process::Output) {
+    let lib_path = write_case(&format!("{name}_lib"), lib_source);
+    let main_path = write_case(name, main_source);
+    let lib_str = lib_path.to_string_lossy().to_string();
+    let main_str = main_path.to_string_lossy().to_string();
+    let run = run_cli(&["run", &lib_str, &main_str]);
+    let run_vm = run_cli(&["run-vm", &lib_str, &main_str]);
+
+    assert_eq!(
+        run.status.code(),
+        run_vm.status.code(),
+        "[{name}] exit code differs:\n  run:    {:?}\n  run-vm: {:?}\n  run stderr:\n{}\n  run-vm stderr:\n{}",
+        run.status.code(),
+        run_vm.status.code(),
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run_vm.stderr),
+    );
+    assert_eq!(
+        run.stdout, run_vm.stdout,
+        "[{name}] stdout differs:\n  run:\n{}\n  run-vm:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run_vm.stdout),
+    );
+    assert_eq!(
+        run.stderr, run_vm.stderr,
+        "[{name}] stderr differs:\n  run:\n{}\n  run-vm:\n{}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run_vm.stderr),
+    );
+
+    let _ = std::fs::remove_file(&lib_path);
+    let _ = std::fs::remove_file(&main_path);
+    for p in [&lib_path, &main_path] {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
+    (run, run_vm)
+}
+
 fn check_fixture(rel: &str) {
     let path = workspace_root().join(rel);
     assert!(path.exists(), "fixture missing: {}", path.display());
@@ -340,4 +391,39 @@ fn fixture_dashboard_nonui() {
 #[test]
 fn fixture_simple_vm_test() {
     check_fixture("tests/fixtures/simple_vm_test.nv");
+}
+
+// ── Multi-file concatenation (pre-module stopgap) ───────────────────────
+
+#[test]
+fn multi_file_lib_then_main() {
+    // Library function defined in the FIRST file, used in the SECOND.
+    // Both backends must agree exactly (exit, stdout, stderr).
+    check_sources_multi(
+        "multifile_ok",
+        "fn add(a: Int, b: Int) -> Int:\n    a + b\n",
+        "main():\n    print(\"{add(20, 22)}\")\n",
+    );
+}
+
+#[test]
+fn multi_file_error_names_owning_file() {
+    // A type error in the SECOND file must name the second file — on
+    // BOTH backends, byte-identically. This is the `owner_file` proof:
+    // whole-unit spans mapped back to per-file labels.
+    let (run, _) = check_sources_multi(
+        "multifile_err",
+        "fn add(a: Int, b: Int) -> Int:\n    a + b\n",
+        "main():\n    let x: Int = \"not an int\"\n    print(\"{x}\")\n",
+    );
+    assert_eq!(run.status.code(), Some(1), "type error must exit 1");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("multifile_err.nv"),
+        "diagnostic must name the owning file (multifile_err.nv), got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("multifile_err_lib.nv"),
+        "diagnostic must NOT blame the clean library file, got:\n{stderr}"
+    );
 }

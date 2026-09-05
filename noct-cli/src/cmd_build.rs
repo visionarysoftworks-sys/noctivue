@@ -67,11 +67,12 @@ fn runtime_native_dir() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: noct build <file.nv> [-o <out.exe>] [--release]");
+    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release]");
+    eprintln!("  multiple files concatenate in order, entry point last (tank libraries first)");
 }
 
 pub fn run(args: &[String]) -> i32 {
-    let mut input: Option<&str> = None;
+    let mut inputs: Vec<&str> = Vec::new();
     let mut out: Option<&str> = None;
     let mut release = false;
     let mut it = args.iter().peekable();
@@ -96,28 +97,21 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
             other => {
-                if input.is_some() {
-                    eprintln!("noct build: only one input file (got `{other}` too)");
-                    usage();
-                    return 1;
-                }
-                input = Some(other);
+                inputs.push(other);
             }
         }
     }
-    let input = match input {
-        Some(p) => p,
-        None => {
-            usage();
-            return 1;
-        }
-    };
+    if inputs.is_empty() {
+        usage();
+        return 1;
+    }
 
     // ── 1. Frontend → NIR (same front door as `run-vm`) ────────────────
-    let source = match std::fs::read_to_string(input) {
-        Ok(s) => s,
+    // Multi-file like `run`/`run-vm`: libraries first, entry last.
+    let (source, files) = match crate::cmd_run::read_sources(&inputs) {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("error reading {input}: {e}");
+            eprintln!("{e}");
             return 1;
         }
     };
@@ -127,7 +121,7 @@ pub fn run(args: &[String]) -> i32 {
     let program = resolver::resolve(program, &mut sink);
     let module = typeck::typecheck(program, &mut sink);
     if sink.has_errors() {
-        crate::cmd_run::print_diagnostics(input, &sink);
+        crate::cmd_run::print_diagnostics_multi(&files, &sink);
         return 1;
     }
     let nir_module = compiler::nir::lowering::lower(module);
@@ -192,7 +186,10 @@ pub fn run(args: &[String]) -> i32 {
         // Mirror rustc: `-o foo` on Windows means `foo.exe`.
         Some(o) => ensure_exe_suffix(&PathBuf::from(o)),
         None => {
-            let stem = Path::new(input)
+            // Default output takes the ENTRY file's stem (multi-file
+            // convention: libraries first, entry last — `inputs` is
+            // non-empty here, checked above).
+            let stem = Path::new(inputs.last().expect("inputs non-empty"))
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "a".to_string());

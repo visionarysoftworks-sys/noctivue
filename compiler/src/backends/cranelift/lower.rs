@@ -20,19 +20,34 @@ use cranelift_codegen::ir::{
     Value as ClifValue,
 };
 use cranelift_codegen::isa::CallConv;
-use cranelift_frontend::FunctionBuilder;
+use cranelift_frontend::{FunctionBuilder, Variable};
 use std::collections::HashMap;
 
 use crate::hir::types::Ty;
 use crate::nir::instr::{CmpOp, ConstValue, Instr};
 use crate::nir::types::{FuncId as NirFuncId, ValueId};
 
+/// Fallible twin of `clif_type_for`: `None` for types with no native
+/// representation yet (aggregates, closures — Step 3+). The driver skips
+/// declaring those ids; any later touch panics honestly via
+/// `FuncLowerCtx::get`/`set` (construction ops fail cleanly first in
+/// practice, so the panic is a last-resort guard, not a normal path).
+pub(crate) fn clif_type_for_opt(ty: &Ty) -> Option<ClifType> {
+    match ty {
+        Ty::Int | Ty::UInt | Ty::String => Some(clif_types::I64),
+        Ty::Float => Some(clif_types::F64),
+        Ty::Bool => Some(clif_types::I8),
+        Ty::Unit => Some(clif_types::I8),
+        _ => None,
+    }
+}
+
 /// Maps every Noctivue-level `Ty` this category needs to a Cranelift
 /// clif type. `String` is a single `I64` header pointer (see `abi.rs`'s
 /// string-model note — the 1:1 ValueId→Value mapping depends on it).
 /// Other aggregate/pointer types are out of scope for Step 1 and panic
 /// if reached — Step 2 extends this once StackAlloc/Load/Store exist.
-fn clif_type_for(ty: &Ty) -> ClifType {
+pub(crate) fn clif_type_for(ty: &Ty) -> ClifType {
     match ty {
         Ty::Int | Ty::UInt | Ty::String => clif_types::I64,
         Ty::Float => clif_types::F64,
@@ -66,14 +81,28 @@ pub struct RtRefs {
     pub frem: FuncRef,
 }
 
-/// Per-function lowering context: NIR ValueId -> Cranelift Value, plus
-/// the precomputed cross-references the driver resolved up front.
+/// Per-function lowering context: NIR ValueId -> Cranelift `Variable`,
+/// plus the precomputed cross-references the driver resolved up front.
+///
+/// Values are `Variable`s, NOT a ValueId->Value rebinding map — and that
+/// distinction is load-bearing. NIR ids are MUTABLE SLOTS, not SSA
+/// values: `Assign` reuses the target's EXISTING id (`Move { dst: v0,
+/// src: v15 }` overwrites slot v0 — see `lowering.rs`'s `Assign` arm),
+/// exactly like the VM's `frame.locals[dst] = ...`. A rebinding map is
+/// correct for straight-line code but silently wrong across back-edges
+/// (the header keeps referencing the pre-loop value forever — observed
+/// as a hanging `while` binary, since the counter never advances).
+/// `Variable`/`def_var`/`use_var` is Cranelift's mechanism for precisely
+/// this shape: the SSA builder inserts the merge params itself, including
+/// loop headers. Explicit `Instr::Phi`s are handled separately (edge
+/// copies at predecessors — see `define_phi_edges` in driver.rs), so the
+/// two mechanisms never double-handle a merge.
 pub struct FuncLowerCtx<'a> {
     /// NIR FuncId -> already-imported `FuncRef` in the function under
     /// construction (covers self-recursion: every function imports every
     /// function, including itself).
     pub funcrefs: &'a HashMap<NirFuncId, FuncRef>,
-    pub values: HashMap<ValueId, ClifValue>,
+    pub vars: HashMap<ValueId, Variable>,
     /// String-literal rodata: the `Const`'s dst ValueId -> (global value
     /// holding the byte address, byte length). Populated by the driver's
     /// data pass before lowering starts.
@@ -96,22 +125,33 @@ pub struct FuncLowerCtx<'a> {
 }
 
 impl<'a> FuncLowerCtx<'a> {
-    fn get(&self, id: ValueId) -> ClifValue {
-        *self.values.get(&id).unwrap_or_else(|| {
+    /// Read a NIR id through its `Variable`: resolves to the reaching
+    /// definition on the current path (loop-carried values included —
+    /// this is what a rebinding map cannot do).
+    pub(crate) fn get(&self, builder: &mut FunctionBuilder, id: ValueId) -> ClifValue {
+        let var = *self.vars.get(&id).unwrap_or_else(|| {
             panic!(
-                "NIR ValueId {} has no Cranelift value bound — either a \
-                 control-flow instruction (Step 2) produced it and this \
-                 lowerer doesn't yet handle that category, or NIR itself \
-                 is malformed (see landmine (c)/(d) — this should have \
-                 been a checked VmError equivalent, not a panic, once this \
-                 backend is past skeleton stage)",
-                id
+                "NIR ValueId {id} has no declared Cranelift variable — out-of-category \
+                 type (aggregates/closures) reached representable-only lowering. This is \
+                 a missing Step-2/3 category error surfacing as a backend panic instead \
+                 of `UnsupportedInstr`: construction ops (which fail cleanly first) were \
+                 bypassed, almost always via bare param-plumbing of an aggregate-typed \
+                 value. Name the construct, don't just retry."
             )
-        })
+        });
+        builder.use_var(var)
     }
 
-    fn set(&mut self, id: ValueId, val: ClifValue) {
-        self.values.insert(id, val);
+    /// Write a NIR id: `Move { dst: v0, src }` OVERWRITES slot v0 (see the
+    /// struct doc comment) — never an alias, never a fresh binding.
+    pub(crate) fn set(&mut self, builder: &mut FunctionBuilder, id: ValueId, val: ClifValue) {
+        let var = *self.vars.get(&id).unwrap_or_else(|| {
+            panic!(
+                "NIR ValueId {id} has no declared Cranelift variable (see `get`'s \
+                 message for what this means — same cause, write side)"
+            )
+        });
+        builder.def_var(var, val);
     }
 }
 
@@ -139,7 +179,14 @@ pub fn lower_instr(
     instr: &Instr,
 ) -> bool {
     match instr {
-        Instr::Const { dst, value, ty } => {
+        // NOTE: the declared `ty` is deliberately IGNORED here — the value
+        // is self-describing, and the frontend leaves some literal types
+        // as `Unknown` (observed: match-case literals), which a
+        // value↔type agreement assert tripped over. The VM does the same
+        // (it matches on the value, never the declared type), so
+        // value-derived codegen is parity-correct, not a shortcut. The
+        // declaration side (`collect_value_types`) mirrors this exactly.
+        Instr::Const { dst, value, .. } => {
             let v = match value {
                 ConstValue::Int(i) => builder.ins().iconst(clif_types::I64, *i as i64),
                 ConstValue::Float(f) => builder.ins().f64const(*f),
@@ -163,32 +210,22 @@ pub fn lower_instr(
                     return false;
                 }
             };
-            // Keep the declared-type mapping honest: a const's Cranelift
-            // value must have the width `clif_type_for` promises, so a
-            // later signature/param mismatch fails here, loudly, not at
-            // link time. (String consts go through the I64 header model.)
-            debug_assert!(matches!(
-                (value, ty.inner.clone()),
-                (
-                    ConstValue::Int(_),
-                    Ty::Int | Ty::UInt
-                ) | (ConstValue::Float(_), Ty::Float)
-                    | (ConstValue::Bool(_), Ty::Bool)
-                    | (ConstValue::Unit, Ty::Unit)
-                    | (ConstValue::String(_), Ty::String)
-            ));
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
 
-        // Pure alias: no instruction emitted, dst shares src's SSA value.
-        // (Move chains collapse naturally — each Move just re-keys the map.)
+        // Slot overwrite, no instruction emitted: `Move { dst, src }`
+        // redefines slot `dst` to `src`'s current value (see the struct
+        // doc comment — `Assign` reuses the target's id, so this is the
+        // instruction that makes `while` counters advance). Mechanically
+        // identical to any other `set`, kept as its own arm so the
+        // slot-semantics stays visible at the one site that matters.
         Instr::Move { dst, src } => {
-            let s = ctx.get(*src);
-            ctx.set(*dst, s);
+            let s = ctx.get(builder, *src);
+            ctx.set(builder, *dst, s);
         }
 
         Instr::Add { dst, lhs, rhs, ty } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             let v = match &ty.inner {
                 Ty::Float => builder.ins().fadd(l, r),
                 Ty::String => call_one(builder, ctx.rt.str_concat, &[l, r]),
@@ -198,10 +235,10 @@ pub fn lower_instr(
                      reaching here means a typeck bug, not a backend gap"
                 ),
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Sub { dst, lhs, rhs, ty } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             let v = match &ty.inner {
                 Ty::Float => builder.ins().fsub(l, r),
                 Ty::Int | Ty::UInt => builder.ins().isub(l, r),
@@ -210,10 +247,10 @@ pub fn lower_instr(
                      reaching here means a typeck bug, not a backend gap"
                 ),
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Mul { dst, lhs, rhs, ty } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             let v = match &ty.inner {
                 Ty::Float => builder.ins().fmul(l, r),
                 Ty::Int | Ty::UInt => builder.ins().imul(l, r),
@@ -222,10 +259,10 @@ pub fn lower_instr(
                      reaching here means a typeck bug, not a backend gap"
                 ),
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Div { dst, lhs, rhs, ty } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             // Integer division NEVER emits a bare sdiv/udiv: those trap the
             // process with no Noctivue-level diagnostic (the parity gap the
             // old NOTE comment on this arm warned about). The checked
@@ -241,10 +278,10 @@ pub fn lower_instr(
                      reaching here means a typeck bug, not a backend gap"
                 ),
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Rem { dst, lhs, rhs, ty } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             let v = match &ty.inner {
                 // No `frem` in Cranelift IR — runtime helper, never traps
                 // (matches the VM's float `%`, NaN/inf included).
@@ -256,28 +293,28 @@ pub fn lower_instr(
                      reaching here means a typeck bug, not a backend gap"
                 ),
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Neg { dst, src, ty } => {
-            let s = ctx.get(*src);
+            let s = ctx.get(builder, *src);
             let v = if matches!(ty.inner, Ty::Float) {
                 builder.ins().fneg(s)
             } else {
                 builder.ins().ineg(s)
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::Not { dst, src } => {
-            let s = ctx.get(*src);
+            let s = ctx.get(builder, *src);
             // Bool-not: bitwise_not then mask to 0/1. (Int-not per the VM's
             // `not_value`, which also accepts Int, would need a separate
             // path — Step 1's fixtures are Bool-only for `!`; extend when
             // an Int-`!` fixture actually exists.)
             let v = builder.ins().bxor_imm_u(s, 1);
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::ICmp { dst, op, lhs, rhs } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             use cranelift_codegen::ir::condcodes::IntCC;
             let cc = match op {
                 CmpOp::Eq => IntCC::Equal,
@@ -288,10 +325,10 @@ pub fn lower_instr(
                 CmpOp::Ge => IntCC::SignedGreaterThanOrEqual,
             };
             let v = builder.ins().icmp(cc, l, r);
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
         Instr::FCmp { dst, op, lhs, rhs } => {
-            let (l, r) = (ctx.get(*lhs), ctx.get(*rhs));
+            let (l, r) = (ctx.get(builder, *lhs), ctx.get(builder, *rhs));
             use cranelift_codegen::ir::condcodes::FloatCC;
             let cc = match op {
                 CmpOp::Eq => FloatCC::Equal,
@@ -302,11 +339,11 @@ pub fn lower_instr(
                 CmpOp::Ge => FloatCC::GreaterThanOrEqual,
             };
             let v = builder.ins().fcmp(cc, l, r);
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
 
         Instr::ToString { dst, src, from_ty } => {
-            let s = ctx.get(*src);
+            let s = ctx.get(builder, *src);
             // Type-directed: each source type converts differently, and
             // the NIR records the type at lowering time (when it is known)
             // precisely so this backend doesn't have to rediscover it.
@@ -320,7 +357,7 @@ pub fn lower_instr(
                 // Char/Unit/aggregates: no runtime helper yet — Step 2+.
                 _ => return false,
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
 
         Instr::Call { dst, func, args, ret_ty } => {
@@ -330,7 +367,7 @@ pub fn lower_instr(
                      must import every module function into every function body"
                 )
             });
-            let arg_vals: Vec<ClifValue> = args.iter().map(|a| ctx.get(*a)).collect();
+            let arg_vals: Vec<ClifValue> = args.iter().map(|a| ctx.get(builder, *a)).collect();
             let results = call(builder, fref, &arg_vals);
             // Unit-returning callees declare no Cranelift return (see
             // `signature_for`), so there is no SSA value to bind — dst gets
@@ -345,13 +382,13 @@ pub fn lower_instr(
                      return for every non-Unit type; declaration/use drifted",
                 )
             };
-            ctx.set(*dst, v);
+            ctx.set(builder, *dst, v);
         }
 
         Instr::Print { val } => {
             // One header-pointer argument (abi.rs string model). No dst:
             // Print is a statement-shaped instruction in a value world.
-            let s = ctx.get(*val);
+            let s = ctx.get(builder, *val);
             call(builder, ctx.rt.print, &[s]);
         }
 
@@ -364,18 +401,18 @@ pub fn lower_instr(
             // rather than silently returning garbage.
             if ctx.is_entry {
                 if let Some(v) = val {
-                    ctx.get(*v);
+                    ctx.get(builder, *v);
                 }
                 builder.ins().return_(&[]);
             } else if ctx.ret_is_unit {
                 if let Some(v) = val {
-                    ctx.get(*v);
+                    ctx.get(builder, *v);
                 }
                 builder.ins().return_(&[]);
             } else {
                 match val {
                     Some(v) => {
-                        let rv = ctx.get(*v);
+                        let rv = ctx.get(builder, *v);
                         builder.ins().return_(&[rv]);
                     }
                     None => {

@@ -4,16 +4,22 @@ use compiler::{lexer, parser, resolver, typeck};
 use compiler::diagnostics::DiagnosticSink;
 
 pub fn run(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: noct run-vm <file.nv>");
+    // Multi-file like `noct run` (see cmd_run::read_sources): libraries
+    // first, entry point last.
+    let paths: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    if paths.is_empty() {
+        eprintln!("usage: noct run-vm <file.nv>...");
         return 1;
     }
 
-    let path = &args[0];
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let (source, files) = match crate::cmd_run::read_sources(&paths) {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("error reading {}: {}", path, e);
+            eprintln!("{e}");
             return 1;
         }
     };
@@ -31,7 +37,7 @@ pub fn run(args: &[String]) -> i32 {
     // Phase 2's exit criteria (IMPLEMENTATION_PLAN.md §4) requires
     // to be absent before Phase 3 can start.
     if sink.has_errors() {
-        crate::cmd_run::print_diagnostics(path, &sink);
+        crate::cmd_run::print_diagnostics_multi(&files, &sink);
         return 1;
     }
 
@@ -45,7 +51,7 @@ pub fn run(args: &[String]) -> i32 {
             // Print any diagnostics emitted during lowering/execution,
             // matching cmd_run.rs's post-run diagnostic handling.
             if sink.has_errors() {
-                crate::cmd_run::print_diagnostics(path, &sink);
+                crate::cmd_run::print_diagnostics_multi(&files, &sink);
                 return 1;
             }
             0

@@ -258,26 +258,36 @@ fn differential_three_way_division_by_zero_trap_class() {
 }
 
 #[test]
-fn native_build_rejects_control_flow_loudly_not_silently() {
-    // `if` is valid, interpretable Noctivue today (Phase 1/2) but is
-    // Step-2 territory for native (`compile_function` rejects any
-    // function with more than one block). This is the CONTRACT check
-    // (NIR.md's "no silent recovery" discipline): `noct build` must fail
-    // LOUDLY, naming the function and the reason, never silently
-    // miscompile, hang, or drop the branch.
+fn native_build_supports_if_else_now() {
+    // Was the Step-1 contract check ("if is rejected"); `if`/`else` moved
+    // INTO scope with Step 2 (Branch/CondBranch/Phi). Keep this as a
+    // positive regression instead of deleting it outright — a future
+    // change that silently breaks control-flow codegen should fail a
+    // named test, not just the differential suite.
+    let out = build_and_run(
+        "step2_if",
+        "main():\n    let x = 5\n    if x > 3:\n        print(\"big\")\n    else:\n        print(\"small\")\n    print(\"done\")\n",
+    );
+    assert_eq!(out.status.code(), Some(0), "[step2_if] exit: {:?}", out.status.code());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "bigdone", "[step2_if] stdout");
+}
+
+#[test]
+fn native_build_rejects_enum_match_loudly_not_silently() {
+    // Enum/Option match (EnumTag/EnumPayload) is genuinely Step 3
+    // territory — this is the CONTRACT check now: `noct build` must fail
+    // LOUDLY naming the function and the unsupported instruction, never
+    // silently miscompile, hang, or drop the arm.
     let _guard = BUILD_LOCK.lock().expect("build lock poisoned");
-    let source = "main():\n    let x = 5\n    if x > 3:\n        print(\"big\")\n    else:\n        print(\"small\")\n";
-    let (src, exe) = write_case("diff3_unsupported_cf", source);
+    let source = "main():\n    let x: Option<Int> = Some(1)\n    match x:\n        Some(v): print(\"{v}\")\n        None: print(\"none\")\n";
+    let (src, exe) = write_case("diff3_unsupported_enum", source);
 
     let run = run_with_timeout({
         let mut c = Command::new(noct_bin());
         c.arg("run").arg(&src);
         c
     });
-    assert_eq!(
-        run.status.code(), Some(0),
-        "sanity: `if` must be valid, interpretable Noctivue today"
-    );
+    assert_eq!(run.status.code(), Some(0), "sanity: Option match must be valid, interpretable Noctivue today");
 
     let build = run_with_timeout({
         let mut c = Command::new(noct_bin());
@@ -288,11 +298,110 @@ fn native_build_rejects_control_flow_loudly_not_silently() {
 
     assert_eq!(
         build.status.code(), Some(1),
-        "[diff3_unsupported_cf] `noct build` must fail loudly (exit 1), not silently succeed, on control flow Step 1 doesn't support yet"
+        "[diff3_unsupported_enum] `noct build` must fail loudly (exit 1), not silently succeed, on aggregates Step 2 doesn't support yet"
     );
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         stderr.contains("does not yet lower") && stderr.contains("main"),
-        "[diff3_unsupported_cf] stderr must name the unsupported instruction and owning function: {stderr}"
+        "[diff3_unsupported_enum] stderr must name the unsupported instruction and owning function: {stderr}"
+    );
+}
+
+// ── Step 2: control-flow build-and-run, mirroring differential.rs's
+// exact fixture sources so any VM/native behavioral gap shows as a
+// stdout diff, not an "are these fixtures actually equivalent" question.
+
+#[test]
+fn native_while_loop() {
+    let out = build_and_run(
+        "step2_while",
+        "main():\n    let i = 0\n    while i < 3:\n        print(\"{i}\")\n        i = i + 1\n    print(\"done\")\n",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "012done");
+}
+
+#[test]
+fn native_build_rejects_for_loop_loudly_not_silently() {
+    // `for` desugars through ListLen/ListIndex (lowering.rs), which are
+    // Step 3 aggregate ops — no Cranelift list representation exists yet,
+    // so this CANNOT work in Step 2 and must fail loudly instead. Second
+    // contract test alongside the enum-match one: each names the exact
+    // missing instruction, pinning the Step-3 boundary precisely.
+    let _guard = BUILD_LOCK.lock().expect("build lock poisoned");
+    let source = "main():\n    for n in [10, 20, 30]:\n        print(\"{n}\")\n";
+    let (src, exe) = write_case("diff3_unsupported_for", source);
+
+    let run = run_with_timeout({
+        let mut c = Command::new(noct_bin());
+        c.arg("run").arg(&src);
+        c
+    });
+    assert_eq!(run.status.code(), Some(0), "sanity: `for` must be valid, interpretable Noctivue today");
+
+    let build = run_with_timeout({
+        let mut c = Command::new(noct_bin());
+        c.arg("build").arg(&src).arg("-o").arg(&exe);
+        c
+    });
+    let _ = std::fs::remove_dir_all(src.parent().expect("temp dir"));
+
+    assert_eq!(
+        build.status.code(), Some(1),
+        "[diff3_unsupported_for] `noct build` must fail loudly (exit 1), not silently succeed, on list ops Step 2 doesn't support yet"
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("does not yet lower") && stderr.contains("main"),
+        "[diff3_unsupported_for] stderr must name the unsupported instruction and owning function: {stderr}"
+    );
+}
+
+#[test]
+fn native_break_while() {
+    // break-in-while exercises Branch-to-exit + merge Phis with no list
+    // ops involved (unlike break-in-for, which needs Step 3).
+    let out = build_and_run(
+        "step2_break_while",
+        "main():\n    let i = 0\n    while true:\n        print(\"{i}\")\n        i = i + 1\n        if i >= 3:\n            break\n    print(\"done\")\n",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "012done");
+}
+
+#[test]
+fn native_continue_while() {
+    // continue-in-while exercises the back-edge jump + loop-header Phis.
+    let out = build_and_run(
+        "step2_continue_while",
+        "main():\n    let i = 0\n    while i < 3:\n        i = i + 1\n        if i == 2:\n            continue\n        print(\"{i}\")\n    print(\"done\")\n",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "13done");
+}
+
+#[test]
+fn native_int_match() {
+    let out = build_and_run(
+        "step2_match",
+        "main():\n    let x = 2\n    match x:\n        1: print(\"one\")\n        2: print(\"two\")\n        _: print(\"other\")\n    print(\"after\")\n",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "twoafter");
+}
+
+#[test]
+fn differential_three_way_while_loop() {
+    check_three_way(
+        "diff3_while",
+        "main():\n    let i = 0\n    while i < 3:\n        print(\"{i}\")\n        i = i + 1\n    print(\"done\")\n",
+    );
+}
+
+#[test]
+fn differential_three_way_while_loop_with_break() {
+    check_three_way(
+        "diff3_while_break",
+        "main():\n    let i = 0\n    while true:\n        print(\"{i}\")\n        i = i + 1\n        if i >= 3:\n            break\n    print(\"done\")\n",
     );
 }

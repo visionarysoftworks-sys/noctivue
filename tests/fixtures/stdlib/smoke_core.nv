@@ -1,0 +1,115 @@
+// tests/fixtures/stdlib/smoke_core.nv — concat gate for the core/math slice.
+// @skip-test (concat-only: callees live in the foundation files, SPEC.md §1)
+// Run: noct run <SPEC.md §5.1 foundation files in order> smoke_core.nv
+// Self-verifying: every expectation is an assert; exit 0 proves all values.
+// Prints a short transcript captured in tests/golden/stdlib/smoke_core.stdout.
+
+//! Test-only helpers (smoke_ prefix; not part of stdlib).
+
+fn smoke_double(x: Int) -> Int:
+    x * 2
+
+fn smoke_fail_after_ok(x: Int) -> Result<Int, String>:
+    if x > 100:
+        Err("too big")
+    else:
+        Ok(x + 1)
+
+main():
+    let m = "smoke"
+
+    // convert
+    assert_string_eq(int_to_string(42), "42")
+    assert_string_eq(float_to_string(1.5), "1.5")
+    assert_string_eq(bool_to_string(true), "true")
+    assert_string_eq(bool_to_string(false), "false")
+    assert_some(string_to_int("17"))
+    match string_to_float("2.5"):
+        Some(_): assert(true, "")
+        None: assert(false, "expected Some float")
+    assert_int_eq(option_expect(string_to_int("17"), m), 17)
+    assert_true(option_is_some(string_to_int("abc")) == false, "bad int is None")
+
+    // compare
+    assert_true(int_eq(1, 1), "int eq")
+    assert_true(float_eq(1.5, 1.5), "float eq")
+    assert_true(bool_eq(true, true), "bool eq")
+    assert_true(char_eq('a', 'a'), "char eq")
+    assert_true(int_lt(1, 2), "int lt")
+    assert_true(float_lt(1.5, 2.5), "float lt")
+    assert_true(int_lt(2, 1) == false, "int lt false")
+
+    // option
+    assert_true(option_is_some(Some(3)), "some int")
+    assert_true(option_is_some(None) == false, "none int")
+    assert_true(option_is_some_string(Some("hi")), "some string")
+    assert_true(option_is_some_bool(None) == false, "none bool")
+    assert_int_eq(option_unwrap_or(None, 4), 4)
+    assert_int_eq(option_unwrap_or(Some(6), 4), 6)
+    assert_int_eq(option_expect(Some(9), m), 9)
+    assert_int_eq(option_expect(option_map_int(smoke_double, Some(21)), m), 42)
+    assert_true(option_is_some(option_map_int(smoke_double, None)) == false, "map none")
+
+    // result
+    assert_true(result_is_ok(Ok(1)), "ok is ok")
+    assert_true(result_is_ok(Err("bad")) == false, "err not ok")
+    assert_true(result_is_ok_string(Ok("hi")), "string ok")
+    assert_int_eq(result_unwrap_or(Err("bad"), 7), 7)
+    assert_int_eq(result_unwrap_or(Ok(3), 7), 3)
+    assert_int_eq(result_expect(Ok(5), m), 5)
+    assert_int_eq(result_expect(result_map_int(smoke_double, Ok(20)), m), 40)
+    assert_true(result_is_ok(result_map_int(smoke_double, Err("e"))) == false, "map err")
+    assert_int_eq(result_expect(result_and_then_int(smoke_fail_after_ok, Ok(1)), m), 2)
+    assert_true(result_is_ok(result_and_then_int(smoke_fail_after_ok, Err("x"))) == false, "andthen err")
+
+    // math constants (range checks — exact float rendering is not asserted)
+    assert_true(pi() > 3.14, "pi lower")
+    assert_true(pi() < 3.15, "pi upper")
+    assert_true(tau() > 6.28, "tau lower")
+    assert_true(tau() < 6.29, "tau upper")
+    assert_true(e_const() > 2.71, "e lower")
+    assert_true(e_const() < 2.72, "e upper")
+
+    // math basic
+    assert_int_eq(abs(0 - 5), 5)
+    assert_int_eq(abs(5), 5)
+    assert_int_eq(abs(0), 0)
+    assert_int_eq(min_int(3, 7), 3)
+    assert_int_eq(max_int(3, 7), 7)
+    assert_int_eq(clamp_int(150, 0, 100), 100)
+    assert_int_eq(clamp_int(0 - 20, 0, 100), 0)
+    assert_int_eq(clamp_int(50, 0, 100), 50)
+    assert_int_eq(clamp_int(3, 3, 3), 3)
+    assert_int_eq(pow_int(2, 10), 1024)
+    assert_int_eq(pow_int(5, 0), 1)
+    assert_int_eq(pow_int(0, 3), 0)
+    assert_int_eq(gcd(12, 18), 6)
+    assert_int_eq(gcd(0, 0), 0)
+    assert_int_eq(gcd(0 - 12, 18), 6)
+    assert_true(is_even(4), "4 even")
+    assert_true(is_odd(7), "7 odd")
+    assert_true(is_even(0 - 4), "-4 even")
+    assert_true(is_odd(0 - 3), "-3 odd")
+    assert_true(is_even(3) == false, "3 not even")
+    assert_int_eq(abs_diff(10, 4), 6)
+    assert_int_eq(abs_diff(4, 10), 6)
+    assert_int_eq(sign(5), 1)
+    assert_int_eq(sign(0 - 3), 0 - 1)
+    assert_int_eq(sign(0), 0)
+    assert_int_eq(factorial(0), 1)
+    assert_int_eq(factorial(6), 720)
+    assert_int_eq(fibonacci(0), 0)
+    assert_int_eq(fibonacci(1), 1)
+    assert_int_eq(fibonacci(10), 55)
+    assert_true(is_prime(2), "2 prime")
+    assert_true(is_prime(17), "17 prime")
+    assert_true(is_prime(18) == false, "18 not prime")
+    assert_true(is_prime(1) == false, "1 not prime")
+    assert_true(is_prime(0 - 7) == false, "neg not prime")
+    assert_int_eq(lcm(12, 18), 36)
+    assert_int_eq(lcm(0, 5), 0)
+    assert_int_eq(lcm(7, 0), 0)
+
+    println("core: {int_to_string(gcd(12, 18))}")
+    println("core: {int_to_string(pow_int(2, 10))}")
+    println("smoke_core ok")
