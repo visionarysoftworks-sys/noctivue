@@ -66,6 +66,20 @@ Proposed MIME type: text/x-noctivue   [PROPOSED — not formally registered]
 Tooling that needs a language identifier **MUST** use `noctivue` (full)
 or `nv` (short) consistently rather than inventing per-editor variants.
 
+### 6.1b Project-Adjacent File Identity (ADR-017)
+
+```text
+Manifest:   nestpkg.nvpm   (custom Noctivue-flavored syntax, exact filename)
+Lockfile:   nestpkg.lock   (generated, checked in — no editor identity)
+Env file:   *.nv.env       (dotenv-compatible KEY=VALUE)
+```
+
+Editors associate `nestpkg.nvpm` by exact filename (highlighting
+approximates the `noctivue` grammar until a dedicated injection grammar
+exists). `nestpkg.lock`, being generated, gets none of the `.nv`
+identity per §6.7. `*.nv.env` files end in `.env` so existing
+dotenv tooling highlights them with no Noctivue-specific work.
+
 ### 6.2 File Identity Requirement
 
 `.nv` is the canonical identity of Noctivue source code — not merely a

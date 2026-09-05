@@ -62,6 +62,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "target-lexicon",
  "thiserror",
  "unicode-ident",
  "url",
@@ -507,6 +508,7 @@ version = "0.0.1"
 dependencies = [
  "compiler",
  "interp",
+ "runtime-native",
 ]
 
 [[package]]
@@ -616,6 +618,10 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "runtime-native"
+version = "0.0.1"
 
 [[package]]
 name = "rustc-hash"

@@ -1,0 +1,15 @@
+[package]
+name = "runtime-native"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Noctivue native-mode runtime: allocation, I/O, and trap facilities called from Cranelift-compiled code via extern \"C\""
+
+[lib]
+# Static lib so `noct build`'s linker step can pull in these symbols
+# alongside the object file Cranelift emits. `cdylib` is not needed —
+# nothing outside the Noctivue toolchain links against this.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]

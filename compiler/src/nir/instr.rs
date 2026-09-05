@@ -1,5 +1,6 @@
 //! NIR instruction set — concrete instructions per NIR.md §4.
 
+use crate::hir::types::Ty;
 use crate::nir::types::{BlockId, FuncId, NirTy, ValueId};
 use std::fmt;
 
@@ -138,8 +139,11 @@ pub enum Instr {
     OptionNone { dst: ValueId, ty: NirTy },
 
     // ── Conversion ─────────────────────────────────────────────────────────
-    /// `%dst = to_string %val` — convert value to String
-    ToString { dst: ValueId, src: ValueId },
+    /// `%dst = to_string %val` — convert value to String.
+    /// `from_ty` records the source type: string conversion is
+    /// type-directed (int/float/bool each convert differently), and the
+    /// Cranelift backend selects its runtime helper from this field.
+    ToString { dst: ValueId, src: ValueId, from_ty: Ty },
 
     // ── Phi / Block Arguments ───────────────────────────────────────────────
     /// `%dst = phi [val0, block0], [val1, block1], ...` — phi node (SSA)
@@ -206,7 +210,7 @@ impl fmt::Display for Instr {
             Instr::TryUnwrap { dst, src, ty } => write!(f, "{} = try_unwrap {} : {}", dst, src, ty),
             Instr::OptionSome { dst, val, ty } => write!(f, "{} = option_some {} : {}", dst, val, ty),
             Instr::OptionNone { dst, ty } => write!(f, "{} = option_none : {}", dst, ty),
-            Instr::ToString { dst, src } => write!(f, "{} = to_string {}", dst, src),
+            Instr::ToString { dst, src, .. } => write!(f, "{} = to_string {}", dst, src),
             Instr::Phi { dst, incoming, ty } => write!(f, "{} = phi [{}] : {}", dst, incoming.iter().map(|(v, b)| format!("{} from {}", v, b)).collect::<Vec<_>>().join(", "), ty),
             Instr::ClosureNew { dst, func, captured, ty } => write!(f, "{} = closure_new {}({}) : {}", dst, func, captured.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
             Instr::ClosureCall { dst, closure, args, ret_ty } => write!(f, "{} = closure_call {}({}) : {}", dst, closure, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),

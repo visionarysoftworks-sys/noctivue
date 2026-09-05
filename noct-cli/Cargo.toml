@@ -13,3 +13,7 @@ path = "src/main.rs"
 [dependencies]
 compiler = { path = "../compiler" }
 interp    = { path = "../interp" }
+# Not `use`d in Rust source: `noct build` links it into the shim crate via
+# a path dependency (see cmd_build.rs). Declared so the requirement breaks
+# loudly at resolve time if the crate ever moves, not mid-link.
+runtime-native = { path = "../runtime-native" }

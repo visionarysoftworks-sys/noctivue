@@ -27,6 +27,24 @@ pub struct Label {
     pub message: String,
 }
 
+/// A machine-applicable suggested fix attached to a diagnostic.
+///
+/// This is a structured edit description (what to put where), not free
+/// text: external tooling (editors, AI agents — see AI_TOOLING.md §4)
+/// can apply `replacement` at `span` without parsing the human-readable
+/// `message`. Added for the borrow checker's use-after-move diagnostics;
+/// other passes should reuse it rather than embedding fix instructions
+/// in message strings.
+#[derive(Debug, Clone)]
+pub struct Suggestion {
+    /// Human-readable description of the suggested fix.
+    pub message: String,
+    /// Replacement source text for `span`.
+    pub replacement: String,
+    /// The span to replace.
+    pub span: Span,
+}
+
 /// A structured compiler diagnostic.
 ///
 /// Diagnostics are emitted by every stage and collected in a [`DiagnosticSink`].
@@ -40,6 +58,8 @@ pub struct Diagnostic {
     pub labels: Vec<Label>,
     /// Optional longer explanation or suggested fix.
     pub notes: Vec<String>,
+    /// Optional machine-applicable suggested fix.
+    pub suggested_fix: Option<Suggestion>,
     /// Stable error code, e.g. `"E0001"`.
     pub code: Option<String>,
 }
@@ -51,6 +71,7 @@ impl Diagnostic {
             message: message.into(),
             labels: Vec::new(),
             notes: Vec::new(),
+            suggested_fix: None,
             code: None,
         }
     }
@@ -61,12 +82,27 @@ impl Diagnostic {
             message: message.into(),
             labels: Vec::new(),
             notes: Vec::new(),
+            suggested_fix: None,
             code: None,
         }
     }
 
     pub fn with_span(mut self, span: Span, label: impl Into<String>) -> Self {
         self.labels.push(Label { span, message: label.into() });
+        self
+    }
+
+    /// Attach a secondary span label (e.g. "value moved here" alongside
+    /// the primary "value used here"). Serialized as an additional entry
+    /// in the diagnostic's `labels` array.
+    pub fn with_secondary_span(mut self, span: Span, label: impl Into<String>) -> Self {
+        self.labels.push(Label { span, message: label.into() });
+        self
+    }
+
+    /// Attach a machine-applicable suggested fix.
+    pub fn with_suggestion(mut self, suggestion: Suggestion) -> Self {
+        self.suggested_fix = Some(suggestion);
         self
     }
 

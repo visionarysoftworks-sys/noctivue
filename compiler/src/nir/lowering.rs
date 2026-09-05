@@ -1327,6 +1327,7 @@ impl LoweringContext {
                             nir_block.add_instr(Instr::ToString {
                                 dst: str_val,
                                 src: expr_val,
+                                from_ty: e.ty.clone(),
                             });
                             if let Some(existing) = result_val {
                                 let new_result = ValueId(self.next_local_index);

@@ -8,7 +8,7 @@
 //! | `noct test`           | 1     | stub         |
 //! | `noct ast`            | 1     | stub         |
 //! | `noct diagnostics`    | 1     | stub         |
-//! | `noct build`          | 3     | not yet      |
+//! | `noct build`          | 3     | straight-line only |
 //! | `noct fmt`            | 4     | not yet      |
 //! | `noct lint`           | 4     | not yet      |
 //! | `noct add`            | 4     | not yet      |

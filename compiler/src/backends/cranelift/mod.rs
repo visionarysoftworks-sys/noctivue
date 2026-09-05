@@ -7,4 +7,5 @@
 //! mode are Phase 3 follow-ups (see IMPLEMENTATION_PLAN.md §5).
 
 pub mod abi;
+pub mod driver;
 pub mod lower;

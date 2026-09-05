@@ -231,9 +231,20 @@ pub(crate) fn diag_to_json(diag: &compiler::diagnostics::Diagnostic) -> String {
 
     let notes: Vec<String> = diag.notes.iter().map(|n| json_string(n)).collect();
 
+    let suggested_fix = match &diag.suggested_fix {
+        Some(s) => format!(
+            "{{\"message\": {}, \"replacement\": {}, \"span\": {{\"start\": {}, \"end\": {}}}}}",
+            json_string(&s.message),
+            json_string(&s.replacement),
+            s.span.start,
+            s.span.end,
+        ),
+        None => "null".to_string(),
+    };
+
     format!(
         "    {{\"severity\": {}, \"code\": {code}, \"message\": {}, \
-         \"labels\": [{}], \"notes\": [{}]}}",
+         \"labels\": [{}], \"notes\": [{}], \"suggested_fix\": {suggested_fix}}}",
         json_string(severity),
         json_string(&diag.message),
         labels.join(", "),

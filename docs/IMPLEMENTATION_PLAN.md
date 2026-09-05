@@ -145,6 +145,23 @@ advanced sandboxing.
 - A basic FFI round-trip (FFI.md) — call one C stdlib function
   (e.g., `strlen`) — works inside `unsafe`.
 
+**Progress note (Step 1 — straight-line plumbing):** the exit criteria
+are NOT met yet, but the full pipeline runs end-to-end for the
+straight-line category: NIR constants/`Move`/int+float arithmetic (with
+checked div/rem)/comparisons/`ToString`/calls/`Print`/`Return` lower to
+Cranelift IR, string literals ride in `.rodata` under a one-pointer
+header model (`runtime-native/src/lib.rs`), and `noct build <file.nv>
+[-o <out>] [--release]` links via a generated shim crate (cargo
+piggyback — deliberately NOT raw link.exe) against `runtime-native` and
+produces a runnable binary. Entry convention: source `main` becomes
+`noctivue_main() -> ()`; its return value is dropped like the
+interpreter drops it (exit 0 on success — a deliberate parity rule, see
+`compiler/src/backends/cranelift/driver.rs`). Proofs:
+`compiler/tests/native_smoke.rs` (2 object-emission cases) and
+`noct-cli/tests/native_build.rs` (3 build-and-run cases incl. a
+div-by-zero trap with exit-code parity against `run-vm`). Still open
+(Steps 2–4): control flow, aggregates, borrow enforcement, FFI.
+
 ## 6. Phase 4 — M3: Stdlib + Package Manager + Testing + Formatter + LSP
 
 **Preconditions:** Phase 3 exit criteria met.

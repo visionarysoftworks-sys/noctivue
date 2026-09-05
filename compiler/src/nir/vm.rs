@@ -486,7 +486,7 @@ impl Vm {
             Instr::OptionNone { dst, ty: _ } => {
                 frame.locals[dst.0 as usize] = VmValue::Option(None);
             }
-            Instr::ToString { dst, src } => {
+            Instr::ToString { dst, src, .. } => {
                 let v = self.get_value(frame, *src)?;
                 let s = format!("{}", v);
                 frame.locals[dst.0 as usize] = VmValue::String(s);
