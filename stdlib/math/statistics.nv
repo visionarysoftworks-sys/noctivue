@@ -1,0 +1,5 @@
+//! math/statistics — descriptive statistics (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: Float builtins (sqrt, floor)
+//! and list-push land — mean/median/variance need both (SPEC.md C5).
+//! Zero items by design (SPEC.md §6).

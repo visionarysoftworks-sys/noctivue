@@ -1,0 +1,64 @@
+//! option — helpers for Option<T> (absence without null).
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.4). Monomorphic
+//! (generics do not unify at call sites yet, SPEC.md C3): Int variants
+//! here, String/Bool twins for is_some. Match arms use the Variant():
+//! form — a bare identifier arm is a binding, never a test (SPEC.md C8).
+
+/// True when the option holds a value (Int).
+fn option_is_some(o: Option<Int>) -> Bool:
+    match o:
+        Some(_): true
+        None: false
+
+/// True when the option holds a value (String).
+fn option_is_some_string(o: Option<String>) -> Bool:
+    match o:
+        Some(_): true
+        None: false
+
+/// True when the option holds a value (Bool).
+fn option_is_some_bool(o: Option<Bool>) -> Bool:
+    match o:
+        Some(_): true
+        None: false
+
+/// The value, or the fallback when None.
+fn option_unwrap_or(o: Option<Int>, fallback: Int) -> Int:
+    o ?? fallback
+
+/// The value. Panics with msg when None (precondition failure, SPEC.md E1).
+fn option_expect(o: Option<Int>, msg: String) -> Int:
+    match o:
+        Some(v): v
+        None: panic(msg)
+
+/// Apply f to the value when present, pass None through.
+fn option_map_int(f: (Int) -> Int, o: Option<Int>) -> Option<Int>:
+    match o:
+        Some(v): Some(f(v))
+        None: None
+
+/// The first present option (a when Some, else b).
+fn option_or(a: Option<Int>, b: Option<Int>) -> Option<Int>:
+    match a:
+        Some(_): a
+        None: b
+
+/// b when a is present, None otherwise.
+fn option_and(a: Option<Int>, b: Option<Int>) -> Option<Int>:
+    match a:
+        Some(_): b
+        None: None
+
+/// Collapse one nesting level (Some(Some(v)) -> Some(v), else None).
+fn option_flatten(o: Option<Option<Int>>) -> Option<Int>:
+    match o:
+        Some(inner): inner
+        None: None
+
+/// True when the option holds exactly v.
+fn option_contains(o: Option<Int>, v: Int) -> Bool:
+    match o:
+        Some(x): x == v
+        None: false

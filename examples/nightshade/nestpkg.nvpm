@@ -1,0 +1,4 @@
+package:
+    name: nightshade
+    version: 0.1.0
+    description: A small Noctivue project tracker example.

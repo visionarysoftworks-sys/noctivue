@@ -1,0 +1,30 @@
+//! core/compare — equality and ordering helpers for primitives.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.3). String helpers
+//! live in strings/string.nv (string_eq); this module owns Int/Float/Bool/
+//! Char. Clamping lives in math/basic.nv (clamp_int) — there is exactly
+//! one clamp, SPEC.md §10.
+
+/// Int equality.
+fn int_eq(a: Int, b: Int) -> Bool:
+    a == b
+
+/// Float equality.
+fn float_eq(a: Float, b: Float) -> Bool:
+    a == b
+
+/// Bool equality.
+fn bool_eq(a: Bool, b: Bool) -> Bool:
+    a == b
+
+/// Char equality.
+fn char_eq(a: Char, b: Char) -> Bool:
+    a == b
+
+/// Int less-than.
+fn int_lt(a: Int, b: Int) -> Bool:
+    a < b
+
+/// Float less-than.
+fn float_lt(a: Float, b: Float) -> Bool:
+    a < b

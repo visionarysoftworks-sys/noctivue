@@ -1,0 +1,7 @@
+//! Smoke test for the Nightshade example.
+fn double(x: Int) -> Int:
+    x * 2
+
+main():
+    assert(double(21) == 42, "double works")
+    println("Nightshade tests ok")

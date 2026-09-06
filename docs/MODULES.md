@@ -1,6 +1,6 @@
 # MODULES.md — Modules & Imports
 
-**Status:** Core model Confirmed; package-manifest format Open (see TOOLCHAIN.md).
+**Status:** Local file modules implemented; package-manifest format Open (see TOOLCHAIN.md).
 
 ## 1. Compilation Units
 
@@ -38,9 +38,10 @@ Principle 7).
 
 ## 4. Path Resolution
 
-Paths are resolved: (1) relative to the current package's module tree,
-then (2) against declared external dependencies (TOOLCHAIN.md §3). There
-is no implicit global namespace merge across packages.
+Paths are resolved relative to the importing file, then against the nearest
+`lib/` directory in the current package. Every file is parsed independently,
+linked through its import graph, and cycles are diagnosed at the import edge.
+External dependencies remain package-manifest work (TOOLCHAIN.md §3).
 
 ## 5. Re-exports — Proposed
 

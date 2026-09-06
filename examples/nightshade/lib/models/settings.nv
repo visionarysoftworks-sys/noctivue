@@ -1,0 +1,4 @@
+struct Settings:
+    dark_mode: Bool
+    notifications: Bool
+    language: String

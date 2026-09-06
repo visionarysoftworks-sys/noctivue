@@ -16,17 +16,20 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    let (source, files) = match crate::cmd_run::read_sources(&paths) {
+    let graph = match crate::cmd_run::read_module_graph(&paths) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
             return 1;
         }
     };
+    let (source, files) = graph.joined_source();
 
     let mut sink = DiagnosticSink::new();
     let tokens = lexer::lex(&source, &mut sink);
     let program = parser::parse(&tokens, &mut sink);
+    graph.emit_diagnostics(&mut sink);
+    let program = graph.link(program);
     let program = resolver::resolve(program, &mut sink);
     let module = typeck::typecheck(program, &mut sink);
 

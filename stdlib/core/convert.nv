@@ -1,0 +1,28 @@
+//! core/convert — named wrappers for the primitive conversion builtins.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.2). User code should
+//! call these names, never the bare builtins, so a future change to the
+//! conversion story touches one module, not every caller.
+
+/// Convert an Int to its decimal String form.
+fn int_to_string(x: Int) -> String:
+    "{x}"
+
+/// Convert a Float to its String form.
+fn float_to_string(x: Float) -> String:
+    "{x}"
+
+/// Convert a Bool to "true" / "false".
+fn bool_to_string(b: Bool) -> String:
+    if b:
+        "true"
+    else:
+        "false"
+
+/// Parse a String as an Int. Returns None when the text is not an integer.
+fn string_to_int(s: String) -> Option<Int>:
+    to_int(s)
+
+/// Parse a String as a Float. Returns None when the text is not a float.
+fn string_to_float(s: String) -> Option<Float>:
+    to_float(s)

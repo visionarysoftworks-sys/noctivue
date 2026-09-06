@@ -1,0 +1,5 @@
+struct AppTheme:
+    name: String
+
+fn theme_message(theme: AppTheme) -> String:
+    "{theme.name} theme initialized"

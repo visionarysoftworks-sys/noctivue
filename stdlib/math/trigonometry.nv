@@ -1,0 +1,5 @@
+//! math/trigonometry — trig functions (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: Float builtins (sin, cos, atan)
+//! land — these cannot be written in pure .nv. Zero items by design
+//! (SPEC.md §6).

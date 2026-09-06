@@ -30,7 +30,7 @@
 //! lifetime management for native-mode strings arrives with the borrow
 //! checker (Step 3) and the freestanding profile (M6), not here.
 
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc, alloc_zeroed, Layout};
 use std::io::Write;
 use std::slice;
 use std::str;
@@ -117,6 +117,17 @@ pub extern "C" fn noctivue_rt_str_from_float(v: f64) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn noctivue_rt_str_from_bool(v: u8) -> *mut u8 {
     unsafe { alloc_str(if v != 0 { b"true" } else { b"false" }) }
+}
+
+/// `noctivue_rt_str_from_str(s)` — identity: return the header pointer
+/// unchanged. Declared in `abi::RUNTIME_IMPORTS` for API symmetry and
+/// therefore emitted as an import in every native object, so the
+/// definition must exist even though no lowering calls it yet. Safe
+/// (not `unsafe`): the pointer is passed through untouched, never
+/// dereferenced — strings are immutable values, so no copy is needed.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_str_from_str(s: *mut u8) -> *mut u8 {
+    s
 }
 
 /// `noctivue_rt_str_concat(a, b)` — fresh header holding `a` followed by `b`.
@@ -244,6 +255,91 @@ pub extern "C" fn noctivue_rt_frem(a: f64, b: f64) -> f64 {
     a % b
 }
 
+/// `noctivue_rt_alloc(bytes)` — zeroed record allocation backing
+/// aggregate construction in native code. Headers and records are
+/// never freed (leak by design, see module docs).
+#[no_mangle]
+pub extern "C" fn noctivue_rt_alloc(bytes: usize) -> *mut u8 {
+    let layout = Layout::from_size_align(bytes.max(8), 8).expect("alloc layout");
+    unsafe { alloc_zeroed(layout) }
+}
+
+/// `noctivue_rt_list_get(list, idx)` — bounds-checked element read
+/// from a `[len, e0, e1, ...]` i64 record. Traps loudly (stderr +
+/// `NOCTIVUE_TRAP_EXIT_CODE`) on out-of-bounds — same discipline as
+/// element stores, never a silent garbage read.
+///
+/// # Safety
+/// `list` must point to a readable record whose first slot holds a
+/// valid element count.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_list_get(list: *const u8, idx: i64) -> i64 {
+    let len = *(list as *const i64);
+    if idx < 0 || idx >= len {
+        eprintln!("noctivue: runtime error: list index out of bounds");
+        std::process::exit(NOCTIVUE_TRAP_EXIT_CODE);
+    }
+    *(list as *const i64).add(1 + idx as usize)
+}
+
+/// `noctivue_rt_strlen(ptr)` — NUL scan for the FFI round trip
+/// (Phase 3 exit criterion). No platform `libc` dependency: "scan
+/// for NUL" is the whole implementation. Null header/data pointer
+/// yields 0; interior NULs stop the scan (C semantics). Noctivue
+/// strings are UTF-8 and NOT necessarily null-terminated (FFI.md
+/// §7) — the FFI boundary pays the NUL cost, never these helpers.
+///
+/// # Safety
+/// Beyond the null cases above, `ptr` must be a header whose `data`
+/// points to at least one readable byte.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_strlen(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let data = *(ptr as *const *const u8);
+    if data.is_null() {
+        return 0;
+    }
+    let mut len: i64 = 0;
+    while *data.add(len as usize) != 0 {
+        len += 1;
+    }
+    len
+}
+
+// ── Phase 5: net.http FFI stubs ──────────────────────────────────────────────
+//
+// These are identity/passthrough stubs that allow the .nv stdlib to call
+// them without linker errors. Real network I/O is implemented in later
+// Phase 5 iterations; the symbols exist so the API surface is wired.
+// Each takes a String header pointer (I64 per abi.rs contract) and
+// returns an I64 (String header) representing the result or empty error string.
+
+/// `noctivue_rt_http_get(url: I64) -> I64` — placeholder; returns empty string.
+/// Real implementation will perform a DNS lookup + TCP connect + HTTP/1.1 request.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_http_get(_url: i64) -> i64 {
+    0
+}
+
+/// `noctivue_rt_http_post(url: I64, body: I64) -> I64` — placeholder.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_http_post(_url: i64, _body: i64) -> i64 {
+    0
+}
+
+/// `noctivue_rt_http_server_start(port: I64) -> I64` — returns opaque server handle or 0 on failure.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_http_server_start(_port: i64) -> i64 {
+    0
+}
+
+/// `noctivue_rt_http_server_serve(server: I64)` — blocks running the server event loop.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_http_server_serve(_server: i64) {
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +362,54 @@ mod tests {
     fn print_handles_null_safely() {
         unsafe {
             noctivue_rt_print(std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn str_from_str_is_identity() {
+        unsafe {
+            let h = noctivue_rt_str_from_parts(b"hello".as_ptr(), 5);
+            assert_eq!(noctivue_rt_str_from_str(h), h);
+            assert_eq!(read_str(noctivue_rt_str_from_str(h)), "hello");
+        }
+    }
+
+    #[test]
+    fn alloc_and_list_get_round_trip() {
+        unsafe {
+            let rec = noctivue_rt_alloc(24);
+            assert!(!rec.is_null());
+            // Zeroed: fresh slots read back 0 without any store.
+            assert_eq!(*(rec as *const i64), 0);
+            // Shape a 2-list manually: [len=2][10][20].
+            *(rec as *mut i64) = 2;
+            *(rec as *mut i64).add(1) = 10;
+            *(rec as *mut i64).add(2) = 20;
+            assert_eq!(noctivue_rt_list_get(rec, 0), 10);
+            assert_eq!(noctivue_rt_list_get(rec, 1), 20);
+        }
+    }
+
+    #[test]
+    fn strlen_round_trip() {
+        // Phase 3 FFI round-trip proof: a header pointer wrapping the
+        // byte address of a C string returns the correct strlen.
+        // Lengths INCLUDE the terminator: `from_parts` copies exactly
+        // `len` bytes and never appends a NUL, so the caller's bytes
+        // must carry it (Noctivue strings are UTF-8, not necessarily
+        // null-terminated — FFI.md §7). Anything else reads past the
+        // buffer (flaky by construction, never do it).
+        unsafe {
+            let c_hello = [b'h', b'e', b'l', b'l', b'o', 0u8];
+            let header = noctivue_rt_str_from_parts(c_hello.as_ptr(), 6);
+            assert_eq!(noctivue_rt_strlen(header), 5);
+            let c_empty = [0u8];
+            let empty = noctivue_rt_str_from_parts(c_empty.as_ptr(), 0);
+            assert_eq!(noctivue_rt_strlen(empty), 0);
+            // Interior NULs stop the scan (C semantics).
+            let c_with_nul = [b'a', b'b', b'c', 0u8, b'd', b'e', b'f', 0u8];
+            let with_nul = noctivue_rt_str_from_parts(c_with_nul.as_ptr(), 8);
+            assert_eq!(noctivue_rt_strlen(with_nul), 3);
         }
     }
 }

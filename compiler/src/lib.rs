@@ -12,6 +12,7 @@ pub mod borrowck;
 pub mod diagnostics;
 pub mod hir;
 pub mod lexer;
+pub mod modules;
 pub mod nir;
 pub mod parser;
 pub mod resolver;

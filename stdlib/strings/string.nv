@@ -1,0 +1,81 @@
+//! strings/string — String helpers as free functions.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.9). Method-call
+//! syntax (s.contains(x)) fails at runtime today (SPEC.md C1), so every
+//! helper takes the string as its first argument. Search loops index
+//! chars directly (s[i] -> Char, s.length) — pure .nv, no builtins.
+
+/// Length in chars.
+fn string_len(s: String) -> Int:
+    s.length
+
+/// True when the string holds no chars.
+fn string_is_empty(s: String) -> Bool:
+    s.length == 0
+
+/// Char at i, or None when i is out of bounds (never panics).
+fn string_char_at(s: String, i: Int) -> Option<Char>:
+    if i < 0:
+        None
+    else:
+        if i < s.length:
+            Some(s[i])
+        else:
+            None
+
+/// String equality.
+fn string_eq(a: String, b: String) -> Bool:
+    a == b
+
+/// Concatenation.
+fn string_concat(a: String, b: String) -> String:
+    a + b
+
+/// True when s begins with prefix (empty prefix always matches).
+fn string_starts_with(s: String, prefix: String) -> Bool:
+    if prefix.length > s.length:
+        false
+    else:
+        var i = 0
+        var ok = true
+        while i < prefix.length:
+            if s[i] != prefix[i]:
+                ok = false
+            i = i + 1
+        ok
+
+/// True when s ends with suffix (empty suffix always matches).
+fn string_ends_with(s: String, suffix: String) -> Bool:
+    if suffix.length > s.length:
+        false
+    else:
+        var offset = s.length - suffix.length
+        var i = 0
+        var ok = true
+        while i < suffix.length:
+            if s[offset + i] != suffix[i]:
+                ok = false
+            i = i + 1
+        ok
+
+/// True when needle occurs in s (empty needle always matches).
+fn string_contains(s: String, needle: String) -> Bool:
+    if needle.length == 0:
+        true
+    else:
+        if needle.length > s.length:
+            false
+        else:
+            var found = false
+            var start = 0
+            while start <= s.length - needle.length:
+                var hit = true
+                var j = 0
+                while j < needle.length:
+                    if s[start + j] != needle[j]:
+                        hit = false
+                    j = j + 1
+                if hit:
+                    found = true
+                start = start + 1
+            found

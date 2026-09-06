@@ -1,0 +1,5 @@
+//! testing/mock — mocks and fakes (no code yet).
+//!
+//! Status: reserved (M5). Unblocks when: the integration-test harness
+//! lands (IMPLEMENTATION_PLAN.md Phase 6.5). Zero items by design
+//! (SPEC.md §6).

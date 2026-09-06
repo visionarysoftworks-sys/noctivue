@@ -1,0 +1,45 @@
+//! time/duration — a millisecond time span (no clock needed).
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.11). Pure value
+//! arithmetic over a struct — no syscalls, no builtins. Wall-clock
+//! readers (clock/instant/timezone) stay reserved: they need OS access.
+
+/// A span of time, stored as whole milliseconds (may be negative).
+Duration:
+    millis: Int
+
+/// Build from whole milliseconds.
+fn duration_from_millis(ms: Int) -> Duration:
+    Duration { millis: ms }
+
+/// The zero span.
+fn duration_zero() -> Duration:
+    Duration { millis: 0 }
+
+/// Whole milliseconds in the span.
+fn duration_as_millis(d: Duration) -> Int:
+    d.millis
+
+/// True when the span is zero.
+fn duration_is_zero(d: Duration) -> Bool:
+    d.millis == 0
+
+/// Span addition.
+fn duration_add(a: Duration, b: Duration) -> Duration:
+    Duration { millis: a.millis + b.millis }
+
+/// Span subtraction.
+fn duration_sub(a: Duration, b: Duration) -> Duration:
+    Duration { millis: a.millis - b.millis }
+
+/// Scale a span by an integer factor.
+fn duration_scale(d: Duration, factor: Int) -> Duration:
+    Duration { millis: d.millis * factor }
+
+/// Span equality.
+fn duration_eq(a: Duration, b: Duration) -> Bool:
+    a.millis == b.millis
+
+/// Strict span ordering.
+fn duration_lt(a: Duration, b: Duration) -> Bool:
+    a.millis < b.millis

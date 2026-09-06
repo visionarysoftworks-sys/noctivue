@@ -1,0 +1,13 @@
+struct Project:
+    id: String
+    name: String
+    description: String
+    active: Bool
+
+fn archive_project(project: Project) -> Project:
+    Project {
+        id: project.id,
+        name: project.name,
+        description: project.description,
+        active: false
+    }

@@ -1,0 +1,2 @@
+fn dashboard_title() -> String:
+    "Nightshade Dashboard"

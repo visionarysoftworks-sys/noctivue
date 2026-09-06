@@ -1,0 +1,17 @@
+//! strings/format — value-to-String rendering.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.9). Int/Float
+//! rendering lives in core/convert.nv (int_to_string, float_to_string —
+//! exactly one name per conversion, SPEC.md §10); this module owns the
+//! remaining primitive twins.
+
+/// Render a Bool ("true" / "false").
+fn format_bool(b: Bool) -> String:
+    if b:
+        "true"
+    else:
+        "false"
+
+/// Render a Char as a one-char String.
+fn format_char(c: Char) -> String:
+    "{c}"

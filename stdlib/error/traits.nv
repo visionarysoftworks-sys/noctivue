@@ -1,0 +1,18 @@
+//! error/traits — Error trait definitions.
+//!
+//! Status: reserved (M4+, stdlib/SPEC.md §4 / C4).
+//!
+//! Trait-based error handling is explicitly out of scope for M3: the
+//! language has no `trait`/`impl` method dispatch today (SPEC.md C4),
+//! and there is no `Error` trait (SPEC.md §4: E stays an ordinary type).
+//! All error behavior is expressed through free functions and the
+//! language's built-in `panic`, `Option`, and `Result` (E1–E3), plus
+//! `?` / `??` for propagation (E4).
+//!
+//! Future design (M4, when traits land):
+//! - A `trait Display` for rendering error values.
+//! - A `trait Error` sub-trait carrying `fn message(&self) -> String`.
+//! - `impl Error for <typed enum>` per error category.
+//!
+//! Unblock condition: trait/impl support (SPEC.md C4) + typed error
+//! enums from `error/types.nv`.

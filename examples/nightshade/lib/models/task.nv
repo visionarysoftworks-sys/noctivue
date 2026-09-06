@@ -1,0 +1,12 @@
+enum TaskStatus:
+    Pending
+    InProgress
+    Completed
+
+struct Task:
+    id: String
+    title: String
+    status: TaskStatus
+
+fn complete_task(task: Task) -> Task:
+    Task { id: task.id, title: task.title, status: Completed }

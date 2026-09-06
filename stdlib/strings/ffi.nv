@@ -1,0 +1,39 @@
+//! strings/ffi — FFI boundary helpers (C string conversions).
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §?). Cross-backend helpers
+//! for serializing to/from C-friendly representations. No native builtins
+//! required.
+
+/// Convert a String to a C-style null-terminated buffer.
+/// Returns a pointer to allocated memory that must be freed by the caller.
+fn string_to_cstr(s: String) -> Ptr<Char>:
+    var buf = calloc(s.length + 1)
+    var i = 0
+    while i < s.length:
+        buf[i] = s[i]
+        i = i + 1
+    buf[s.length] = '\0'
+    buf
+
+/// Free a C-style string buffer.
+fn free_cstr(ptr: Ptr<Char>):
+    free(ptr)
+
+/// Convert a C-style null-terminated string to a Noctivue String.
+fn cstr_to_string(ptr: Ptr<Char>) -> String:
+    var len = 0
+    while ptr[len] != '\0':
+        len = len + 1
+    var s = alloc_string(len)
+    var i = 0
+    while i < len:
+        s[i] = ptr[i]
+        i = i + 1
+    s
+
+/// Get length of a C-style string without allocations.
+fn strlen_cstr(ptr: Ptr<Char>) -> Int:
+    var len = 0
+    while ptr[len] != '\0':
+        len = len + 1
+    len

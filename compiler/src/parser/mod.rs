@@ -27,9 +27,31 @@ use std::collections::HashSet;
 ///
 /// Errors are emitted into `sink`. The returned `Program` may be partially
 /// constructed if errors were encountered (best-effort error recovery).
+///
+/// Comments are whitespace as far as the grammar is concerned: they are
+/// stripped at this boundary so no structural position can choke on one
+/// (previously: stray E0108/E0105/E0106 inside enum bodies and match
+/// arms whenever a comment sat there — exposed by the v2 formatter's
+/// trailing-comment placement). Spans of surviving tokens are untouched;
+/// the lexer still emits comments, so LSP, doc, lint, and fmt keep
+/// their own comment views. (`skip_trivia` inside the grammar stays as
+/// a second layer for the top-level loop.)
 pub fn parse(tokens: &[Spanned<Token>], sink: &mut DiagnosticSink) -> Program {
-    let known_types = collect_top_level_type_names(tokens);
-    let mut p = grammar::Parser::new(tokens, sink, known_types);
+    let code: Vec<Spanned<Token>> = tokens
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.node,
+                Token::LineComment(_)
+                    | Token::BlockComment(_)
+                    | Token::DocComment(_)
+                    | Token::ModDocComment(_)
+            )
+        })
+        .cloned()
+        .collect();
+    let known_types = collect_top_level_type_names(&code);
+    let mut p = grammar::Parser::new(&code, sink, known_types);
     p.parse_program()
 }
 

@@ -1,0 +1,5 @@
+//! strings/unicode — grapheme-aware helpers (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: a Char-iteration builtin lands —
+//! byte/char indexing alone (s[i]) would split graphemes and mislead
+//! (SPEC.md §5.9). Zero items by design (SPEC.md §6).

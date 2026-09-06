@@ -1,0 +1,24 @@
+//! error/ffi — FFI boundary helpers for error reporting.
+//!
+//! Status: reserved (M3 foundation, stdlib/SPEC.md §4). These helpers
+//! extract and inspect error messages (SPEC.md E3: `String`) for FFI
+//! export, complementing `strings/ffi.nv`.
+//!
+//! `Err(msg)` construction across function boundaries is unreliable
+//! (SPEC.md C8: payload-variant construction across fn boundaries
+//! returns the constructor `Fn` type); callers construct Err/Ok in
+//! their own scope and pass the Result here for extraction.
+
+/// Extract the error message from a `Result<Int, String>` for FFI export.
+/// Returns the error string when `Err`, or an empty string when `Ok`.
+fn result_error_string(r: Result<Int, String>) -> String:
+    match r:
+        Ok(_): ""
+        Err(e): e
+
+/// Check whether a `Result<Int, String>` is an error (for FFI conditionals).
+/// Mirrors `result_is_ok`'s inverse (stdlib/result/result.nv).
+fn result_is_err(r: Result<Int, String>) -> Bool:
+    match r:
+        Ok(_): false
+        Err(_): true

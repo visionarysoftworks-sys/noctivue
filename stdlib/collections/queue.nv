@@ -1,0 +1,4 @@
+//! collections/queue — FIFO queue (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: a list-push primitive lands
+//! (SPEC.md C5). Zero items by design (SPEC.md §6).

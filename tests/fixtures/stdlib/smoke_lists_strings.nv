@@ -1,0 +1,124 @@
+// tests/fixtures/stdlib/smoke_lists_strings.nv — concat gate for lists/strings.
+// @skip-test (concat-only: callees live in the foundation files, SPEC.md §1)
+// Run: noct run <SPEC.md §5.1 foundation files in order> smoke_lists_strings.nv
+// Self-verifying: every expectation is an assert; exit 0 proves all values.
+// Prints a short transcript captured in tests/golden/stdlib/smoke_lists_strings.stdout.
+
+//! Test-only helpers (smoke_ prefix; not part of stdlib).
+
+fn smoke_is_even_pred(x: Int) -> Bool:
+    is_even(x)
+
+fn smoke_id(x: Int) -> Int:
+    x
+
+main():
+    let m = "smoke"
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+    let hello = "hello"
+
+    // list
+    assert_int_eq(list_len(xs), 8)
+    assert_int_eq(list_len_string(["a", "b"]), 2)
+    assert_int_eq(list_len_bool([true, false, true]), 3)
+    assert_true(list_is_empty([]), "empty")
+    assert_true(list_is_empty(xs) == false, "nonempty")
+    assert_some(list_get(xs, 0))
+    assert_int_eq(option_expect(list_get(xs, 2), m), 4)
+    assert_true(option_is_some(list_get(xs, 99)) == false, "oob none")
+    assert_true(option_is_some(list_get(xs, 0 - 1)) == false, "neg none")
+    assert_int_eq(option_expect(list_first(xs), m), 3)
+    assert_int_eq(option_expect(list_last(xs), m), 6)
+    assert_true(option_is_some(list_first([])) == false, "first empty")
+    assert_true(option_is_some(list_last([])) == false, "last empty")
+    assert_true(list_contains(xs, 9), "contains 9")
+    assert_true(list_contains(xs, 7) == false, "no 7")
+    assert_int_eq(list_sum(xs), 31)
+    assert_int_eq(list_sum([]), 0)
+    assert_int_eq(option_expect(list_min(xs), m), 1)
+    assert_int_eq(option_expect(list_max(xs), m), 9)
+    assert_true(option_is_some(list_min([])) == false, "min empty")
+    assert_true(option_is_some(list_max([])) == false, "max empty")
+    assert_int_eq(list_count_if(xs, smoke_is_even_pred), 3)
+    assert_int_eq(option_expect(list_index_of(xs, 9), m), 5)
+    assert_true(option_is_some(list_index_of(xs, 7)) == false, "index missing")
+    assert_true(list_is_sorted([1, 2, 2, 9]), "sorted")
+    assert_true(list_is_sorted(xs) == false, "unsorted")
+    assert_true(list_is_sorted([]), "empty sorted")
+    assert_int_eq(option_expect(list_binary_search([1, 3, 5, 7, 9], 5), m), 2)
+    assert_true(option_is_some(list_binary_search([1, 3, 5, 7, 9], 4)) == false, "bs missing")
+    assert_true(option_is_some(list_binary_search([], 1)) == false, "bs empty")
+
+    // option extras
+    assert_int_eq(option_expect(option_or(None, Some(7)), m), 7)
+    assert_int_eq(option_expect(option_or(Some(1), Some(7)), m), 1)
+    assert_true(option_is_some(option_and(Some(1), None)) == false, "and none")
+    assert_int_eq(option_expect(option_and(Some(1), Some(2)), m), 2)
+    assert_int_eq(option_expect(option_flatten(Some(Some(5))), m), 5)
+    assert_true(option_is_some(option_flatten(None)) == false, "flat none")
+    assert_true(option_contains(Some(3), 3), "opt contains")
+    assert_true(option_contains(Some(3), 4) == false, "opt not contains")
+    assert_true(option_contains(None, 3) == false, "opt none contains")
+
+    // result extras
+    assert_int_eq(result_expect(result_or(Err("x"), Ok(9)), m), 9)
+    assert_int_eq(result_expect(result_or(Ok(1), Ok(9)), m), 1)
+    assert_true(result_contains(Ok(4), 4), "res contains")
+    assert_true(result_contains(Err("x"), 4) == false, "res err contains")
+
+    // assertion twins
+    assert_false(false, "false holds")
+    assert_int_ne(1, 2)
+    assert_some_string(Some("hi"))
+    assert_some_bool(Some(true))
+    assert_ok_string(Ok("done"))
+
+    // duration
+    let d100 = duration_from_millis(100)
+    let d200 = duration_from_millis(200)
+    assert_int_eq(duration_as_millis(duration_add(d100, d200)), 300)
+    assert_int_eq(duration_as_millis(duration_sub(d200, d100)), 100)
+    assert_int_eq(duration_as_millis(duration_scale(d100, 3)), 300)
+    assert_true(duration_is_zero(duration_zero()), "zero dur")
+    assert_true(duration_is_zero(d100) == false, "nonzero dur")
+    assert_true(duration_eq(d100, duration_from_millis(100)), "dur eq")
+    assert_true(duration_lt(d100, d200), "dur lt")
+    assert_true(duration_lt(d200, d100) == false, "dur not lt")
+
+    // iterator
+    assert_int_eq(range_sum(1, 100), 4950)
+    assert_int_eq(range_sum(5, 5), 0)
+    assert_int_eq(range_count_if(0, 10, smoke_is_even_pred), 5)
+    assert_int_eq(for_each_int(smoke_id, xs), 8)
+
+    // strings
+    assert_int_eq(string_len(hello), 5)
+    assert_true(string_is_empty(""), "empty str")
+    assert_true(string_is_empty(hello) == false, "nonempty str")
+    assert_string_eq(string_concat("foo", "bar"), "foobar")
+    assert_true(string_eq("a", "a"), "str eq")
+    assert_true(string_starts_with(hello, "he"), "prefix")
+    assert_true(string_starts_with(hello, ""), "empty prefix")
+    assert_true(string_starts_with("hi", hello) == false, "long prefix")
+    assert_true(string_ends_with(hello, "lo"), "suffix")
+    assert_true(string_ends_with(hello, "he") == false, "not suffix")
+    assert_true(string_ends_with(hello, ""), "empty suffix")
+    assert_true(string_contains(hello, "ell"), "contains")
+    assert_true(string_contains(hello, ""), "empty needle")
+    assert_true(string_contains(hello, "z") == false, "no z")
+    assert_true(string_contains("aaa", "aa"), "overlap ok")
+    match string_char_at("hey", 1):
+        Some(c): assert_true(char_eq(c, 'e'), "char at 1")
+        None: assert(false, "char_at oob surprise")
+    match string_char_at("hey", 9):
+        Some(_): assert(false, "char_at oob gave Some")
+        None: assert(true, "")
+
+    // format
+    assert_string_eq(format_bool(true), "true")
+    assert_string_eq(format_bool(false), "false")
+    assert_string_eq(format_char('z'), "z")
+
+    println("lists: {int_to_string(list_sum(xs))}")
+    println("strings: {hello}")
+    println("smoke_lists_strings ok")

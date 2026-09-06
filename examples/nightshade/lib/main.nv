@@ -1,0 +1,22 @@
+//! Nightshade's runnable text-mode entrypoint.
+
+import editor::document
+
+struct AppConfig:
+    name: String
+    version: String
+
+fn banner(config: AppConfig) -> String:
+    "{config.name} {config.version}"
+
+fn dashboard(projects: [String]) -> Unit:
+    println("Projects:")
+    for project in projects:
+        println("- {project}")
+
+main():
+    let config = AppConfig { name: "Nightshade", version: "0.1.0" }
+    println(banner(config))
+    println("Welcome to the project tracker")
+    println(document_title())
+    dashboard(["Compiler", "Documentation", "Release"])

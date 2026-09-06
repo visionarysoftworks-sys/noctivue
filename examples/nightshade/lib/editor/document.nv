@@ -1,0 +1,14 @@
+//! The first editor-domain module in Nightshade.
+
+export struct Document:
+    path: String
+    contents: String
+
+export export fn document_title() -> String:
+    "Untitled document"
+
+export fn new_document(path: String, contents: String) -> Document:
+    Document { path: path, contents: contents }
+
+export fn line_count(document: Document) -> Int:
+    1

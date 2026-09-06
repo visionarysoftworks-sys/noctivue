@@ -1,0 +1,6 @@
+//! core/prelude — the canonical concatenation order (no code).
+//!
+//! Status: reserved. Unblocks when: real imports land (M4 toolchain).
+//! This file intentionally declares zero items so it passes
+//! `noct diagnostics` trivially under concatenation (SPEC.md §6).
+//! The order itself is normative — see SPEC.md §5.1.

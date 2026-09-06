@@ -1,0 +1,5 @@
+//! testing/test — test runner (no code yet).
+//!
+//! Status: reserved (M5). Unblocks when: the integration-test harness
+//! lands (IMPLEMENTATION_PLAN.md Phase 6.5). Suites today are plain
+//! mains built on testing/assertions.nv. Zero items by design (SPEC.md §6).

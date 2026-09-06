@@ -1,0 +1,4 @@
+import support::public as api
+
+main():
+    println(api.message())

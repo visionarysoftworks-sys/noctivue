@@ -1,0 +1,4 @@
+//! collections/set — hash set (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: Set<T> values exist in the
+//! runtime (SPEC.md C6). Zero items by design (SPEC.md §6).

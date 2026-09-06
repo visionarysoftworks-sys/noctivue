@@ -19,6 +19,8 @@ Language Server Protocol (LSP) integration.
     `///` documentation for definitions, locals, built-ins, keywords,
     and prelude items
   - Go to definition and workspace-aware completions
+  - Semantic tokens, document/workspace symbols, references, rename,
+    formatting, signature help, and code-action support
 - **Snippets** — `fn`, `struct`, `enum`, `main` starters.
 - **File icons** — `.nv` files get the Noctivue owl mark in the Explorer.
 
@@ -56,6 +58,15 @@ setup.
 | `Noctivue: Show Output` (`noctivue.showOutput`) | Open the language-server output channel |
 
 ## Release Notes
+
+The detailed extension changelog is in
+[`CHANGELOG.md`](./CHANGELOG.md).
+
+### 0.0.5
+
+- Updated the LSP client/server contract for Phase 5/6 tooling:
+  semantic tokens, symbols, references, rename, formatting, signature
+  help, and code actions.
 
 ### 0.0.1
 

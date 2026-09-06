@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-authors = ["Noctivue Contributors"]
+authors = ["Noctivue Contributor"]
 license = "MIT"
 
 # Root package — hosts the workspace-level integration test.

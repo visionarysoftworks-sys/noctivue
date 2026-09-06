@@ -1,12 +1,19 @@
 //! `noct test` — run the test suite for a Noctivue package.
 //!
-//! [Phase 1] Discovers `*.nv` files in `tests/fixtures/` and runs each through
-//! the full pipeline (lex → parse → resolve → typecheck). Reports pass/fail.
+//! Two modes, decided by the working directory:
 //!
-//! A fixture **passes** when:
-//!   - It has no errors, OR
-//!   - It lives in a path matching `*/ambiguous_decls/cycle_*` AND it produces
-//!     at least one E0010 diagnostic (the expected classification-cycle error).
+//! - **Workspace mode** (`tests/fixtures/` exists): the Phase-1
+//!   fixture runner — lex → parse → resolve → typecheck per file,
+//!   pass = no errors (or the expected E0010 for cycle fixtures).
+//! - **Project mode** (`nestpkg.nvpm` exists, no fixtures dir): the
+//!   Phase-4 package loop — every `tests/**/*.nv` file is executed
+//!   through the full `run` pipeline and passes iff it exits 0
+//!   (an `assert` failure or pipeline error is a FAIL naming the
+//!   file). This is what `noct create`'s `tests/main_test.nv`
+//!   smoke is written for.
+//!
+//! `// @skip-test` opts a file out in both modes (concat-gate
+//! smokes whose callees resolve only in the concatenated run).
 //!
 //! Usage:
 //!   noct test [filter]
@@ -20,11 +27,67 @@ pub fn run(args: &[String]) -> i32 {
     let filter = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
 
     let fixture_dir = Path::new("tests/fixtures");
-    if !fixture_dir.exists() {
-        eprintln!("error: tests/fixtures/ not found (run from the workspace root)");
-        return 1;
+    if fixture_dir.exists() {
+        return run_workspace_mode(filter);
+    }
+    if Path::new("nestpkg.nvpm").exists() {
+        // Same package gate as build/run (P-003 §6).
+        if let Err(message) = crate::registry::require_package_current(Path::new(".")) {
+            eprintln!("noct test: {message}");
+            return 1;
+        }
+        return run_project_mode(filter);
+    }
+    eprintln!("error: tests/fixtures/ not found (run from the workspace root)");
+    eprintln!("       nor nestpkg.nvpm (run from a project created by `noct create`)");
+    1
+}
+
+/// Project mode: execute every `tests/**/*.nv` through the `run`
+/// pipeline; pass = exit 0. Reuses `cmd_run::run` verbatim (same
+/// semantics as `noct run file`, including its diagnostics) so test
+/// execution can never drift from real execution.
+fn run_project_mode(filter: Option<&str>) -> i32 {
+    let mut tests = Vec::new();
+    collect_fixtures_rec(Path::new("tests"), &mut tests);
+    tests.sort();
+    if tests.is_empty() {
+        eprintln!("warning: no .nv tests found in tests/");
+        return 0;
     }
 
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+    let mut skip = 0usize;
+    for path in &tests {
+        let path_str = path.to_string_lossy().to_string();
+        if let Some(f) = filter {
+            if !path_str.contains(f) {
+                continue;
+            }
+        }
+        if is_skip_test(path) {
+            println!("SKIP  {path_str}");
+            skip += 1;
+            continue;
+        }
+        let arg = path_str.clone();
+        let code = crate::cmd_run::run(std::slice::from_ref(&arg));
+        if code == 0 {
+            println!("PASS  {path_str}");
+            pass += 1;
+        } else {
+            println!("FAIL  {path_str} (exit {code})");
+            fail += 1;
+        }
+    }
+
+    println!("\n{pass} passed, {fail} failed, {skip} skipped");
+    if fail > 0 { 1 } else { 0 }
+}
+
+fn run_workspace_mode(filter: Option<&str>) -> i32 {
+    let fixture_dir = Path::new("tests/fixtures");
     let fixtures = collect_fixtures(fixture_dir);
 
     if fixtures.is_empty() {
@@ -34,15 +97,25 @@ pub fn run(args: &[String]) -> i32 {
 
     let mut pass = 0usize;
     let mut fail = 0usize;
+    let mut skip = 0usize;
 
     for path in &fixtures {
-    let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy();
 
         // Apply optional filter
         if let Some(f) = filter {
             if !path_str.contains(f) {
                 continue;
             }
+        }
+
+        // Concat-gate smokes whose callees live in other files cannot
+        // pass standalone (their identifiers resolve only in the
+        // concatenated run); they opt out explicitly, never silently.
+        if is_skip_test(path) {
+            println!("SKIP  {path_str}");
+            skip += 1;
+            continue;
         }
 
         let result = run_fixture(path);
@@ -59,7 +132,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    println!("\n{} passed, {} failed", pass, fail);
+    println!("\n{pass} passed, {fail} failed, {skip} skipped");
     if fail > 0 { 1 } else { 0 }
 }
 
@@ -141,6 +214,18 @@ fn is_expected_cycle_fixture(path: &Path) -> bool {
         .unwrap_or("")
         == "ambiguous_decls";
     in_ambiguous_decls && file_name.starts_with("cycle_")
+}
+
+/// Returns true if the fixture opts out of standalone `noct test`
+/// via a `// @skip-test` marker line (concat-gate smokes whose
+/// callees resolve only in the concatenated run).
+fn is_skip_test(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(source) => source
+            .lines()
+            .any(|line| line.trim_start().starts_with("// @skip-test")),
+        Err(_) => false,
+    }
 }
 
 // ── Fixture discovery ─────────────────────────────────────────────────────────

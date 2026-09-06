@@ -5,39 +5,21 @@
 //! Usage:
 //!   noct run [files...]
 //!   noct run                       # runs main.nv in the current package
-//!   noct run tank/math.nv app.nv   # multi-file: concatenated in order,
-//!                                  # entry point last (see `read_sources`)
+//!   noct run lib/main.nv           # loads local imports automatically
 
-use std::fs;
 use std::path::Path;
 
 use compiler::diagnostics::DiagnosticSink;
 
-/// Read several `.nv` files and join them into one compilation unit.
-///
-/// PRE-MODULE STOPGAP (tank libraries): `import` parses but resolves
-/// nothing, so multi-file programs are expressed as explicit file lists,
-/// concatenated in order with a newline separator — libraries first,
-/// entry point last. Returns the joined source plus `(path,
-/// base_offset)` per file so diagnostics can name the owning file
-/// (spans are whole-unit byte offsets; see `owner_file`). Dies the day
-/// real imports land — do not build anything else on it.
-pub(crate) fn read_sources(paths: &[&str]) -> Result<(String, Vec<(String, usize)>), String> {
-    let mut joined = String::new();
-    let mut files = Vec::new();
-    for p in paths {
-        let src = fs::read_to_string(Path::new(p))
-            .map_err(|e| format!("error: cannot read `{p}`: {e}"))?;
-        files.push((p.to_string(), joined.len()));
-        joined.push_str(&src);
-        if !joined.ends_with('\n') {
-            joined.push('\n');
-        }
-    }
-    Ok((joined, files))
+/// Read roots and their local import graph into one source-backed diagnostic
+/// unit. The compiler module loader still parses each file independently;
+/// joining here preserves the existing command-line diagnostic format.
+pub(crate) fn read_module_graph(paths: &[&str]) -> Result<compiler::modules::ModuleGraph, String> {
+    let roots = paths.iter().map(|p| Path::new(p).to_path_buf()).collect::<Vec<_>>();
+    compiler::modules::ModuleGraph::load(&roots)
 }
 
-/// Name the file owning a whole-unit byte offset (see `read_sources`).
+/// Name the file owning a whole-unit byte offset (see `read_module_graph`).
 /// Files are ordered by base offset, so the owner is the last file whose
 /// base is at or before the offset. Wrong-owner output here would send
 /// the operator to the wrong file — the multi-file error-path test in
@@ -56,6 +38,11 @@ pub(crate) fn owner_file(files: &[(String, usize)], offset: usize) -> &str {
 
 /// Entry point called from `main.rs`.
 pub fn run(args: &[String]) -> i32 {
+    // Same package gate as `build` (P-003 §6); silent without a manifest.
+    if let Err(message) = crate::registry::require_package_current(Path::new(".")) {
+        eprintln!("noct run: {message}");
+        return 1;
+    }
     // 1. Resolve file paths (all non-flag args, or "main.nv" in cwd)
     let paths: Vec<&str> = args
         .iter()
@@ -69,13 +56,14 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     // 2. Read + join source files
-    let (source, files) = match read_sources(&paths) {
+    let graph = match read_module_graph(&paths) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
             return 1;
         }
     };
+    let (source, files) = graph.joined_source();
 
     // 3. Create diagnostic sink
     let mut sink = DiagnosticSink::new();
@@ -85,6 +73,8 @@ pub fn run(args: &[String]) -> i32 {
 
     // 5. Parse
     let program = compiler::parser::parse(&tokens, &mut sink);
+    graph.emit_diagnostics(&mut sink);
+    let program = graph.link(program);
 
     // 6. Resolve
     let program = compiler::resolver::resolve(program, &mut sink);
@@ -116,7 +106,7 @@ pub(crate) fn print_diagnostics(path: &str, sink: &DiagnosticSink) {
 }
 
 /// Multi-file variant: each label names its owning file (see
-/// `read_sources`/`owner_file`). Single-file units delegate with base 0.
+/// `read_module_graph`/`owner_file`). Single-file units delegate with base 0.
 pub(crate) fn print_diagnostics_multi(files: &[(String, usize)], sink: &DiagnosticSink) {
     for diag in sink.diagnostics() {
         let severity = match diag.severity {

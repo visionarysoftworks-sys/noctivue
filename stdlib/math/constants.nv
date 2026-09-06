@@ -1,0 +1,18 @@
+//! math/constants — mathematical constants as fn accessors.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.6). Accessors, not
+//! const globals: const items are invisible to the type checker today
+//! (SPEC.md C2). SCREAMING_CASE names are reserved for the future const
+//! form; call these until then.
+
+/// The circle constant.
+fn pi() -> Float:
+    3.141592653589793
+
+/// Two pi.
+fn tau() -> Float:
+    6.283185307179586
+
+/// Euler's number.
+fn e_const() -> Float:
+    2.718281828459045

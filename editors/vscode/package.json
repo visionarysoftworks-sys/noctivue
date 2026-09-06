@@ -2,7 +2,7 @@
   "name": "noctivue",
   "displayName": "Noctivue",
   "description": "Language support for Noctivue (.nv files) - syntax highlighting, LSP, Outline",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "noctivue",
   "engines": {
     "vscode": "^1.80.0"
@@ -78,6 +78,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the noctivue-lsp binary (empty = use bundled)"
+        },
+        "noctivue.lsp.workspaceFeatures": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workspace-aware semantic tokens, symbols, references, rename, formatting, and signature help"
         }
       }
     }

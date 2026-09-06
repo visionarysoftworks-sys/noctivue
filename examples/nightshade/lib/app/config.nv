@@ -1,0 +1,5 @@
+struct Environment:
+    name: String
+
+fn development_environment() -> Environment:
+    Environment { name: "development" }

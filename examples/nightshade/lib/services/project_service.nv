@@ -1,0 +1,5 @@
+fn project_names() -> [String]:
+    ["Compiler", "Documentation", "Release"]
+
+fn create_project_name(name: String) -> String:
+    "Created project: {name}"

@@ -164,6 +164,16 @@ impl<'a> Parser<'a> {
             if *self.peek() == Token::Eof {
                 break;
             }
+            // Imports are accepted between declarations as well as in the
+            // conventional header position. This matters when independent
+            // module files are linked into one source-backed diagnostic unit.
+            if *self.peek() == Token::Import {
+                if let Some(imp) = self.parse_import() {
+                    imports.push(imp);
+                }
+                self.skip_trivia();
+                continue;
+            }
             if let Some(item) = self.parse_top_decl() {
                 items.push(item);
             } else {

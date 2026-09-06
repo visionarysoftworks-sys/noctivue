@@ -1,0 +1,5 @@
+fn project_controller_initialized() -> String:
+    "Project controller initialized"
+
+fn project_created(name: String) -> String:
+    "Creating project: {name}"

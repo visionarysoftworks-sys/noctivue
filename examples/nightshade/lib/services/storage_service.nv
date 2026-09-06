@@ -1,0 +1,5 @@
+fn storage_key(key: String) -> String:
+    "storage:{key}"
+
+fn storage_value(key: String, value: String) -> String:
+    "{key}={value}"

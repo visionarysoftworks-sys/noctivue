@@ -72,6 +72,13 @@ fn usage() {
 }
 
 pub fn run(args: &[String]) -> i32 {
+    // P-003 §6: the lock is the build input — a stale lock errors
+    // (prompting `add`), never silently re-resolves. Skips when no
+    // manifest is present (single-file use has no package context).
+    if let Err(message) = crate::registry::require_package_current(std::path::Path::new(".")) {
+        eprintln!("noct build: {message}");
+        return 1;
+    }
     let mut inputs: Vec<&str> = Vec::new();
     let mut out: Option<&str> = None;
     let mut release = false;
@@ -108,16 +115,19 @@ pub fn run(args: &[String]) -> i32 {
 
     // ── 1. Frontend → NIR (same front door as `run-vm`) ────────────────
     // Multi-file like `run`/`run-vm`: libraries first, entry last.
-    let (source, files) = match crate::cmd_run::read_sources(&inputs) {
+    let graph = match crate::cmd_run::read_module_graph(&inputs) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
             return 1;
         }
     };
+    let (source, files) = graph.joined_source();
     let mut sink = DiagnosticSink::new();
     let tokens = lexer::lex(&source, &mut sink);
     let program = parser::parse(&tokens, &mut sink);
+    graph.emit_diagnostics(&mut sink);
+    let program = graph.link(program);
     let program = resolver::resolve(program, &mut sink);
     let module = typeck::typecheck(program, &mut sink);
     if sink.has_errors() {

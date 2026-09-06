@@ -9,23 +9,30 @@
 //! | `noct ast`            | 1     | stub         |
 //! | `noct diagnostics`    | 1     | stub         |
 //! | `noct build`          | 3     | straight-line only |
-//! | `noct fmt`            | 4     | not yet      |
-//! | `noct lint`           | 4     | not yet      |
-//! | `noct add`            | 4     | not yet      |
-//! | `noct publish`        | 4     | not yet      |
-//! | `noct doc`            | 4     | not yet      |
+//! | `noct create`         | 4     | scaffolding with --dir |
+//! | `noct fmt`            | 4     | v1 trivia canonicalizer |
+//! | `noct lint`           | 4     | L-001 default-on |
+//! | `noct add`            | 4     | path + registry (--index) |
+//! | `noct audit`          | 4     | trust rows from lock |
+//! | `noct publish`        | 4     | --dry-run only (no registry) |
+//! | `noct doc`            | 4     | stdout per file |
 
 mod cmd_ast;
 mod cmd_build;
+mod cmd_create;
 mod cmd_diagnostics;
 mod cmd_doc;
 mod cmd_fmt;
 mod cmd_lint;
 mod cmd_add;
+mod cmd_audit;
 mod cmd_publish;
 mod cmd_run;
 mod cmd_run_vm;
 mod cmd_test;
+mod fmt_v2;
+mod manifest;
+mod registry;
 
 use std::process;
 
@@ -38,9 +45,11 @@ fn main() {
         Some("ast")         => cmd_ast::run(&args[2..]),
         Some("diagnostics") => cmd_diagnostics::run(&args[2..]),
         Some("build")       => cmd_build::run(&args[2..]),
+        Some("create")      => cmd_create::run(&args[2..]),
         Some("fmt")         => cmd_fmt::run(&args[2..]),
         Some("lint")        => cmd_lint::run(&args[2..]),
         Some("add")         => cmd_add::run(&args[2..]),
+        Some("audit")       => cmd_audit::run(&args[2..]),
         Some("publish")     => cmd_publish::run(&args[2..]),
         Some("doc")         => cmd_doc::run(&args[2..]),
         Some("run-vm")      => cmd_run_vm::run(&args[2..]),
@@ -76,9 +85,11 @@ COMMANDS:
     ast          [Phase 1] Dump the AST as JSON (noct ast --json)
     diagnostics  [Phase 1] Dump compiler diagnostics as JSON
     build        [Phase 3] Compile to a native binary
+    create       [Phase 4] Scaffold a new project
     fmt          [Phase 4] Run the official formatter
     lint         [Phase 4] Run the official linter
     add          [Phase 4] Add a dependency
+    audit        [Phase 4] Show dependency trust rows
     publish      [Phase 4] Publish to the package registry
     doc          [Phase 4] Generate documentation
 

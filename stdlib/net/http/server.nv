@@ -1,0 +1,28 @@
+//! net/http/server — minimal HTTP server scaffolding.
+//!
+//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5). Provides
+//! the shape of a handler-based server. The actual socket binding
+//! and event loop are FFI (noctivue_rt_http_server_*).
+//!
+//! Native: yes (all functions).
+
+/// A handler function processes a request and returns a response string
+/// (the raw HTTP response text, including status line + headers + body).
+/// Handlers are registered by route path.
+
+/// Start listening on the given port. Returns a server handle (opaque).
+fn http_server_start(port: Int) -> Result<Int, String>:
+    http_server_listen(port)
+
+/// Register a handler for a route prefix. The handler is a free function
+/// name that takes a String (request body) and returns String (response body).
+fn http_server_route(server: Int, method: String, path_pattern: String, handler: String):
+    http_server_register_route(server, method, path_pattern, handler)
+
+/// Run the event loop (blocks until stopped). Returns when stopped.
+fn http_server_serve(server: Int):
+    http_server_serve_loop(server)
+
+/// Stop the server and release the port.
+fn http_server_stop(server: Int):
+    http_server_shutdown(server)

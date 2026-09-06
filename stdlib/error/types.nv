@@ -1,0 +1,16 @@
+//! error/types — Error type definitions.
+//!
+//! Status: reserved (M3 foundation, stdlib/SPEC.md §4).
+//!
+//! M3 error convention (SPEC.md §4, "Error conventions"):
+//! - E1: `panic(msg)` for violated preconditions / invariant failures.
+//! - E2: `Option<T>` for absence-is-not-error.
+//! - E3: `Result<T, String>` for foundation fallible fns that must explain failure.
+//! - E4: `?` / `??` are the only propagation tools; no exceptions.
+//!
+//! There is no `Error` trait in M3 and `E` in `Result<T, E>` stays an
+//! ordinary type — `String` is the error type throughout M3 (E3). Typed
+//! error enums (enums carrying structured error payloads) land with M4,
+//! when the trait/impl system (SPEC.md C4) is in place.
+//!
+//! Unblock condition: M4 trait + enum-with-payload support.

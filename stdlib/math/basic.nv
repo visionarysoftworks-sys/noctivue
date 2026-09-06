@@ -1,0 +1,148 @@
+//! math/basic — integer math helpers.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.6). The _int suffix
+//! keeps the monomorphic reality honest until generics land (SPEC.md C3);
+//! bare min/max become the generic names then, these the deprecated
+//! aliases. Precondition violations panic (SPEC.md E1).
+
+/// Absolute value. Native: yes (straight-line).
+fn abs(x: Int) -> Int:
+    if x < 0:
+        0 - x
+    else:
+        x
+
+/// Minimum. Native: yes.
+fn min_int(a: Int, b: Int) -> Int:
+    if a < b:
+        a
+    else:
+        b
+
+/// Maximum. Native: yes.
+fn max_int(a: Int, b: Int) -> Int:
+    if a > b:
+        a
+    else:
+        b
+
+/// Clamp v into [lo, hi]. Panics when lo > hi. Native: yes.
+fn clamp_int(v: Int, lo: Int, hi: Int) -> Int:
+    if lo > hi:
+        panic("clamp_int: lo > hi")
+    else:
+        if v < lo:
+            lo
+        else:
+            if v > hi:
+                hi
+            else:
+                v
+
+/// Integer power. Panics when exp < 0 (no Int result). Native: loop.
+fn pow_int(base: Int, exp: Int) -> Int:
+    if exp < 0:
+        panic("pow_int: negative exponent")
+    else:
+        var result = 1
+        var e = exp
+        while e > 0:
+            result = result * base
+            e = e - 1
+        result
+
+/// Greatest common divisor (always >= 0; gcd(0, 0) is 0). Native: loop.
+fn gcd(a: Int, b: Int) -> Int:
+    var x = abs(a)
+    var y = abs(b)
+    while y != 0:
+        let t = y
+        y = x % y
+        x = t
+    x
+
+/// Evenness (correct for negatives: -3 % 2 is -1, not 0). Native: yes.
+fn is_even(x: Int) -> Bool:
+    x % 2 == 0
+
+/// Oddness. Native: yes.
+fn is_odd(x: Int) -> Bool:
+    x % 2 != 0
+
+/// Absolute difference |a - b|. Native: yes.
+fn abs_diff(a: Int, b: Int) -> Int:
+    if a > b:
+        a - b
+    else:
+        b - a
+
+/// Sign: 1 when positive, -1 when negative, 0 when zero. Native: yes.
+fn sign(x: Int) -> Int:
+    if x > 0:
+        1
+    else:
+        if x < 0:
+            0 - 1
+        else:
+            0
+
+/// Factorial. Panics when n < 0. Native: loop.
+fn factorial(n: Int) -> Int:
+    if n < 0:
+        panic("factorial: negative input")
+    else:
+        var result = 1
+        var i = 2
+        while i <= n:
+            result = result * i
+            i = i + 1
+        result
+
+/// Fibonacci with fib(0) = 0, fib(1) = 1. Panics when n < 0. Native: loop.
+fn fibonacci(n: Int) -> Int:
+    if n < 0:
+        panic("fibonacci: negative input")
+    else:
+        var a = 0
+        var b = 1
+        var i = 0
+        while i < n:
+            let t = a + b
+            a = b
+            b = t
+            i = i + 1
+        a
+
+/// Primality (correct for small inputs; trial division). Native: loop.
+fn is_prime(n: Int) -> Bool:
+    if n < 2:
+        false
+    else:
+        if n == 2:
+            true
+        else:
+            if n % 2 == 0:
+                false
+            else:
+                var d = 3
+                var prime = true
+                while d * d <= n:
+                    if n % d == 0:
+                        prime = false
+                    d = d + 2
+                prime
+
+/// Least common multiple (0 when either input is 0). Native: loop.
+fn lcm(a: Int, b: Int) -> Int:
+    if a == 0:
+        0
+    else:
+        if b == 0:
+            0
+        else:
+            let g = gcd(a, b)
+            let q = a / g * b
+            if q < 0:
+                0 - q
+            else:
+                q

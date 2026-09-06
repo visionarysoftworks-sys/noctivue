@@ -1,0 +1,5 @@
+fn dashboard_initialized() -> String:
+    "Dashboard initialized"
+
+fn dashboard_refreshed() -> String:
+    "Dashboard refreshed"

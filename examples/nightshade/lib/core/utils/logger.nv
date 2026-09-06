@@ -1,0 +1,8 @@
+fn log_info(message: String) -> Unit:
+    print("[INFO] {message}")
+
+fn log_warning(message: String) -> Unit:
+    print("[WARNING] {message}")
+
+fn log_error(message: String) -> Unit:
+    print("[ERROR] {message}")

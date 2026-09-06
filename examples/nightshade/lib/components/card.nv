@@ -1,0 +1,5 @@
+struct Card:
+    title: String
+
+fn card_text(card: Card) -> String:
+    "Card: {card.title}"

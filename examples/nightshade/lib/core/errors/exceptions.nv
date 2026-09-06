@@ -1,0 +1,5 @@
+struct AppError:
+    message: String
+
+fn describe_error(error: AppError) -> String:
+    error.message

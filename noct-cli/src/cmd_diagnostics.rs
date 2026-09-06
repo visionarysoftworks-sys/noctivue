@@ -8,7 +8,6 @@
 //!   noct diagnostics [file.nv]
 //!   noct diagnostics --json [file.nv]
 
-use std::fs;
 use std::path::Path;
 
 use compiler::diagnostics::DiagnosticSink;
@@ -24,19 +23,22 @@ pub fn run(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("main.nv");
 
-    let source = match fs::read_to_string(Path::new(path)) {
-        Ok(s) => s,
+    let graph = match compiler::modules::ModuleGraph::load(&[Path::new(path).to_path_buf()]) {
+        Ok(graph) => graph,
         Err(e) => {
-            eprintln!("error: cannot read `{path}`: {e}");
+            eprintln!("error: cannot load `{path}`: {e}");
             return 1;
         }
     };
+    let (source, _) = graph.joined_source();
 
     let mut sink = DiagnosticSink::new();
 
     // Full pipeline: lex → parse → resolve → typecheck
     let tokens = compiler::lexer::lex(&source, &mut sink);
     let program = compiler::parser::parse(&tokens, &mut sink);
+    graph.emit_diagnostics(&mut sink);
+    let program = graph.link(program);
     let program = compiler::resolver::resolve(program, &mut sink);
     let _module = compiler::typeck::typecheck(program, &mut sink);
 

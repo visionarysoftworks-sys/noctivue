@@ -1,0 +1,5 @@
+fn settings_initialized() -> String:
+    "Settings initialized"
+
+fn settings_saved() -> String:
+    "Settings saved"

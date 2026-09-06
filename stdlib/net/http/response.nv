@@ -1,0 +1,38 @@
+//! net/http/response — HTTP response helpers.
+//!
+//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5).
+//! Parses and builds HTTP response strings. Depends on the
+//! `HttpResponse` struct from `net/http/request.nv`.
+
+/// Build a response from status code + body.
+fn http_response(status: Int, body: String) -> HttpResponse:
+    HttpResponse {
+        status: status,
+        reason: http_reason_phrase(status),
+        headers: [],
+        body: body
+    }
+
+/// Map a status code to its reason phrase (RFC 7230 §3.1.2).
+fn http_reason_phrase(status: Int) -> String:
+    match status:
+        200: "OK"
+        201: "Created"
+        204: "No Content"
+        301: "Moved Permanently"
+        302: "Found"
+        304: "Not Modified"
+        400: "Bad Request"
+        401: "Unauthorized"
+        403: "Forbidden"
+        404: "Not Found"
+        405: "Method Not Allowed"
+        500: "Internal Server Error"
+        501: "Not Implemented"
+        502: "Bad Gateway"
+        503: "Service Unavailable"
+        _: "Unknown"
+
+/// True when the response indicates success (2xx).
+fn http_is_success(r: HttpResponse) -> Bool:
+    r.status >= 200 && r.status < 300

@@ -1,0 +1,51 @@
+//! error/macros — Error handling utility functions.
+//!
+//! Status: reserved (M3 foundation, stdlib/SPEC.md §4). These utilities
+//! encode the four error conventions of SPEC.md §4 as free functions
+//! (C1: no method-call syntax, C4: no trait dispatch):
+//!
+//! - E1 — `ensure`: panic on violated precondition (guard clause).
+//! - E3 — `error_context` / `error_msg`: build contextual error messages
+//!   for `Result<T, String>` fallible fns.
+//! - E4 — `?` / `??` operators (language builtins) handle propagation;
+//!   no helper needed.
+//!
+//! Identity wrappers (error_string, error_int, error_bool) and trivial
+//! converters (error_from_int, etc.) were removed: they duplicated
+//! existing core/convert.nv and string/string.nv helpers, violating
+//! SPEC.md §1.2's one-name-per-operation rule. The triple-duplicated
+//! `error_contains` / `error_severity` (which appeared in types.nv,
+//! traits.nv, and macros.nv) were likewise removed — use
+//! `string_contains` and inline `if` checks respectively.
+//!
+//! All functions are monomorphic (SPEC.md C3): Int twins ship where the
+//! pattern demands, String/Bool twins for any future extension.
+
+/// Assert a precondition; panic with msg when it is false (SPEC.md E1).
+///
+/// Use this at the top of a function to document and enforce a contract
+/// the caller must uphold (e.g. non-negative input). Do NOT use it for
+/// caller-recoverable input — return `Result<T, String>` instead (E3).
+fn ensure(cond: Bool, msg: String):
+    if not cond:
+        panic(msg)
+
+/// Prepend a parent context to a child error message (SPEC.md E3).
+///
+/// Produces `parent -> child` when parent is non-empty, or just `child`
+/// when parent is empty. Use this when propagating an inner error (E4)
+/// that needs additional framing for the caller.
+fn error_context(parent: String, child: String) -> String:
+    if parent.length == 0:
+        child
+    else:
+        parent + " -> " + child
+
+/// Build a contextual error message from a context label and a message
+/// (SPEC.md E3). Produces `context: msg` when context is non-empty,
+/// or just `msg` otherwise.
+fn error_msg(context: String, msg: String) -> String:
+    if context.length == 0:
+        msg
+    else:
+        context + ": " + msg

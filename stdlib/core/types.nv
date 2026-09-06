@@ -1,0 +1,6 @@
+//! core/types — intended type aliases (no code yet).
+//!
+//! Status: reserved. Unblocks when: `type` aliases parse (no top_decl
+//! production exists yet, SPEC.md C7). Planned: UserId, Handler, and
+//! the M4 error-trait story (SPEC.md §10, ERROR_HANDLING.md §6).
+//! Zero items by design (SPEC.md §6).

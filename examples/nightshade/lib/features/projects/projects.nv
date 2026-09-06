@@ -1,0 +1,2 @@
+fn projects_title() -> String:
+    "Projects"

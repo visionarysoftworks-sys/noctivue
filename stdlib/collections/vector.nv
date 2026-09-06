@@ -1,0 +1,116 @@
+//! collections/vector — Dynamic array with length/element access.
+//!
+//! Status: runnable (M3 foundation). Provides Int array, iterator, and
+//! slice operations. Unlike list, supports growth in future M4 (C5). Mirrors
+//! array.nv but without Copyable/Rentable duplication semantics.
+
+/// Number of elements. Native: yes.
+fn vec_len(xs: [Int]) -> Int:
+    xs.length
+
+/// True when the array holds no elements.
+fn vec_is_empty(xs: [Int]) -> Bool:
+    xs.length == 0
+
+/// Element at i, or None when i is out of bounds (never panics).
+fn vec_get(xs: [Int], i: Int) -> Option<Int>:
+    if i < 0:
+        None
+    else:
+        if i < xs.length:
+            Some(xs[i])
+        else:
+            None
+
+/// First element, or None when empty.
+fn vec_first(xs: [Int]) -> Option<Int>:
+    vec_get(xs, 0)
+
+/// Last element, or None when empty.
+fn vec_last(xs: [Int]) -> Option<Int>:
+    vec_get(xs, xs.length - 1)
+
+/// True when v occurs in xs.
+fn vec_contains(xs: [Int], v: Int) -> Bool:
+    var found = false
+    for x in xs:
+        if x == v:
+            found = true
+    found
+
+/// Sum of all elements (0 when empty).
+fn vec_sum(xs: [Int]) -> Int:
+    var total = 0
+    for x in xs:
+        total = total + x
+    total
+
+/// Smallest element, or None when empty.
+fn vec_min(xs: [Int]) -> Option<Int>:
+    if xs.length == 0:
+        None
+    else:
+        var best = xs[0]
+        for x in xs:
+            if x < best:
+                best = x
+        Some(best)
+
+/// Largest element, or None when empty.
+fn vec_max(xs: [Int]) -> Option<Int>:
+    if xs.length == 0:
+        None
+    else:
+        var best = xs[0]
+        for x in xs:
+            if x > best:
+                best = x
+        Some(best)
+
+/// Count of elements satisfying pred.
+fn vec_count_if(xs: [Int], pred: (Int) -> Bool) -> Int:
+    var count = 0
+    for x in xs:
+        if pred(x):
+            count = count + 1
+    count
+
+/// First index of v, or None when absent (never panics).
+fn vec_index_of(xs: [Int], v: Int) -> Option<Int>:
+    var i = 0
+    var found = 0 - 1
+    while i < xs.length:
+        if xs[i] == v:
+            if found == 0 - 1:
+                found = i
+        i = i + 1
+    if found == 0 - 1:
+        None
+    else:
+        Some(found)
+
+/// True when elements are in non-decreasing order (vacuously true when empty).
+fn vec_is_sorted(xs: [Int]) -> Bool:
+    var i = 1
+    var ok = true
+    while i < xs.length:
+        if xs[i] < xs[i - 1]:
+            ok = false
+        i = i + 1
+    ok
+
+/// Binary search over an ascending-sorted array. Some(index) when present,
+/// None when absent or empty (never panics).
+fn vec_binary_search(xs: [Int], v: Int) -> Option<Int>:
+    var lo = 0
+    var hi = xs.length - 1
+    while lo <= hi:
+        let mid = (lo + hi) / 2
+        if xs[mid] == v:
+            return Some(mid)
+        else:
+            if xs[mid] < v:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+    None

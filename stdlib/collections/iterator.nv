@@ -1,0 +1,29 @@
+//! collections/iterator — fold-shaped consumers over ranges and lists.
+//!
+//! Status: runnable subset (M3 foundation, stdlib/SPEC.md §5.8). Ranges
+//! are language syntax (start..end); this module holds the consumers that
+//! need no list growth. Lazy iterator objects are spec-only (need
+//! closures-with-state plus generics — M4).
+
+/// Sum of start..end (end exclusive; 0 when start >= end).
+fn range_sum(start: Int, end: Int) -> Int:
+    var total = 0
+    for x in start..end:
+        total = total + x
+    total
+
+/// Count of values in start..end satisfying pred.
+fn range_count_if(start: Int, end: Int, pred: (Int) -> Bool) -> Int:
+    var count = 0
+    for x in start..end:
+        if pred(x):
+            count = count + 1
+    count
+
+/// Apply f to every element (for effects); returns the element count.
+fn for_each_int(f: (Int) -> Int, xs: [Int]) -> Int:
+    var count = 0
+    for x in xs:
+        let _ = f(x)
+        count = count + 1
+    count

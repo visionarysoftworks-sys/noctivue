@@ -1,0 +1,5 @@
+//! collections/map — hash map (no code yet).
+//!
+//! Status: reserved (M4+). Unblocks when: Map<K, V> values exist in the
+//! runtime (no value can be constructed or read today, SPEC.md C6).
+//! Zero items by design (SPEC.md §6).

@@ -1,0 +1,55 @@
+//! testing/assertions — assertion helpers over the assert builtin.
+//!
+//! Status: runnable (M3 foundation, stdlib/SPEC.md §5.10). A failed
+//! assertion panics (invariant failure, SPEC.md E1) — suites abort loudly,
+//! never silently. Runners (test/property/mock) are M5 work (reserved).
+
+/// Assert cond holds, with msg on failure.
+fn assert_true(cond: Bool, msg: String):
+    assert(cond, msg)
+
+/// Assert two Ints are equal.
+fn assert_int_eq(a: Int, b: Int):
+    assert(a == b, "assert_int_eq failed")
+
+/// Assert two Strings are equal.
+fn assert_string_eq(a: String, b: String):
+    assert(a == b, "assert_string_eq failed")
+
+/// Assert the option holds a value.
+fn assert_some(o: Option<Int>):
+    match o:
+        Some(_): assert(true, "")
+        None: assert(false, "expected Some, found None")
+
+/// Assert the result is Ok.
+fn assert_ok(r: Result<Int, String>):
+    match r:
+        Ok(_): assert(true, "")
+        Err(_): assert(false, "expected Ok, found Err")
+
+/// Assert cond is false, with msg on failure.
+fn assert_false(cond: Bool, msg: String):
+    assert(cond == false, msg)
+
+/// Assert two Ints differ.
+fn assert_int_ne(a: Int, b: Int):
+    assert(a != b, "assert_int_ne failed")
+
+/// Assert the String option holds a value.
+fn assert_some_string(o: Option<String>):
+    match o:
+        Some(_): assert(true, "")
+        None: assert(false, "expected Some, found None")
+
+/// Assert the Bool option holds a value.
+fn assert_some_bool(o: Option<Bool>):
+    match o:
+        Some(_): assert(true, "")
+        None: assert(false, "expected Some, found None")
+
+/// Assert the String result is Ok.
+fn assert_ok_string(r: Result<String, String>):
+    match r:
+        Ok(_): assert(true, "")
+        Err(_): assert(false, "expected Ok, found Err")

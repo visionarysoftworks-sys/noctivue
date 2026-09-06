@@ -1,0 +1,5 @@
+fn required(value: String) -> Bool:
+    value != ""
+
+fn has_email_marker(value: String) -> Bool:
+    value.contains("@")

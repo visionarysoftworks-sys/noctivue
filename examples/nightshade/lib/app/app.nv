@@ -1,0 +1,5 @@
+struct NightshadeApp:
+    name: String
+
+fn start_app(app: NightshadeApp) -> String:
+    "{app.name} application started"

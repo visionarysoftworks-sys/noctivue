@@ -1,0 +1,14 @@
+enum UserRole:
+    Admin
+    Manager
+    Employee
+
+struct User:
+    id: String
+    name: String
+    email: String
+    role: UserRole
+    active: Bool
+
+fn is_admin(user: User) -> Bool:
+    user.role == Admin

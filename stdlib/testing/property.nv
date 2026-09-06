@@ -1,0 +1,4 @@
+//! testing/property — property-based testing (no code yet).
+//!
+//! Status: reserved (M5). Unblocks when: random generation (numbers/
+//! random.nv) and the M5 harness land. Zero items by design (SPEC.md §6).

@@ -1,0 +1,5 @@
+struct Input:
+    value: String
+
+fn input_value(input: Input) -> String:
+    input.value

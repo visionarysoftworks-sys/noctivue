@@ -1,0 +1,5 @@
+struct Button:
+    label: String
+
+fn button_text(button: Button) -> String:
+    "Button: {button.label}"

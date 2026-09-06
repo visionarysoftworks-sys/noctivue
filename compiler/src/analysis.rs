@@ -420,7 +420,10 @@ fn builtin_hover(name: &str) -> Option<HoverInfo> {
 /// line containing `item_start` (mirrors the `///`-for-declarations rule in
 /// STYLE_GUIDE.md §5). A blank line between the docs and the item ends the
 /// block; the `///` prefix and one following space are stripped.
-fn doc_comment_for(source: &str, item_start: usize) -> Option<String> {
+///
+/// `pub` deliberately: `noct doc` renders through this (one rule, two
+/// consumers with hover).
+pub fn doc_comment_for(source: &str, item_start: usize) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
     let mut item_line = 0;
     let mut seen = 0;

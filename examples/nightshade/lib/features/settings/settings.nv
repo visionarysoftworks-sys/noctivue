@@ -1,0 +1,2 @@
+fn settings_title() -> String:
+    "Settings"

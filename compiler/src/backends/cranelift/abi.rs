@@ -54,6 +54,12 @@ pub const NOCTIVUE_RT_CHECKED_UREM: &str = "noctivue_rt_checked_urem";
 /// matching the VM).
 pub const NOCTIVUE_RT_FREM: &str = "noctivue_rt_frem";
 
+/// Phase 5: net.http FFI stubs.
+pub const NOCTIVUE_RT_HTTP_GET: &str = "noctivue_rt_http_get";
+pub const NOCTIVUE_RT_HTTP_POST: &str = "noctivue_rt_http_post";
+pub const NOCTIVUE_RT_HTTP_SERVER_START: &str = "noctivue_rt_http_server_start";
+pub const NOCTIVUE_RT_HTTP_SERVER_SERVE: &str = "noctivue_rt_http_server_serve";
+
 use cranelift_codegen::ir::types as clif_types;
 use cranelift_codegen::ir::Type as ClifType;
 
@@ -118,5 +124,26 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
         NOCTIVUE_RT_FREM,
         &[clif_types::F64, clif_types::F64],
         &[clif_types::F64],
+    ),
+    // Phase 5: net.http FFI stubs (string-header pointers, I64 contract).
+    (
+        NOCTIVUE_RT_HTTP_GET,
+        &[clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_HTTP_POST,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_HTTP_SERVER_START,
+        &[clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_HTTP_SERVER_SERVE,
+        &[clif_types::I64],
+        &[],
     ),
 ];

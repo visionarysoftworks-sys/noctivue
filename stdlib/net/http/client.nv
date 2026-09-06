@@ -1,0 +1,37 @@
+//! net/http/client — HTTP client operations.
+//!
+//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5). These
+//! functions call into platform FFI for socket operations.
+//!
+//! Native: yes (all functions, via noctivue_rt_http_* FFI).
+//! The interpreter (noct run) treats unknown FFI functions as no-ops
+//! (returning Unit) per M0 spec.
+
+/// Perform an HTTP GET request. Returns Err on connection failure.
+fn http_get(url: String) -> Result<String, String>:
+    http_get_with_headers(url, [])
+
+/// Perform an HTTP GET request with custom headers.
+fn http_get_with_headers(url: String, headers: [(String, String)]) -> Result<String, String>:
+    http_request("GET", url, headers, "")
+
+/// Perform an HTTP POST request with a body.
+fn http_post(url: String, body: String) -> Result<String, String>:
+    http_post_with_headers(url, [], body)
+
+/// Perform an HTTP POST request with custom headers and a body.
+fn http_post_with_headers(url: String, headers: [(String, String)], body: String) -> Result<String, String>:
+    http_request("POST", url, headers, body)
+
+/// Perform an HTTP PUT request.
+fn http_put(url: String, body: String) -> Result<String, String>:
+    http_request("PUT", url, [], body)
+
+/// Perform an HTTP DELETE request.
+fn http_delete(url: String) -> Result<String, String>:
+    http_request("DELETE", url, [], "")
+
+/// Low-level request builder used by all higher-level helpers.
+/// Method is the canonical string ("GET", "POST", ...).
+fn http_request(method: String, url: String, headers: [(String, String)], body: String) -> Result<String, String>:
+    http_send(method, url, headers, body)
