@@ -1,1 +1,5 @@
 
+//! fs/directory — reserved directory enumeration API.
+//!
+//! Status: reserved until list construction and directory ordering rules
+//! are finalized.

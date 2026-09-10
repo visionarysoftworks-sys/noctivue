@@ -1,1 +1,5 @@
 
+//! env/args — reserved command-line argument access.
+//!
+//! Status: reserved until the CLI/runtime argument ownership contract is
+//! finalized.

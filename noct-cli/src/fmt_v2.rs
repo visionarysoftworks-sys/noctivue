@@ -167,24 +167,28 @@ fn print_with_tokens(
         if !first {
             out.push('\n');
         }
-        for import in &program.imports {
-            // Imports carry no comments in practice (comment lines above
-            // an import attach to it like any node).
+        let import_starts: Vec<usize> = program.imports.iter().map(|i| i.span.start).collect();
+        let import_suffixes = cx.trailing_suffixes(&import_starts);
+        for (import, suffix) in program.imports.iter().zip(import_suffixes) {
+            // Imports carry leading comments like any node.
             for line in cx.leading_for(import.span.start) {
                 out.push_str(&indent_lines(&line, 0));
                 out.push('\n');
             }
             out.push_str(&print_import(import));
+            out.push_str(&suffix);
             out.push('\n');
         }
         first = false;
     }
-    for item in &program.items {
+    let item_starts: Vec<usize> = program.items.iter().map(|i| item_span(i).start).collect();
+    let item_suffixes = cx.trailing_suffixes(&item_starts);
+    for (item, suffix) in program.items.iter().zip(item_suffixes) {
         if !first {
             out.push('\n');
         }
         first = false;
-        for line in print_item(item, 0, &mut cx) {
+        for line in print_item(item, 0, &mut cx, &suffix) {
             out.push_str(&line);
             out.push('\n');
         }
@@ -275,7 +279,10 @@ impl<'a> Cx<'a> {
                     std::mem::swap(&mut l0, &mut l1);
                 }
                 for l in l0..=l1 {
-                    code_spans.entry(l).or_default().push((tok.span.start, tok.span.end));
+                    code_spans
+                        .entry(l)
+                        .or_default()
+                        .push((tok.span.start, tok.span.end));
                 }
             }
         }
@@ -333,8 +340,7 @@ impl<'a> Cx<'a> {
             if self.consumed.contains(&i) || c.kind == CommentKind::ModDoc {
                 continue;
             }
-            if c.end_line < first_line
-                || (c.end_line == first_line && c.start_off < node_start_off)
+            if c.end_line < first_line || (c.end_line == first_line && c.start_off < node_start_off)
             {
                 picked.push(i);
             }
@@ -347,20 +353,44 @@ impl<'a> Cx<'a> {
         out
     }
 
-    /// Trailing comment: first unconsumed comment starting on
-    /// `last_line` at/after `end_off`. Rendered `  // text`.
-    fn trailing_for(&mut self, end_off: usize) -> Option<String> {
-        let last_line = self.line_of(end_off);
-        for (i, c) in self.comments.iter().enumerate() {
-            if self.consumed.contains(&i) || c.kind == CommentKind::ModDoc {
+    /// Each comment goes to the LAST node starting on its line
+    /// at/before the comment; render it on that node's FIRST printed
+    /// line. Returns parallel suffixes (`""` = none) and consumes the
+    /// comments, so later leading-grabs cannot double-place them.
+    /// Multi-line nodes carry header-line comments on their header —
+    /// the only placement stable across reparses.
+    fn trailing_suffixes(&mut self, starts: &[usize]) -> Vec<String> {
+        // Order candidate nodes by (line, offset) for "last starter".
+        let mut order: Vec<usize> = (0..starts.len()).collect();
+        order.sort_by_key(|&i| (self.line_of(starts[i]), starts[i]));
+        let mut suffixes: Vec<String> = vec![String::new(); starts.len()];
+        // Snapshot comment indices (we mutate `consumed` below).
+        let idxs: Vec<usize> = (0..self.comments.len()).collect();
+        for ci in idxs {
+            if self.consumed.contains(&ci) {
                 continue;
             }
-            if c.start_line == last_line && c.start_off >= end_off {
-                self.consumed.insert(i);
-                return Some(format!("  {}", render_comment(c, 0)));
+            let (cline, coff) = (self.comments[ci].start_line, self.comments[ci].start_off);
+            if self.comments[ci].kind == CommentKind::ModDoc {
+                continue;
+            }
+            let mut pick: Option<usize> = None;
+            for &i in &order {
+                if self.line_of(starts[i]) == cline && starts[i] <= coff {
+                    pick = Some(i);
+                }
+            }
+            if let Some(i) = pick {
+                self.consumed.insert(ci);
+                let rendered = render_comment(&self.comments[ci], 0);
+                if !suffixes[i].is_empty() {
+                    suffixes[i].push(' ');
+                }
+                suffixes[i].push_str("  ");
+                suffixes[i].push_str(&rendered);
             }
         }
-        None
+        suffixes
     }
 
     /// Orphaned comment-only lines (after the last node): flush raw.
@@ -456,11 +486,29 @@ fn indent_lines(text: &str, level: usize) -> String {
     out
 }
 
+/// Append a same-line suffix to the first non-comment line (the
+/// node's own first code line — leading comments stay clean).
+/// No-op on empty suffix.
+fn append_suffix(lines: &mut Vec<String>, suffix: &str) {
+    if suffix.is_empty() {
+        return;
+    }
+    for line in lines.iter_mut() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+        line.push_str(suffix);
+        return;
+    }
+}
+
 // ── Items ───────────────────────────────────────────────────────────────────
 
-/// Print one top-level item: leading comments, then node lines, then
-/// an optional same-line trailing comment on the node's last line.
-fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
+/// Print one top-level item: leading comments, then node lines.
+/// `suffix` (precomputed same-line trailing comment) lands on the
+/// first code line.
+fn print_item(item: &Item, level: usize, cx: &mut Cx, suffix: &str) -> Vec<String> {
     let first_off = item_span(item).start;
     let mut lines: Vec<String> = cx
         .leading_for(first_off)
@@ -478,14 +526,23 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
             v.extend(print_block(&b.body, level + 1, cx));
             v
         }
-        Item::Function(f) => print_function_decl(f, level, cx, true),
+        Item::Function(f) => print_function_decl(f, level, cx, true, ""),
+        Item::Task(t) => print_task_decl(t, level, cx),
         Item::Struct(s) => {
             let mut v = vec![indent_lines(
                 &format!("struct {}{}:", s.name, print_generics(&s.generic_params)),
                 level,
             )];
-            for f in &s.fields {
-                v.push(indent_lines(&format!("{}: {}", f.name, print_type(&f.ty)), level + 1));
+            let starts: Vec<usize> = s.fields.iter().map(|f| f.span.start).collect();
+            let suffixes = cx.trailing_suffixes(&starts);
+            for (f, suffix) in s.fields.iter().zip(suffixes) {
+                for l in cx.leading_for(f.span.start) {
+                    v.push(indent_lines(&l, level + 1));
+                }
+                let mut line =
+                    indent_lines(&format!("{}: {}", f.name, print_type(&f.ty)), level + 1);
+                line.push_str(&suffix);
+                v.push(line);
             }
             v
         }
@@ -494,8 +551,15 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
                 &format!("enum {}{}:", e.name, print_generics(&e.generic_params)),
                 level,
             )];
-            for v2 in &e.variants {
-                v.push(indent_lines(&print_variant(v2), level + 1));
+            let starts: Vec<usize> = e.variants.iter().map(|x| x.span.start).collect();
+            let suffixes = cx.trailing_suffixes(&starts);
+            for (v2, suffix) in e.variants.iter().zip(suffixes) {
+                for l in cx.leading_for(v2.span.start) {
+                    v.push(indent_lines(&l, level + 1));
+                }
+                let mut line = indent_lines(&print_variant(v2), level + 1);
+                line.push_str(&suffix);
+                v.push(line);
             }
             v
         }
@@ -504,8 +568,15 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
                 &format!("trait {}{}:", t.name, print_generics(&t.generic_params)),
                 level,
             )];
-            for m in &t.members {
-                v.push(indent_lines(&print_sig(m), level + 1));
+            let starts: Vec<usize> = t.members.iter().map(|m| m.span.start).collect();
+            let suffixes = cx.trailing_suffixes(&starts);
+            for (m, suffix) in t.members.iter().zip(suffixes) {
+                for l in cx.leading_for(m.span.start) {
+                    v.push(indent_lines(&l, level + 1));
+                }
+                let mut line = indent_lines(&print_sig(m), level + 1);
+                line.push_str(&suffix);
+                v.push(line);
             }
             v
         }
@@ -515,13 +586,23 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
                 None => format!("impl {}:", print_type(&ib.ty)),
             };
             let mut v = vec![indent_lines(&head, level)];
-            for m in &ib.methods {
-                v.extend(print_function_decl(m, level + 1, cx, true));
+            let starts: Vec<usize> = ib.methods.iter().map(|m| m.span.start).collect();
+            let suffixes = cx.trailing_suffixes(&starts);
+            for (m, suffix) in ib.methods.iter().zip(suffixes) {
+                for l in cx.leading_for(m.span.start) {
+                    v.push(indent_lines(&l, level + 1));
+                }
+                v.extend(print_function_decl(m, level + 1, cx, true, &suffix));
             }
             v
         }
         Item::Const(c) => vec![indent_lines(
-            &format!("const {}: {} = {}", c.name, print_type(&c.ty), print_expr(&c.value)),
+            &format!(
+                "const {}: {} = {}",
+                c.name,
+                print_type(&c.ty),
+                print_expr(&c.value)
+            ),
             level,
         )],
         Item::Mod(m) => {
@@ -534,13 +615,10 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
             // relative indentation), then prefix `export ` to its
             // first non-comment line. Leading comments stay above,
             // untouched.
-            let mut v = print_item(inner, level, cx);
+            let mut v = print_item(inner, level, cx, "");
             for line in v.iter_mut() {
                 let trimmed = line.trim_start().to_string();
-                if trimmed.is_empty()
-                    || trimmed.starts_with("//")
-                    || trimmed.starts_with("/*")
-                {
+                if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
                     continue;
                 }
                 let indent_len = line.len() - trimmed.len();
@@ -550,12 +628,8 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx) -> Vec<String> {
             v
         }
     };
-    if let Some(trail) = cx.trailing_for(item_span(item).end) {
-        if let Some(last) = body.last_mut() {
-            last.push_str(&trail);
-        }
-    }
     lines.append(&mut body);
+    append_suffix(&mut lines, suffix);
     lines
 }
 
@@ -563,6 +637,7 @@ fn item_span(item: &Item) -> compiler::diagnostics::Span {
     match item {
         Item::BareDecl(b) => b.span.clone(),
         Item::Function(f) => f.span.clone(),
+        Item::Task(t) => t.span.clone(),
         Item::Struct(s) => s.span.clone(),
         Item::Enum(e) => e.span.clone(),
         Item::Trait(t) => t.span.clone(),
@@ -639,7 +714,13 @@ fn print_variant(v: &EnumVariant) -> String {
 ///   while `name:` stays a bare function;
 /// - single-expression bodies keep `fn` (bare `name: expr` would
 ///   reparse as a `Decl` statement).
-fn print_function_decl(f: &FunctionDecl, level: usize, cx: &mut Cx, with_fn: bool) -> Vec<String> {
+fn print_function_decl(
+    f: &FunctionDecl,
+    level: usize,
+    cx: &mut Cx,
+    with_fn: bool,
+    suffix: &str,
+) -> Vec<String> {
     let expr_body = matches!(f.body, FunctionBody::Expr(_));
     let kw = if with_fn || expr_body { "fn " } else { "" };
     let parens = if !with_fn && !expr_body && f.params.is_empty() {
@@ -647,20 +728,43 @@ fn print_function_decl(f: &FunctionDecl, level: usize, cx: &mut Cx, with_fn: boo
     } else {
         format!("({})", print_params(&f.params))
     };
-    let mut head = format!("{kw}{}{}{parens}", f.name, print_generics(&f.generic_params));
+    let mut head = format!(
+        "{kw}{}{}{parens}",
+        f.name,
+        print_generics(&f.generic_params)
+    );
     if let Some(t) = &f.return_ty {
         head.push_str(&format!(" -> {}", print_type(t)));
     }
     match &f.body {
         // Single-expression bodies stay inline (`f(x): x`) — block vs
         // inline is a real AST distinction, not a density choice.
-        FunctionBody::Expr(e) => vec![indent_lines(&format!("{head}: {}", print_expr(e)), level)],
+        FunctionBody::Expr(e) => {
+            let mut v = vec![indent_lines(&format!("{head}: {}", print_expr(e)), level)];
+            append_suffix(&mut v, suffix);
+            v
+        }
         FunctionBody::Block(b) => {
             let mut v = vec![indent_lines(&format!("{head}:"), level)];
+            append_suffix(&mut v, suffix);
             v.extend(print_block(b, level + 1, cx));
             v
         }
     }
+}
+
+/// Task declarations (`task name(params): block`). Unlike `fn`, the
+/// `task` keyword ALWAYS prints — at statement level there is no bare
+/// spelling that reparses as a task (bare `name:` would become a
+/// function/decl). Parens always print too: the keyword dispatches
+/// unambiguously in the parser, so the `name():`-is-a-call trap that
+/// haunts bare functions does not apply. No return type, no generics,
+/// always a block body.
+fn print_task_decl(t: &TaskDecl, level: usize, cx: &mut Cx) -> Vec<String> {
+    let head = format!("task {}({})", t.name, print_params(&t.params));
+    let mut v = vec![indent_lines(&format!("{head}:"), level)];
+    v.extend(print_block(&t.body, level + 1, cx));
+    v
 }
 
 // ── Blocks, statements, density ───────────────────────────────────────────────
@@ -679,9 +783,11 @@ fn print_block(block: &Block, level: usize, cx: &mut Cx) -> Vec<String> {
 }
 
 fn print_stmts(stmts: &[Stmt], level: usize, cx: &mut Cx) -> Vec<String> {
+    let starts: Vec<usize> = stmts.iter().map(|s| stmt_span(s).start).collect();
+    let suffixes = cx.trailing_suffixes(&starts);
     let mut rendered: Vec<StmtLines> = Vec::new();
-    for stmt in stmts {
-        rendered.push(print_stmt(stmt, level, cx));
+    for (stmt, suffix) in stmts.iter().zip(suffixes) {
+        rendered.push(print_stmt(stmt, level, cx, &suffix));
     }
     // Density heuristic (D3/D4): join runs of tiny single-line
     // statements with `; ` while the joined line fits the cap.
@@ -711,7 +817,7 @@ fn print_stmts(stmts: &[Stmt], level: usize, cx: &mut Cx) -> Vec<String> {
     out
 }
 
-fn print_stmt(stmt: &Stmt, level: usize, cx: &mut Cx) -> StmtLines {
+fn print_stmt(stmt: &Stmt, level: usize, cx: &mut Cx, suffix: &str) -> StmtLines {
     let pad = INDENT.repeat(level);
     let leading: Vec<String> = cx
         .leading_for(stmt_span(stmt).start)
@@ -719,24 +825,37 @@ fn print_stmt(stmt: &Stmt, level: usize, cx: &mut Cx) -> StmtLines {
         .map(|l| indent_lines(&l, level))
         .collect();
     let has_leading = !leading.is_empty();
+    let code_at = leading.len();
     let mut lines = leading;
-    // joinable starts true for the tiny kinds; structural statements
-    // and anything spanning lines opt out below.
+    // joinable starts true for the tiny kinds; structural statements,
+    // commented statements, and anything spanning lines opt out below.
+    // joinable starts true for the tiny kinds; structural statements,
+    // commented statements, and anything spanning lines opt out below.
     let mut joinable = matches!(
         stmt,
-        Stmt::Let(_) | Stmt::Var(_) | Stmt::State(_) | Stmt::Assign(_) | Stmt::Decl(_) | Stmt::Expr(_)
-    ) && !has_leading;
+        Stmt::Let(_)
+            | Stmt::Var(_)
+            | Stmt::State(_)
+            | Stmt::Assign(_)
+            | Stmt::Decl(_)
+            | Stmt::Expr(_)
+    ) && !has_leading
+        && suffix.is_empty();
     match stmt {
         Stmt::Let(l) => lines.push(format!(
             "{pad}let {}{} = {}",
             l.name,
-            l.ty.as_ref().map(|t| format!(": {}", print_type(t))).unwrap_or_default(),
+            l.ty.as_ref()
+                .map(|t| format!(": {}", print_type(t)))
+                .unwrap_or_default(),
             print_expr(&l.value)
         )),
         Stmt::Var(v) => lines.push(format!(
             "{pad}var {}{} = {}",
             v.name,
-            v.ty.as_ref().map(|t| format!(": {}", print_type(t))).unwrap_or_default(),
+            v.ty.as_ref()
+                .map(|t| format!(": {}", print_type(t)))
+                .unwrap_or_default(),
             print_expr(&v.value)
         )),
         // The parser discards `state` annotations (StateStmt has no
@@ -789,19 +908,31 @@ fn print_stmt(stmt: &Stmt, level: usize, cx: &mut Cx) -> StmtLines {
         }
         Stmt::For(f) => {
             joinable = false;
-            lines.push(format!("{pad}for {} in {}:", f.binding, print_expr(&f.iterable)));
+            lines.push(format!(
+                "{pad}for {} in {}:",
+                f.binding,
+                print_expr(&f.iterable)
+            ));
             lines.extend(print_block(&f.body, level + 1, cx));
         }
         Stmt::Match(m) => {
             joinable = false;
             lines.push(format!("{pad}match {}:", print_expr(&m.scrutinee)));
-            for arm in &m.arms {
-                lines.extend(print_arm(arm, level + 1, cx));
+            let arm_starts: Vec<usize> = m.arms.iter().map(|a| a.span.start).collect();
+            let arm_suffixes = cx.trailing_suffixes(&arm_starts);
+            for (arm, suffix) in m.arms.iter().zip(arm_suffixes) {
+                lines.extend(print_arm(arm, level + 1, cx, &suffix));
             }
         }
         Stmt::Function(f) => {
             joinable = false;
-            for line in print_function_decl(f, level, cx, false) {
+            for line in print_function_decl(f, level, cx, false, "") {
+                lines.push(line);
+            }
+        }
+        Stmt::Task(t) => {
+            joinable = false;
+            for line in print_task_decl(t, level, cx) {
                 lines.push(line);
             }
         }
@@ -809,18 +940,26 @@ fn print_stmt(stmt: &Stmt, level: usize, cx: &mut Cx) -> StmtLines {
             joinable = false;
             lines.push(format!("{pad}struct {}:", s.name));
             let fpad = INDENT.repeat(level + 1);
-            for f in &s.fields {
-                lines.push(format!("{fpad}{}: {}", f.name, print_type(&f.ty)));
+            let field_starts: Vec<usize> = s.fields.iter().map(|f| f.span.start).collect();
+            let field_suffixes = cx.trailing_suffixes(&field_starts);
+            for ((f, suffix), start) in s.fields.iter().zip(field_suffixes).zip(field_starts) {
+                for l in cx.leading_for(start) {
+                    lines.push(indent_lines(&l, level + 1));
+                }
+                let mut line = format!("{fpad}{}: {}", f.name, print_type(&f.ty));
+                line.push_str(&suffix);
+                lines.push(line);
             }
         }
         Stmt::BareField(f) => lines.push(format!("{pad}{}: {}", f.name, print_type(&f.ty))),
         Stmt::Decl(d) => lines.push(format!("{pad}{}: {}", d.name, print_expr(&d.value))),
     }
-    // Same-line trailing comment belongs to this statement (and opts
-    // it out of joining — the comment must stay put).
-    if let Some(trail) = cx.trailing_for(stmt_span(stmt).end) {
-        if let Some(last) = lines.last_mut() {
-            last.push_str(&trail);
+    // Same-line trailing comment (precomputed across siblings so
+    // `;`-shared lines attach to their last starter): lands on the
+    // first code line, and opts the statement out of joining.
+    if !suffix.is_empty() {
+        if let Some(first_code) = lines.get_mut(code_at) {
+            first_code.push_str(suffix);
         }
         joinable = false;
     }
@@ -843,6 +982,7 @@ fn stmt_span(stmt: &Stmt) -> compiler::diagnostics::Span {
         Stmt::For(f) => f.span.clone(),
         Stmt::Match(m) => m.span.clone(),
         Stmt::Function(f) => f.span.clone(),
+        Stmt::Task(t) => t.span.clone(),
         Stmt::Struct(s) => s.span.clone(),
         Stmt::BareField(f) => f.span.clone(),
         Stmt::Decl(d) => d.span.clone(),
@@ -880,8 +1020,9 @@ fn assign_op(op: AssignOp) -> &'static str {
 
 /// Match arms at `level` (already the arm indent): `pat[ if g]:`
 /// plus block lines, or `pat[ if g]: expr` inline. Block-vs-inline
-/// is AST-real (MatchBody), never a density choice.
-fn print_arm(arm: &MatchArm, level: usize, cx: &mut Cx) -> Vec<String> {
+/// is AST-real (MatchBody), never a density choice. `suffix` lands
+/// on the head line (the only placement stable across reparses).
+fn print_arm(arm: &MatchArm, level: usize, cx: &mut Cx, suffix: &str) -> Vec<String> {
     let pad = INDENT.repeat(level);
     let mut head = print_pattern(&arm.pattern);
     if let Some(g) = &arm.guard {
@@ -899,11 +1040,7 @@ fn print_arm(arm: &MatchArm, level: usize, cx: &mut Cx) -> Vec<String> {
             lines.extend(print_block(b, level + 1, cx));
         }
     }
-    if let Some(trail) = cx.trailing_for(arm.span.end) {
-        if let Some(last) = lines.last_mut() {
-            last.push_str(&trail);
-        }
-    }
+    append_suffix(&mut lines, suffix);
     lines
 }
 
@@ -934,7 +1071,11 @@ fn print_expr_stmt(e: &Expr, level: usize, cx: &mut Cx) -> Vec<String> {
     match e {
         Expr::Call(c) if c.trailing_block.is_some() => {
             let mut v = vec![format!("{pad}{}:", print_call_head(c, level))];
-            v.extend(print_block(c.trailing_block.as_ref().unwrap(), level + 1, cx));
+            v.extend(print_block(
+                c.trailing_block.as_ref().unwrap(),
+                level + 1,
+                cx,
+            ));
             v
         }
         _ => vec![format!("{pad}{}", print_expr(e))],
@@ -1282,9 +1423,10 @@ fn escape_char(c: char) -> String {
 
 fn ast_eq_program(a: &Program, b: &Program) -> bool {
     a.imports.len() == b.imports.len()
-        && a.imports.iter().zip(&b.imports).all(|(x, y)| {
-            x.path == y.path && x.alias == y.alias
-        })
+        && a.imports
+            .iter()
+            .zip(&b.imports)
+            .all(|(x, y)| x.path == y.path && x.alias == y.alias)
         && a.items.len() == b.items.len()
         && a.items.iter().zip(&b.items).all(|(x, y)| ast_eq_item(x, y))
 }
@@ -1298,13 +1440,19 @@ fn ast_eq_item(a: &Item, b: &Item) -> bool {
                 && ast_eq_block(&x.body, &y.body)
         }
         (Item::Function(x), Item::Function(y)) => ast_eq_function(x, y),
+        (Item::Task(x), Item::Task(y)) => {
+            x.name == y.name
+                && ast_eq_params(&x.params, &y.params)
+                && ast_eq_block(&x.body, &y.body)
+        }
         (Item::Struct(x), Item::Struct(y)) => {
             x.name == y.name
                 && ast_eq_generics(&x.generic_params, &y.generic_params)
                 && x.fields.len() == y.fields.len()
-                && x.fields.iter().zip(&y.fields).all(|(f, g)| {
-                    f.name == g.name && ast_eq_type(&f.ty, &g.ty)
-                })
+                && x.fields
+                    .iter()
+                    .zip(&y.fields)
+                    .all(|(f, g)| f.name == g.name && ast_eq_type(&f.ty, &g.ty))
         }
         (Item::Enum(x), Item::Enum(y)) => {
             x.name == y.name
@@ -1313,20 +1461,29 @@ fn ast_eq_item(a: &Item, b: &Item) -> bool {
                 && x.variants.iter().zip(&y.variants).all(|(v, w)| {
                     v.name == w.name
                         && v.fields.len() == w.fields.len()
-                        && v.fields.iter().zip(&w.fields).all(|(s, t)| ast_eq_type(s, t))
+                        && v.fields
+                            .iter()
+                            .zip(&w.fields)
+                            .all(|(s, t)| ast_eq_type(s, t))
                 })
         }
         (Item::Trait(x), Item::Trait(y)) => {
             x.name == y.name
                 && ast_eq_generics(&x.generic_params, &y.generic_params)
                 && x.members.len() == y.members.len()
-                && x.members.iter().zip(&y.members).all(|(m, n)| ast_eq_sig(m, n))
+                && x.members
+                    .iter()
+                    .zip(&y.members)
+                    .all(|(m, n)| ast_eq_sig(m, n))
         }
         (Item::Impl(x), Item::Impl(y)) => {
             ast_eq_type(&x.ty, &y.ty)
                 && ast_eq_type_opt(&x.for_trait, &y.for_trait)
                 && x.methods.len() == y.methods.len()
-                && x.methods.iter().zip(&y.methods).all(|(m, n)| ast_eq_function(m, n))
+                && x.methods
+                    .iter()
+                    .zip(&y.methods)
+                    .all(|(m, n)| ast_eq_function(m, n))
         }
         (Item::Const(x), Item::Const(y)) => {
             x.name == y.name && ast_eq_type(&x.ty, &y.ty) && ast_eq_expr(&x.value, &y.value)
@@ -1362,7 +1519,9 @@ fn ast_eq_sig(a: &FunctionSig, b: &FunctionSig) -> bool {
 
 fn ast_eq_generics(a: &[GenericParam], b: &[GenericParam]) -> bool {
     a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| x.name == y.name && x.bounds == y.bounds)
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.name == y.name && x.bounds == y.bounds)
 }
 
 fn ast_eq_params(a: &[Param], b: &[Param]) -> bool {
@@ -1393,14 +1552,10 @@ fn ast_eq_block(a: &Block, b: &Block) -> bool {
 fn ast_eq_stmt(a: &Stmt, b: &Stmt) -> bool {
     match (a, b) {
         (Stmt::Let(x), Stmt::Let(y)) => {
-            x.name == y.name
-                && ast_eq_type_opt(&x.ty, &y.ty)
-                && ast_eq_expr(&x.value, &y.value)
+            x.name == y.name && ast_eq_type_opt(&x.ty, &y.ty) && ast_eq_expr(&x.value, &y.value)
         }
         (Stmt::Var(x), Stmt::Var(y)) => {
-            x.name == y.name
-                && ast_eq_type_opt(&x.ty, &y.ty)
-                && ast_eq_expr(&x.value, &y.value)
+            x.name == y.name && ast_eq_type_opt(&x.ty, &y.ty) && ast_eq_expr(&x.value, &y.value)
         }
         (Stmt::State(x), Stmt::State(y)) => x.name == y.name && ast_eq_expr(&x.value, &y.value),
         (Stmt::Assign(x), Stmt::Assign(y)) => {
@@ -1459,10 +1614,15 @@ fn ast_eq_stmt(a: &Stmt, b: &Stmt) -> bool {
                 })
         }
         (Stmt::Function(x), Stmt::Function(y)) => ast_eq_function(x, y),
-        (Stmt::Struct(x), Stmt::Struct(y)) => ast_eq_item(&Item::Struct(x.clone()), &Item::Struct(y.clone())),
-        (Stmt::BareField(x), Stmt::BareField(y)) => {
-            x.name == y.name && ast_eq_type(&x.ty, &y.ty)
+        (Stmt::Task(x), Stmt::Task(y)) => {
+            x.name == y.name
+                && ast_eq_params(&x.params, &y.params)
+                && ast_eq_block(&x.body, &y.body)
         }
+        (Stmt::Struct(x), Stmt::Struct(y)) => {
+            ast_eq_item(&Item::Struct(x.clone()), &Item::Struct(y.clone()))
+        }
+        (Stmt::BareField(x), Stmt::BareField(y)) => x.name == y.name && ast_eq_type(&x.ty, &y.ty),
         (Stmt::Decl(x), Stmt::Decl(y)) => x.name == y.name && ast_eq_expr(&x.value, &y.value),
         _ => false,
     }
@@ -1517,15 +1677,17 @@ fn ast_eq_type_opt(a: &Option<TypeExpr>, b: &Option<TypeExpr>) -> bool {
     }
 }
 
-fn ast_eq_expr(a: &Expr, b: &Expr) -> bool {    match (a, b) {
+fn ast_eq_expr(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
         (Expr::Literal(x, _), Expr::Literal(y, _)) => ast_eq_literal(x, y),
         (Expr::Ident(x, _), Expr::Ident(y, _)) => x == y,
         (Expr::Call(x), Expr::Call(y)) => {
             ast_eq_expr(&x.callee, &y.callee)
                 && x.args.len() == y.args.len()
-                && x.args.iter().zip(&y.args).all(|(p, q)| {
-                    p.label == q.label && ast_eq_expr(&p.value, &q.value)
-                })
+                && x.args
+                    .iter()
+                    .zip(&y.args)
+                    .all(|(p, q)| p.label == q.label && ast_eq_expr(&p.value, &q.value))
                 && match (&x.trailing_block, &y.trailing_block) {
                     (None, None) => true,
                     (Some(p), Some(q)) => ast_eq_block(p, q),
@@ -1541,9 +1703,7 @@ fn ast_eq_expr(a: &Expr, b: &Expr) -> bool {    match (a, b) {
         (Expr::BinOp(x), Expr::BinOp(y)) => {
             x.op == y.op && ast_eq_expr(&x.left, &y.left) && ast_eq_expr(&x.right, &y.right)
         }
-        (Expr::UnaryOp(x), Expr::UnaryOp(y)) => {
-            x.op == y.op && ast_eq_expr(&x.operand, &y.operand)
-        }
+        (Expr::UnaryOp(x), Expr::UnaryOp(y)) => x.op == y.op && ast_eq_expr(&x.operand, &y.operand),
         (Expr::Try(x), Expr::Try(y)) => ast_eq_expr(&x.expr, &y.expr),
         (Expr::Range(x), Expr::Range(y)) => {
             x.inclusive == y.inclusive
@@ -1571,7 +1731,10 @@ fn ast_eq_expr(a: &Expr, b: &Expr) -> bool {    match (a, b) {
         }
         (Expr::ListLit(x), Expr::ListLit(y)) => {
             x.elements.len() == y.elements.len()
-                && x.elements.iter().zip(&y.elements).all(|(p, q)| ast_eq_expr(p, q))
+                && x.elements
+                    .iter()
+                    .zip(&y.elements)
+                    .all(|(p, q)| ast_eq_expr(p, q))
         }
         (Expr::Closure(x), Expr::Closure(y)) => {
             x.params == y.params && ast_eq_expr(&x.body, &y.body)
@@ -1600,15 +1763,12 @@ mod tests {
         assert!(err.message.contains("tab"), "{}", err.message);
     }
 
+    /// Regression: `export` prints exactly once with body indented
+    /// (the strip-and-reindent defect dropped both).
     #[test]
-    fn debug_dump() {
-        for src in [
-            "fn f() -> String:\n    \"hi\"\n",
-            "export fn f() -> String:\n    \"hi\"\n",
-        ] {
-            let (program, tokens, _) = parse_keep_tokens(src);
-            let out = print_with_tokens(&program, &tokens, src).expect("print");
-            println!("=== IN ===\n{src}=== OUT ===\n{out}=== END ===");
-        }
+    fn v2_export_single_keyword_and_indent() {
+        let src = "export fn f() -> String:\n    \"hi\"\n";
+        let out = format_v2(src).expect("format");
+        assert_eq!(out, src);
     }
 }

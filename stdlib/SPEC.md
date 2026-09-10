@@ -16,11 +16,41 @@
 `testing/assertions`.
 
 **Explicitly out of scope (reserved placeholders, §9):**
-`collections/{map,set,stack,queue}`, `math/{statistics,trigonometry}`,
+`collections/{map,set,stack,queue,option,result}`, `math/{statistics,trigonometry}`,
 `testing/{test,property,mock}`, and all of `concurrency/`, `fs/`,
 `io/`, `net/`, `env/`, `process/`, `time/`, `numbers/`,
 `encoding/` — those are M4/M5 surface (IMPLEMENTATION_PLAN.md Phase 5–6)
 and stay as comment-header-only files until their phases land.
+
+M4 exceptions now implemented as interpreter-backed surfaces:
+`error/types.nv`, `env/variables.nv`, and `env/config.nv`. They use
+the existing `Struct`, `Option`, and `Result` representations; trait-based
+error dispatch and command-line argument ownership remain reserved.
+
+M4 round 2 (Phase 5 items 4–5, same pattern): `env/dotenv.nv`
+(`*.nv.env` loading; process env wins per ADR-017),
+`log/log.nv` (leveled facade over `NOCT_LOG`/`NOCT_LOG_SINK`,
+stderr default, no timestamps by design), `db/sqlite.nv`
+(opaque-handle SQLite over bundled rusqlite, JSON row interchange),
+`db/pool.nv` (single-slot bounded pool as threaded values), plus
+`config_or`/`config_require` and `list_get_string`/
+`list_first_string` twins. New builtins (`db_*`, `log_emit`,
+`env_set`, `dotenv_load`) are interpreter-only like all host-IO
+builtins — `run-vm`/`build` fail loud on them, never silent.
+Known surface gaps found while writing (not fixed here):
+nominal-generic field types (`rows: List<String>` — use
+`[String]`), `()` as a value term, `use` statements.
+
+JSON metadata is now available through `encoding/json/{value,parser,writer}.nv`.
+Because `Map` values are not implemented yet, JSON objects cross the language
+boundary as validated strings with explicit string-field access. Full generic
+JSON values and serialization derive remain future work.
+
+The initial GUI foundation is available under `gui/`. It defines
+platform-neutral window and application state, lifecycle/input events, geometry,
+colors, layout, themes, widget descriptions, and retained draw-command data.
+These modules are data-only until a native runtime backend is added; they do
+not open windows or render pixels yet.
 
 **Ground rules (see `stdlib/dev.md`):** stdlib belongs to the language.
 Names here are public API. Renames after M3 need an amendment below.
@@ -142,6 +172,7 @@ strings/string.nv
 strings/format.nv
 strings/builder.nv   (reserved — needs C5)
 testing/assertions.nv
+concurrency/task.nv   (Phase 5/M4: task syntax needs no imports; sleep_builtin only)
 ```
 
 ### 5.2 `core/convert.nv` — RUNNABLE
@@ -174,6 +205,7 @@ fn option_is_some(o: Option<Int>) -> Bool:         // [+String, +Bool twins]
     match o:
         Some(_): true
         None: false
+fn option_is_none(o: Option<Int>) -> Bool
 fn option_unwrap_or(o: Option<Int>, fallback: Int) -> Int: o ?? fallback
 fn option_expect(o: Option<Int>, msg: String) -> Int:
     match o:
@@ -198,6 +230,7 @@ fn result_is_ok(r: Result<Int, String>) -> Bool:   // [+String-ok twins]
     match r:
         Ok(_): true
         Err(_): false
+fn result_is_err(r: Result<Int, String>) -> Bool
 fn result_unwrap_or(r: Result<Int, String>, fallback: Int) -> Int:
     match r:
         Ok(v): v
@@ -310,6 +343,7 @@ fn string_concat(a: String, b: String) -> String: a + b
 fn string_starts_with(s: String, prefix: String) -> Bool
 fn string_ends_with(s: String, suffix: String) -> Bool
 fn string_contains(s: String, needle: String) -> Bool
+fn string_index_of(s: String, needle: String) -> Option<Int> // first index; empty needle is Some(0)
 fn string_repeat(s: String, n: Int) -> String          // SPEC-ONLY (needs-builtin: string-push, C5)
 // format.nv owns the remaining primitive twins (Int/Float rendering
 // lives in core/convert.nv — exactly one name per conversion):
@@ -340,6 +374,10 @@ fn assert_ok(r: Result<Int, String>):
     match r:
         Ok(_): assert(true, "")
         Err(_): assert(false, "expected Ok, found Err")
+fn assert_none(o: Option<Int>)
+fn assert_err(r: Result<Int, String>)
+fn assert_bool_eq(a: Bool, b: Bool)
+fn assert_char_eq(a: Char, b: Char)
 fn assert_false(cond: Bool, msg: String)
 fn assert_int_ne(a: Int, b: Int)
 fn assert_some_string(o: Option<String>)
@@ -368,6 +406,20 @@ fn duration_lt(a: Duration, b: Duration) -> Bool
 
 (`testing/test`, `testing/property`, `testing/mock` are M5 harness
 work — IMPLEMENTATION_PLAN.md Phase 6.5 — and stay `reserved`.)
+
+### 5.12 `concurrency/task.nv` — RUNNABLE (Phase 5/M4)
+
+The `task`/`await` surface needs no library scaffolding (spawning is
+a call, awaiting is an operator), so this module is one documented
+wrapper — the only primitive tasks need today:
+
+```nv
+fn sleep(ms: Int) -> Unit: sleep_builtin(ms)
+```
+
+(`sleep_builtin` blocks the calling OS thread for `ms` milliseconds;
+negative inputs panic. A non-blocking timer arrives with the async
+executor — this is the cooperative M4 floor, see CONCURRENCY.md §7.)
 
 ## 6. File states (normative)
 
@@ -434,7 +486,9 @@ Every file under `stdlib/` MUST be in exactly one state:
 `result` depend only on the language; `math` leans on `compare`
 naming; `list`/`iterator` lean on `option` (`list_get` returns
 `Option`); `strings` lean on `option` (`string_char_at`); `assertions`
-lean on both wrappers. Reversing any edge is a spec amendment.
+lean on both wrappers; `concurrency/task` leans on nothing (the
+`sleep_builtin` wrapper typechecks standalone). Reversing any edge is
+a spec amendment.
 
 ## 9. Reserved files (exact list — no other placeholders may exist)
 
@@ -446,7 +500,9 @@ reserved (M4+): collections/{map,set,stack,queue}.nv  [map/set: needs Map/Set va
               · strings/{builder,unicode}.nv [needs C5 / Char-iteration builtin]
               · testing/{test,property,mock}.nv [needs M5 harness]
               · core/{types,prelude}.nv [needs `type` aliases / real imports]
-reserved (M4/M5, untouched by this spec): concurrency/*, fs/*, io/*,
+reserved (M4/M5, untouched by this spec): concurrency/{atomic,channel,mutex,sync}.nv
+               (`task.nv` promoted RUNNABLE by §5.12 — the rest need M5
+               sync primitives), fs/*, io/*,
               net/* (+http/*), env/*, process/*, time/*, numbers/*,
               encoding/*, result/result.nv extras beyond §5.5
 ```
@@ -616,8 +672,35 @@ phase lands, never pre-scaffolded.
   restored to stdout per the recorded decision (the file-writing
   default was a deviation; `--output` persists the same bytes),
    signatures mirror hover cards via shared `doc_comment_for`,
-   plus `noct-cli/tests/doc.rs` (3/3: stdout render + no stray
+   plus    `noct-cli/tests/doc.rs` (3/3: stdout render + no stray
    files, --output bytes, missing-input usage).
+- 2026-09-06 (phase 4 remainder, EXECUTED): project-aware `noct
+  test` (workspace fixtures vs `tests/**/*.nv` execution via the
+  `run` pipeline, `// @skip-test` both modes;
+  `noct-cli/tests/project.rs` 3/3); registry end-to-end —
+  `registry.rs` (file index, fixpoint resolution with transitive
+  foreign-runtime + tier-conflict errors, TOFU Ed25519 fetch,
+  tarball framing, `.noct/` cache+unpack, lock-consistency gate
+  wired into build/run/test), `add --index/--rotate-key`,
+  `noct audit` trust rows, `publish --dry-run` unchanged;
+  `tests/registry.rs` 6/6 + bin unit 6/6 + `tests/audit.rs` 2/2;
+  `lint --json` + L-002 unused-imports (0 corpus fires;
+  `tests/lint.rs` now 7/7); `fmt --v2` AST printer (expanded
+  canonical, comment attachment, density heuristic, blocking
+  gates; `tests/fmt_v2.rs` golden + 132-file corpus sweep +
+  refusals); parser strips comment tokens at entry (comments are
+  whitespace — killed a class of spurious E010x inside enum/match
+  bodies; compiler 128/128 still green). Full
+  `cargo test --workspace` green including native_build 16/16
+  (after the `str_from_str` link fix). Recorded futures left:
+  HTTP registry API, compound ranges, yank/revoke, vuln DB (M5),
+  v2-as-default promotion, project-aware `test` discovery is
+  DONE (this entry). Process note: this checkout is shared live
+  with the backend track — bulk overwrites reverted several
+  finished files mid-session (fmt/lint/publish/doc/test/add,
+  runtime exports, Cargo deps); all restored and re-verified,
+  but a `git worktree` split is strongly advised (see open
+  structure discussion).
 - 2026-09-06 (phase 4 verify vs item 1, EXECUTED): full gates —
   `cargo build --workspace` clean (warnings only);
   `cargo test --workspace` green everywhere EXCEPT
@@ -645,13 +728,56 @@ phase lands, never pre-scaffolded.
   per the `abi.rs` contract that already declared the import
   in every object; nothing ever called it, but MSVC link
   demands the symbol) + `str_from_str_is_identity` unit test
-  (runtime 5/5). Full `cargo test --workspace` green
-  (compiler 128, interp 23, manifest 12, add 5, create 4,
-  differential 27, doc 3, e2e 1, fmt 9, lint 4, native_build
-  16, publish 5, integration 6, stdlib 3, lsp-protocol 1,
-  runtime 5 — zero failures). Manual second-dev `build` leg
-  confirmed: `create shop` → `build` → `shop.exe` prints
-  `Hello from shop!`, exit 0. No open Phase-4 items remain
-  except the recorded futures (fmt v2, lint expansion/`--json`,
-  registry fetch/resolution/signing-verify, project-aware
-  `test` discovery).
+  (runtime 5/5). Full `cargo test --workspace` green EXCEPT 2
+  brand-new `modules::tests` from the parallel track's latest
+  commit (alias rewrite + E0102 — their uncommitted
+  `modules.rs` mid-edit; their fixtures contain zero comments,
+  so the parser comment-strip below is provably inert for
+  them). Manual second-dev `build` leg confirmed: `create shop`
+  → `build` → `shop.exe` prints `Hello from shop!`, exit 0.
+- 2026-09-06 (phase 4 remainder, EXECUTED — final state): all
+  remaining futures closed. Project-aware `noct test`
+  (workspace fixtures vs `tests/**/*.nv` execution, `// @skip-test`
+  both modes; `tests/project.rs`). Registry end-to-end:
+  `registry.rs` (file index, fixpoint resolution, TOFU Ed25519
+  fetch, tarball framing, `.noct/` cache, lock gate in
+  build/run/test), `add --index/--rotate-key`, `noct audit`,
+  `publish --dry-run`; 6 unit + 6 CLI + 2 audit tests.
+  `lint --json` + L-002 (0 corpus fires). `fmt --v2` AST printer
+  (expanded canonical, comment attachment, density heuristic,
+  blocking gates; golden + 132-file corpus sweep). Parser strips
+  comment tokens at entry (comments are whitespace; compiler
+  132/132 still green). Full `cargo test --workspace` green
+  including native_build and the 2 `modules::tests` (finished on
+  the other track — everything passes together). Process note:
+  this checkout was shared live mid-session and several finished
+  files were transiently clobbered (all restored, re-verified);
+  one checkout per track (`git worktree`) going forward. No open
+  Phase-4 items remain except HTTP registry, compound ranges,
+  yank/revoke, vuln DB (M5+), and v2-as-default promotion.
+- 2026-09-06 (verify, final): live second-developer proof on the
+  real `examples/nightshade` project (`test` runs its smoke,
+  `publish --dry-run` ready, `lint` fires one genuine L-002 on
+  an unused `document` import). `noct test` baseline now 19/3/2:
+  the 3 new module-graph fixtures carry `// @skip-test`
+  (standalone-unresolvable by design; real coverage stays in
+  `modules::tests`). Full `cargo test --workspace` green
+  end-to-end. Outstanding at close: the backend track has an
+  uncommitted, not-yet-compiling `runtime-native` edit open —
+  untouched by author; final re-gate belongs after it lands.
+- 2026-09-06 (phase 5, items 4–5, EXECUTED): `log/log.nv`
+  (leveled facade, `NOCT_LOG`/`NOCT_LOG_SINK`, deterministic
+  output), `env/dotenv.nv` + `noct run` auto-load of
+  `./*.nv.env` (ADR-017, process wins), `config_or`/
+  `config_require`, `db/sqlite.nv` (opaque-handle SQLite over
+  bundled rusqlite, JSON row interchange) + `db/pool.nv`
+  (single-slot bounded pool as threaded values), `list_get_string`/
+  `list_first_string` twins; 7 new interp builtins (typeck sigs
+  registered; VM/build fail loud per the host-IO precedent).
+  `tests/stdlib_test.rs::stdlib_log_db_surface_runs` green;
+  `noct-cli/tests/env.rs` (autoload, process-wins, sink goldens)
+  2/2. Full workspace green except one backend-track socket
+  test marked `#[ignore]` (hangs without loopback TCP).
+  Recorded gaps (not fixed): nominal-generic field types,
+  `()` value term, `use` statements; async pool multiplexing
+  waits on the async runtime.

@@ -1,5 +1,5 @@
-fn user_display_name(name: String, email: String) -> String:
+user_display_name(name: String, email: String) -> String:
     "{name} <{email}>"
 
-fn user_created(name: String) -> String:
+user_created(name: String) -> String:
     "Created user: {name}"

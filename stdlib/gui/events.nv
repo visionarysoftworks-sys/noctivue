@@ -1,0 +1,30 @@
+//! Platform-neutral GUI input and lifecycle events.
+
+export enum WindowEvent:
+    Opened
+    Closed
+    Resized(WindowSize)
+
+export enum InputEvent:
+    KeyDown(String)
+    KeyUp(String)
+    TextInput(String)
+    PointerMoved(Int, Int)
+    PointerDown(Int, Int)
+    PointerUp(Int, Int)
+
+export enum GuiEvent:
+    Window(WindowEvent)
+    Input(InputEvent)
+
+export fn event_name(event: GuiEvent) -> String:
+    match event:
+        Window(Opened): "window.opened"
+        Window(Closed): "window.closed"
+        Window(Resized(size)): "window.resized"
+        Input(KeyDown(key)): "input.key_down"
+        Input(KeyUp(key)): "input.key_up"
+        Input(TextInput(text)): "input.text"
+        Input(PointerMoved(x, y)): "input.pointer_moved"
+        Input(PointerDown(x, y)): "input.pointer_down"
+        Input(PointerUp(x, y)): "input.pointer_up"

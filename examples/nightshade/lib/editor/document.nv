@@ -4,11 +4,23 @@ export struct Document:
     path: String
     contents: String
 
-export export fn document_title() -> String:
+export fn document_title() -> String:
     "Untitled document"
 
-export fn new_document(path: String, contents: String) -> Document:
-    Document { path: path, contents: contents }
+export fn new_document(file_path: String, text: String) -> Document:
+    Document { path: file_path, contents: text }
 
 export fn line_count(document: Document) -> Int:
-    1
+    var lines = 1
+    var i = 0
+    while i < document.contents.length:
+        if document.contents[i] == '\n':
+            lines = lines + 1
+        i = i + 1
+    lines
+
+export fn document_is_empty(document: Document) -> Bool:
+    document.contents.length == 0
+
+export fn document_label(document: Document) -> String:
+    "{document.path} ({line_count(document)} lines)"

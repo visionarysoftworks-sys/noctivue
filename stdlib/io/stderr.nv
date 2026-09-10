@@ -1,1 +1,4 @@
 
+//! io/stderr — standard error placeholder.
+//!
+//! Status: reserved until diagnostics gain a separate runtime stream.

@@ -1,1 +1,8 @@
 
+//! fs/metadata — filesystem metadata snapshots.
+//!
+//! Status: runnable M4 interpreter surface.
+
+/// Return the file modification timestamp in milliseconds.
+fn file_modified_millis(path: String) -> Result<Int, String>:
+    fs_modified_millis_builtin(path)

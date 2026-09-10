@@ -1,1 +1,4 @@
 
+//! process/signal — reserved signal handling API.
+//!
+//! Status: reserved until platform-specific signal ownership is defined.

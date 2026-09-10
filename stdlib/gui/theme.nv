@@ -1,0 +1,23 @@
+//! Theme values shared by GUI widgets and editor shells.
+
+export struct Theme:
+    background: Color
+    foreground: Color
+    accent: Color
+    border: Color
+
+export fn dark_theme() -> Theme:
+    Theme {
+        background: rgb(24, 26, 30)
+        foreground: rgb(230, 232, 235)
+        accent: rgb(90, 160, 255)
+        border: rgb(70, 74, 82)
+    }
+
+export fn light_theme() -> Theme:
+    Theme {
+        background: rgb(250, 250, 250)
+        foreground: rgb(32, 34, 38)
+        accent: rgb(40, 110, 220)
+        border: rgb(190, 192, 198)
+    }

@@ -1,0 +1,13 @@
+//! env/dotenv — dotenv-compatible environment files (`*.nv.env`).
+//!
+//! Status: runnable M4 surface (ADR-017: `KEY=VALUE` syntax, blank
+//! lines and `#` comments ignored, process environment always wins).
+//! Parsing and mutation live in `dotenv_load_builtin` (one place,
+//! shared with `noct run`'s auto-load); this module is the typed
+//! surface over it.
+
+/// Load `KEY=VALUE` pairs from `path` into the process environment.
+/// Existing variables are never overwritten (process wins).
+/// Returns how many variables were set.
+fn dotenv_load(path: String) -> Result<Int, String>:
+    dotenv_load_builtin(path)

@@ -1,1 +1,14 @@
 
+//! encoding/json/value — JSON text boundary for metadata.
+//!
+//! Status: runnable M4 metadata surface. The current compiler does not
+//! yet have Map values, so JSON objects cross the boundary as validated
+//! UTF-8 JSON strings.
+
+/// Validate JSON and return the original document on success.
+fn json_validate(text: String) -> Result<String, String>:
+    json_validate_builtin(text)
+
+/// Read a string-valued object field.
+fn json_get_string(text: String, key: String) -> Result<String, String>:
+    json_get_string_builtin(text, key)

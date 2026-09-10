@@ -1,0 +1,19 @@
+//! Diagnostics panel model for compiler and editor feedback.
+
+export fn diagnostics_title() -> String:
+    "Diagnostics"
+
+export fn diagnostic_summary(severity: String, line: Int, column: Int, message: String) -> String:
+    "{severity} {line}:{column} {message}"
+
+export fn document_diagnostic_count(document: Document) -> Int:
+    if document_is_empty(document):
+        1
+    else:
+        0
+
+export fn document_diagnostic_summary(document: Document) -> String:
+    if document_is_empty(document):
+        diagnostic_summary("error", 1, 1, "document is empty")
+    else:
+        "no diagnostics"

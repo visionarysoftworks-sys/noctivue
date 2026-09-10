@@ -59,7 +59,9 @@ fn shared_target_dir() -> PathBuf {
 /// manifest would resolve against the TEMP dir, not here — the classic
 /// mistake; absolutize at the source).
 fn runtime_native_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("runtime-native");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("runtime-native");
     match dir.canonicalize() {
         Ok(abs) => abs,
         Err(_) => dir,
@@ -134,16 +136,26 @@ pub fn run(args: &[String]) -> i32 {
         crate::cmd_run::print_diagnostics_multi(&files, &sink);
         return 1;
     }
+    // Phase 5/M4: native code has no task runtime yet — compiling a
+    // task as a plain function would silently run it inline. Refuse
+    // loudly; `noct run` (interpreter) is the task-capable backend.
+    if let Some(t) = module.functions.iter().find(|f| f.is_task) {
+        eprintln!(
+            "error: task `{}` requires the async runtime: `noct build` does not support tasks yet (see CONCURRENCY.md §7)",
+            t.name
+        );
+        return 1;
+    }
     let nir_module = compiler::nir::lowering::lower(module);
 
     // ── 2. Staging dir + object emission ───────────────────────────────
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let staging = std::env::temp_dir().join(format!(
-        "noctivue-build-{}-{id}",
-        std::process::id()
-    ));
+    let staging = std::env::temp_dir().join(format!("noctivue-build-{}-{id}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(staging.join("src")) {
-        eprintln!("noct build: cannot create staging dir {}: {e}", staging.display());
+        eprintln!(
+            "noct build: cannot create staging dir {}: {e}",
+            staging.display()
+        );
         return 1;
     }
     // `.obj`, not `.o`: the bytes are COFF either way, but link.exe (via
@@ -179,7 +191,10 @@ pub fn run(args: &[String]) -> i32 {
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => {
-            eprintln!("noct build: cargo link failed (exit {s}) — staging kept at {}", staging.display());
+            eprintln!(
+                "noct build: cargo link failed (exit {s}) — staging kept at {}",
+                staging.display()
+            );
             return 1;
         }
         Err(e) => {

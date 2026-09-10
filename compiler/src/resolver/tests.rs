@@ -60,6 +60,7 @@ fn item_name(item: &Item) -> &str {
     match item {
         Item::Struct(s) => &s.name,
         Item::Function(f) => &f.name,
+        Item::Task(t) => &t.name,
         Item::BareDecl(b) => &b.name,
         Item::Enum(e) => &e.name,
         Item::Trait(t) => &t.name,

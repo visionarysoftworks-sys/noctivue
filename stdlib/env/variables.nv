@@ -1,1 +1,8 @@
 
+//! env/variables — process environment access.
+//!
+//! Status: runnable M4 interpreter surface. Missing variables return None.
+
+/// Read an environment variable without inventing a default.
+fn env_get(name: String) -> Option<String>:
+    env_get_builtin(name)

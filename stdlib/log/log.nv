@@ -1,0 +1,133 @@
+//! log/log — leveled, structured logging over a pluggable sink.
+//!
+//! Status: runnable M4 surface. Levels are a closed enum; filtering
+//! reads `NOCT_LOG` (a minimum level name, default `INFO`); the sink
+//! reads `NOCT_LOG_SINK` (`stderr` default, `stdout` for tests and
+//! golden transcripts). Lines are `[LEVEL] message` with no timestamp
+//! — deterministic output is a feature here (goldens pin it);
+//! timestamps arrive with M5 observability. Unknown `NOCT_LOG`
+//! values fall back to `INFO` (permissive default, documented).
+//!
+//! Sinks are selected, not constructed: without first-class sink
+//! values the facade cannot take a sink argument, so selection via
+//! environment is the honest v1. An async sink arrives with the
+//! async runtime (Phase 5).
+
+/// Log severity, quietest first.
+enum LogLevel:
+    Trace
+    Debug
+    Info
+    Warn
+    Error
+
+/// Numeric rank for level comparison (higher = louder).
+/// Arms use the `Variant():` form — bare `Trace:` would parse as a
+/// binding swallowing every level (the L-001 trap).
+fn log_level_rank(level: LogLevel) -> Int:
+    match level:
+        Trace():
+            0
+        Debug():
+            1
+        Info():
+            2
+        Warn():
+            3
+        Error():
+            4
+
+/// Level name as the environment and the wire spell it.
+fn log_level_name(level: LogLevel) -> String:
+    match level:
+        Trace():
+            "TRACE"
+        Debug():
+            "DEBUG"
+        Info():
+            "INFO"
+        Warn():
+            "WARN"
+        Error():
+            "ERROR"
+
+/// Parse a level name (both cases); unknown names are `None` and
+/// callers fall back to `INFO`.
+fn log_level_parse(name: String) -> Option<LogLevel>:
+    match name:
+        "TRACE":
+            Some(Trace)
+        "trace":
+            Some(Trace)
+        "DEBUG":
+            Some(Debug)
+        "debug":
+            Some(Debug)
+        "INFO":
+            Some(Info)
+        "info":
+            Some(Info)
+        "WARN":
+            Some(Warn)
+        "warn":
+            Some(Warn)
+        "ERROR":
+            Some(Error)
+        "error":
+            Some(Error)
+        _:
+            None
+
+/// Effective minimum level from `NOCT_LOG` (default `INFO`).
+fn log_level() -> LogLevel:
+    match env_get("NOCT_LOG"):
+        Some(name):
+            match log_level_parse(name):
+                Some(level):
+                    level
+                None:
+                    Info
+        None:
+            Info
+
+/// True when a message at `level` would be emitted.
+fn log_enabled(level: LogLevel) -> Bool:
+    log_level_rank(level) >= log_level_rank(log_level())
+
+/// Emit one line to the configured sink (`NOCT_LOG_SINK=stdout`
+/// writes stdout for tests; anything else writes stderr).
+fn log_emit(level: LogLevel, message: String) -> Unit:
+    let tag = log_level_name(level)
+    match env_get("NOCT_LOG_SINK"):
+        Some(sink):
+            match sink:
+                "stdout":
+                    println("[{tag}] {message}")
+                _:
+                    log_emit_builtin(tag, message)
+        None:
+            log_emit_builtin(tag, message)
+
+/// Emit at TRACE if enabled.
+fn log_trace(message: String) -> Unit:
+    if log_enabled(Trace):
+        log_emit(Trace, message)
+
+/// Emit at DEBUG if enabled.
+fn log_debug(message: String) -> Unit:
+    if log_enabled(Debug):
+        log_emit(Debug, message)
+
+/// Emit at INFO if enabled.
+fn log_info(message: String) -> Unit:
+    if log_enabled(Info):
+        log_emit(Info, message)
+
+/// Emit at WARN if enabled.
+fn log_warn(message: String) -> Unit:
+    if log_enabled(Warn):
+        log_emit(Warn, message)
+
+/// Emit at ERROR (always enabled — errors are never filtered).
+fn log_error(message: String) -> Unit:
+    log_emit(Error, message)

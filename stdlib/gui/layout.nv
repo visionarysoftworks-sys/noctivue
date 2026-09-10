@@ -1,0 +1,43 @@
+//! Platform-neutral layout primitives.
+//!
+//! Layout is represented as plain geometry so a backend or widget system can
+//! choose its own measurement algorithm without exposing native handles.
+
+export enum LayoutDirection:
+    Horizontal
+    Vertical
+
+export struct Insets:
+    top: Int
+    right: Int
+    bottom: Int
+    left: Int
+
+export struct LayoutSpec:
+    direction: LayoutDirection
+    padding: Insets
+    gap: Int
+
+export fn insets(all: Int) -> Insets:
+    Insets { top: all, right: all, bottom: all, left: all }
+
+export fn horizontal_layout(padding: Int, gap: Int) -> LayoutSpec:
+    LayoutSpec {
+        direction: Horizontal
+        padding: insets(padding)
+        gap: gap
+    }
+
+export fn vertical_layout(padding: Int, gap: Int) -> LayoutSpec:
+    LayoutSpec {
+        direction: Vertical
+        padding: insets(padding)
+        gap: gap
+    }
+
+export fn inset_rect(area: Rect, padding: Insets) -> Rect:
+    Rect {
+        origin: point(area.origin.x + padding.left, area.origin.y + padding.top)
+        width: area.width - padding.left - padding.right
+        height: area.height - padding.top - padding.bottom
+    }

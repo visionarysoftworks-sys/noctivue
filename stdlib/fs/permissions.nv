@@ -1,1 +1,4 @@
 
+//! fs/permissions — reserved permission API.
+//!
+//! Status: reserved until cross-platform permission semantics are defined.

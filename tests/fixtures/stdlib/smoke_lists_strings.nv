@@ -53,6 +53,8 @@ main():
     assert_int_eq(option_expect(option_or(None, Some(7)), m), 7)
     assert_int_eq(option_expect(option_or(Some(1), Some(7)), m), 1)
     assert_true(option_is_some(option_and(Some(1), None)) == false, "and none")
+    assert_true(option_is_none(None), "none helper")
+    assert_true(option_is_none(Some(1)) == false, "some is not none")
     assert_int_eq(option_expect(option_and(Some(1), Some(2)), m), 2)
     assert_int_eq(option_expect(option_flatten(Some(Some(5))), m), 5)
     assert_true(option_is_some(option_flatten(None)) == false, "flat none")
@@ -65,6 +67,8 @@ main():
     assert_int_eq(result_expect(result_or(Ok(1), Ok(9)), m), 1)
     assert_true(result_contains(Ok(4), 4), "res contains")
     assert_true(result_contains(Err("x"), 4) == false, "res err contains")
+    assert_true(result_is_err(Err("x")), "err helper")
+    assert_true(result_is_err(Ok(4)) == false, "ok is not err")
 
     // assertion twins
     assert_false(false, "false holds")
@@ -72,6 +76,9 @@ main():
     assert_some_string(Some("hi"))
     assert_some_bool(Some(true))
     assert_ok_string(Ok("done"))
+    assert_err(Err("failed"))
+    assert_bool_eq(true, true)
+    assert_char_eq('a', 'a')
 
     // duration
     let d100 = duration_from_millis(100)
@@ -107,6 +114,9 @@ main():
     assert_true(string_contains(hello, ""), "empty needle")
     assert_true(string_contains(hello, "z") == false, "no z")
     assert_true(string_contains("aaa", "aa"), "overlap ok")
+    assert_int_eq(option_expect(string_index_of("hello", "ell"), m), 1)
+    assert_int_eq(option_expect(string_index_of("hello", ""), m), 0)
+    assert_none(string_index_of("hello", "z"))
     match string_char_at("hey", 1):
         Some(c): assert_true(char_eq(c, 'e'), "char at 1")
         None: assert(false, "char_at oob surprise")

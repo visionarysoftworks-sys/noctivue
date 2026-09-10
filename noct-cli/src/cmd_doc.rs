@@ -14,7 +14,7 @@
 use std::fs;
 
 use compiler::analysis::{analyze_file, doc_comment_for};
-use compiler::ast::{Item, type_expr_to_string};
+use compiler::ast::{type_expr_to_string, Item};
 
 pub fn run(args: &[String]) -> i32 {
     let mut open_browser = false;
@@ -199,6 +199,24 @@ pub fn run(args: &[String]) -> i32 {
                 doc.push_str(&format!("## Component: `{}`\n\n", d.name));
                 doc.push_str("```nv\n");
                 doc.push_str(&format!("{}:\n    ...\n```\n\n", d.name));
+                if let Some(d_comment) = docs {
+                    doc.push_str(&d_comment);
+                    doc.push_str("\n\n");
+                }
+            }
+            Item::Task(t) => {
+                let docs = doc_comment_for(&source, t.span.start);
+                let params: Vec<String> = t
+                    .params
+                    .iter()
+                    .map(|p| format!("{}: {}", p.name, type_expr_to_string(&p.ty)))
+                    .collect();
+                doc.push_str(&format!("## Task: `{}`\n\n", t.name));
+                doc.push_str(&format!(
+                    "```nv\ntask {}({}) -> handle\n```\n\n",
+                    t.name,
+                    params.join(", ")
+                ));
                 if let Some(d_comment) = docs {
                     doc.push_str(&d_comment);
                     doc.push_str("\n\n");

@@ -1,0 +1,5 @@
+// @skip-test (module-graph negative fixture: evaluated via ModuleGraph E0102, covered by modules::tests)
+import support::public::secret
+
+main():
+    println(secret())

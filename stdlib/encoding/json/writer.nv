@@ -1,1 +1,12 @@
 
+//! encoding/json/writer — JSON encoding helpers.
+//!
+//! Status: runnable M4 metadata surface.
+
+/// Encode a String as a JSON string literal.
+fn json_string(value: String) -> String:
+    json_quote_builtin(value)
+
+/// Encode a two-field string object for editor/project metadata.
+fn json_object_string_pair(first_key: String, first_value: String, second_key: String, second_value: String) -> String:
+    json_object_string_pair_builtin(first_key, first_value, second_key, second_value)

@@ -1,1 +1,13 @@
 
+//! encoding/json/parser — metadata parsing helpers.
+//!
+//! Status: runnable M4. Structured decoding is exposed through explicit
+//! string-field access until Map and generic record decoding land.
+
+/// Parse and validate a JSON document.
+fn json_parse(text: String) -> Result<String, String>:
+    json_validate(text)
+
+/// Extract a required string field from a JSON object.
+fn json_parse_string_field(text: String, key: String) -> Result<String, String>:
+    json_get_string(text, key)

@@ -10,11 +10,27 @@ fn result_is_ok(r: Result<Int, String>) -> Bool:
         Ok(_): true
         Err(_): false
 
+/// True when the result contains an error.
+fn result_is_err(r: Result<Int, String>) -> Bool:
+    result_is_ok(r) == false
+
 /// True when the result is Ok (String ok type).
 fn result_is_ok_string(r: Result<String, String>) -> Bool:
     match r:
         Ok(_): true
         Err(_): false
+
+/// Return the string value, or a fallback when Err.
+fn result_unwrap_or_string(r: Result<String, String>, fallback: String) -> String:
+    match r:
+        Ok(v): v
+        Err(_): fallback
+
+/// Return the Bool value, or a fallback when Err.
+fn result_unwrap_or_bool(r: Result<Bool, String>, fallback: Bool) -> Bool:
+    match r:
+        Ok(v): v
+        Err(_): fallback
 
 /// The ok value, or the fallback when Err.
 fn result_unwrap_or(r: Result<Int, String>, fallback: Int) -> Int:

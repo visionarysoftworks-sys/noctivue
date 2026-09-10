@@ -213,7 +213,12 @@ runs pre-typeck and never emits false positives on ordinary bindings
 
 ## P-003: manifest schema, lockfile, integrity & signing (fills ADR-017)
 
-**Status:** Proposed (2026-09-05).
+**Status:** Implemented AND executed (2026-09-06 — core since
+2026-09-05, registry slices closed today): `noct-cli/src/manifest.rs`
++ `registry.rs` + `cmd_add --index` + `cmd_audit` + lock gate in
+`build`/`run`/`test`; bin unit tests, `tests/registry.rs`,
+`tests/audit.rs`, `tests/e2e.rs` green; ADR-017 amendment recorded
+in DECISIONS.md (+ TOOLCHAIN.md §3 touch-up).
 
 **Scope discipline.** ADR-017 (Proposed) already decides: filenames
 (`nestpkg.nvpm`, `nestpkg.lock`), syntax family (colon blocks +
@@ -423,17 +428,19 @@ re-verify years later from the lock alone).
 
 ### 10. Acceptance criteria
 
-- [ ] `manifest` module parses every §2 shape and rejects every §9
-      negative with a line-numbered error.
-- [ ] `add`→lock→`build --offline` round-trips against the fixture
-      index with zero network.
-- [ ] Signature verification fails closed in all four mismatch modes
-      (bad sig, wrong key, rotated key, unknown algorithm).
-- [ ] `audit` output shows tier + `signed_by` per row from lock data
-      alone.
-- [ ] TOOLCHAIN.md §3 + DECISIONS.md gain the ADR-017 amendment
-      (this design, unchanged or revised) — the amendment process in
-      DECISIONS.md §2 governs, not this file.
+- [x] `manifest` module parses every §2 shape and rejects every §9
+      negative with a line-numbered error (bin unit tests green).
+- [x] `add`→lock→`build` round-trips against the fixture index with
+      zero network (registry CLI tests + e2e; offline by
+      construction — no network code paths exist, so no `--offline`
+      flag was needed).
+- [x] Signature verification fails closed in all four mismatch modes
+      (bad sig, wrong key, rotated key, unknown algorithm/hash —
+      unit + tamper CLI tests).
+- [x] `audit` output shows tier + `signed_by` per row from lock data
+      alone (`tests/audit.rs`).
+- [x] TOOLCHAIN.md §3 + DECISIONS.md gain the ADR-017 amendment
+      (this design, executed with recorded implementation choices).
 
 **Explicitly OUT of scope:** resolution algorithm, registry HTTP API,
 version-range v2, yank/revoke flows, the vuln database, `noct create`
@@ -520,5 +527,15 @@ CRLF handling, no-op byte-identity on the stdlib corpus.
       itself; reserved gate re-verified). 3 tracked fixtures deviate
       (`function_no_return_type`: no EOF newline; `dashboard_nonui`,
       `simple_vm_test`: CRLF) — left untouched, other track's call.
-- [ ] v2: comment attachment design reviewed; AST-equivalence gate
-      implemented; D3–D5 heuristics with corpus goldens.
+- [x] v2 (2026-09-06, EXECUTED): AST printer behind `--v2`
+      (`noct-cli/src/fmt_v2.rs`) — parsed-program printing (D6 by
+      construction), expanded canonical form (D4), `;`-join density
+      heuristic under the 100-col cap (D3/D5), comment attachment
+      (greedy leading, last-starter trailing, `//!` hoist, EOF
+      flush; inline block comments refused loud), blocking gates
+      (AST-equivalence, idempotency, no-new-errors) + input
+      preconditions (parseable input, no tab indent, both loud).
+      `noct-cli/tests/fmt_v2.rs` (golden + 132-file corpus sweep +
+      refusals + `--check`) green; v1 stays the default while v2
+      bakes (deliberate: promoting a printer to default wants
+      corpus soak time, not a flag day).

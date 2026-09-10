@@ -1,0 +1,22 @@
+//! Nightshade project loading from workspace files.
+
+export struct Workspace:
+    root: String
+    name: String
+    manifest: String
+
+export fn load_workspace(root: String, name: String, manifest: String) -> Workspace:
+    Workspace { root: root, name: name, manifest: manifest }
+
+export fn workspace_manifest(workspace: Workspace) -> String:
+    workspace.manifest
+
+export fn workspace_manifest_text(workspace: Workspace) -> Result<String, String>:
+    let path = workspace.root + "/" + workspace.manifest
+    fs_read_text(path)
+
+export fn workspace_document(workspace: Workspace, relative_path: String) -> Result<Document, String>:
+    let path = workspace.root + "/" + relative_path
+    match fs_read_text(path):
+        Ok(loaded_text): Ok(new_document(path, loaded_text))
+        Err(error): Err(error)

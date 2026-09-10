@@ -175,14 +175,17 @@ fn fmt_v2_check_and_semicolons() {
         out,
         b"main():\n    let a = 1; let b = 2; println(a + b)\n".to_vec()
     );
-    // A comment between them pins expansion (joining would orphan it).
+    // A trailing comment binds to its own node (consumed as its
+    // suffix before any later sibling looks), so it never orphans —
+    // and it does NOT pin neighboring statements: tiny uncommented
+    // neighbors still join under the density heuristic.
     let out = fmt_v2_ok(
         "semis_comment",
         b"main():\n    let a = 1; // first\n    let b = 2\n    println(a + b)\n",
     );
     assert_eq!(
         out,
-        b"main():\n    let a = 1  // first\n    let b = 2\n    println(a + b)\n".to_vec()
+        b"main():\n    let a = 1  // first\n    let b = 2; println(a + b)\n".to_vec()
     );
 
     // --check names dirty files without writing.

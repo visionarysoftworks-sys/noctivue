@@ -20,7 +20,12 @@ pub struct Module {
 
 impl Module {
     pub fn empty() -> Self {
-        Module { structs: Vec::new(), enums: Vec::new(), traits: Vec::new(), functions: Vec::new() }
+        Module {
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+            functions: Vec::new(),
+        }
     }
 }
 
@@ -55,6 +60,12 @@ pub struct Function {
     pub params: Vec<(String, Ty)>,
     pub return_ty: Ty,
     pub body: Vec<TypedStmt>,
+    /// True for `task` declarations (Phase 5/M4): calls spawn a
+    /// concurrent task instead of executing inline. The interpreter
+    /// honors it; NIR lowers tasks as plain functions (synchronous
+    /// VM semantics, documented); native backends must refuse task
+    /// calls loudly rather than silently running them inline.
+    pub is_task: bool,
 }
 
 // ── Statements ────────────────────────────────────────────────────────────────
@@ -74,11 +85,23 @@ pub struct TypedStmt {
 #[derive(Debug, Clone)]
 pub enum TypedStmtKind {
     /// `let name [: T] = value`
-    Let { name: String, ty: Ty, value: TypedExpr },
+    Let {
+        name: String,
+        ty: Ty,
+        value: TypedExpr,
+    },
     /// `var name [: T] = value`
-    Var { name: String, ty: Ty, value: TypedExpr },
+    Var {
+        name: String,
+        ty: Ty,
+        value: TypedExpr,
+    },
     /// `name: value` (bare declaration without type annotation)
-    Decl { name: String, ty: Ty, value: TypedExpr },
+    Decl {
+        name: String,
+        ty: Ty,
+        value: TypedExpr,
+    },
     /// A bare expression statement.
     Expr(TypedExpr),
     /// `return [expr]`
@@ -92,13 +115,23 @@ pub enum TypedStmtKind {
         else_body: Option<Vec<TypedStmt>>,
     },
     /// `while condition { … }`
-    While { condition: TypedExpr, body: Vec<TypedStmt> },
+    While {
+        condition: TypedExpr,
+        body: Vec<TypedStmt>,
+    },
     /// `loop { … }`
     Loop { body: Vec<TypedStmt> },
     /// `for binding in iterable { … }`
-    For { binding: String, iterable: TypedExpr, body: Vec<TypedStmt> },
+    For {
+        binding: String,
+        iterable: TypedExpr,
+        body: Vec<TypedStmt>,
+    },
     /// `match scrutinee { … }`
-    Match { scrutinee: TypedExpr, arms: Vec<TypedArm> },
+    Match {
+        scrutinee: TypedExpr,
+        arms: Vec<TypedArm>,
+    },
     /// `break [value]` — exits the innermost enclosing loop.
     ///
     /// `value`, if present, is type-checked (so errors inside it are still
@@ -228,13 +261,22 @@ pub enum TypedExprKind {
         arms: Vec<TypedArm>,
     },
     /// Enum variant constructor, e.g. `Direction::North` (resolved).
-    EnumVariant { enum_name: String, variant: String },
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+    },
     /// Struct literal `Name { field: val, … }`.
-    StructLit { name: String, fields: Vec<(String, TypedExpr)> },
+    StructLit {
+        name: String,
+        fields: Vec<(String, TypedExpr)>,
+    },
     /// Spread expression `...expr`
     Spread(Box<TypedExpr>),
     /// Closure: `|params| body`
-    Closure { params: Vec<String>, body: Box<TypedExpr> },
+    Closure {
+        params: Vec<String>,
+        body: Box<TypedExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]

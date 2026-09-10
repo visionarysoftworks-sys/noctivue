@@ -1,0 +1,28 @@
+//! Minimal widget composition data.
+//!
+//! Widgets do not render themselves yet. They provide a stable description
+//! that a future backend can measure, paint, and connect to input dispatch.
+
+export enum WidgetKind:
+    Panel
+    Label
+    Editor
+    Button
+
+export struct Widget:
+    kind: WidgetKind
+    bounds: Rect
+    text: String
+    enabled: Bool
+
+export fn panel(bounds: Rect) -> Widget:
+    Widget { kind: Panel, bounds: bounds, text: "", enabled: true }
+
+export fn label(bounds: Rect, text: String) -> Widget:
+    Widget { kind: Label, bounds: bounds, text: text, enabled: true }
+
+export fn editor(bounds: Rect, text: String) -> Widget:
+    Widget { kind: Editor, bounds: bounds, text: text, enabled: true }
+
+export fn button(bounds: Rect, text: String) -> Widget:
+    Widget { kind: Button, bounds: bounds, text: text, enabled: true }

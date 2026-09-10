@@ -1,1 +1,12 @@
 
+//! io/stdout — standard output helpers.
+//!
+//! Status: runnable M4 interpreter surface.
+
+/// Write text without a newline.
+fn stdout_write(text: String):
+    io_write(text)
+
+/// Write text followed by a newline.
+fn stdout_writeln(text: String):
+    io_writeln(text)

@@ -1,0 +1,122 @@
+//! db/pool — bounded single-slot connection pool over `db/sqlite`.
+//!
+//! Status: runnable M4 surface. The pool is a plain value threaded
+//! through calls (no global mutable state exists to hold one): every
+//! operation consumes a `Pool` and returns the updated one, so
+//! lifetimes are explicit in the types. One idle slot is kept for
+//! reuse; `max_size` bounds total open connections.
+//!
+//! Why single-slot: idle reuse needs a growable `List<Db>`, which
+//! needs the generic growth ops (P-001 `list_push`, awaiting the
+//! language-track decision). Until then, `-1` marks the empty slot
+//! and the accounting below is exact, not aspirational. An async
+//! pool with real multiplexing arrives with the async runtime
+//! (Phase 5).
+
+/// Pool configuration + exact open/idle accounting (`idle: -1`
+/// means the reuse slot is empty).
+Pool:
+    path: String
+    max_size: Int
+    open: Int
+    idle: Int
+
+/// A checked-out connection travels with its pool, so checkin
+/// cannot lose track of where it belongs.
+PoolCheckout:
+    pool: Pool
+    db: Db
+
+/// Open a pool (a `max_size` below 1 is a loud error — a zero pool
+/// would silently refuse every checkout).
+fn pool_open(path: String, max_size: Int) -> Result<Pool, String>:
+    if max_size >= 1:
+        Ok(Pool { path: path, max_size: max_size, open: 0, idle: -1 })
+    else:
+        Err("pool max_size must be at least 1")
+
+/// Check out a connection: reuse the idle slot when filled, else
+/// open a fresh connection unless `max_size` is reached.
+fn pool_checkout(pool: Pool) -> Result<PoolCheckout, String>:
+    if pool.idle == -1:
+        checkout_fresh(pool)
+    else:
+        Ok(PoolCheckout {
+            pool: Pool {
+                path: pool.path,
+                max_size: pool.max_size,
+                open: pool.open,
+                idle: -1,
+            },
+            db: Db { id: pool.idle },
+        })
+
+/// Open path of checkout, split for readability (see `pool_checkout`).
+fn checkout_fresh(pool: Pool) -> Result<PoolCheckout, String>:
+    if pool.open >= pool.max_size:
+        Err("pool exhausted (max_size reached)")
+    else:
+        match db_open(pool.path):
+            Ok(db):
+                Ok(PoolCheckout {
+                    pool: Pool {
+                        path: pool.path,
+                        max_size: pool.max_size,
+                        open: pool.open + 1,
+                        idle: -1,
+                    },
+                    db: db,
+                })
+            Err(e):
+                Err(e)
+
+/// Check a connection back in (kept idle for reuse). A full slot
+/// cannot happen through this API; defensively, an occupied slot
+/// closes the incoming connection and keeps the old one, so
+/// nothing leaks silently.
+fn pool_checkin(co: PoolCheckout) -> Pool:
+    if co.pool.idle == -1:
+        Pool {
+            path: co.pool.path,
+            max_size: co.pool.max_size,
+            open: co.pool.open,
+            idle: co.db.id,
+        }
+    else:
+        close_keep_slot(co)
+
+/// Defensive branch of checkin (see above): close the incoming
+/// connection, keep the occupying slot and its accounting.
+fn close_keep_slot(co: PoolCheckout) -> Pool:
+    db_close(co.db)
+    co.pool
+
+/// Close the pool's idle connection, reporting closed (1) or
+/// already-empty (0). Checked-out connections stay the borrower's
+/// responsibility.
+fn pool_close(pool: Pool) -> Result<Int, String>:
+    if pool.idle == -1:
+        Ok(0)
+    else:
+        match db_close(Db { id: pool.idle }):
+            Ok(ignored):
+                Ok(1)
+            Err(e):
+                Err(e)
+
+/// Convenience: check out, query, check back in. Returns the
+/// refreshed pool with the rows.
+PoolRun:
+    pool: Pool
+    rows: [String]
+
+fn pool_run(pool: Pool, sql: String, params: String) -> Result<PoolRun, String>:
+    match pool_checkout(pool):
+        Ok(co):
+            match db_query(co.db, sql, params):
+                Ok(rows):
+                    Ok(PoolRun { pool: pool_checkin(co), rows: rows })
+                Err(e):
+                    Err(e)
+        Err(e):
+            Err(e)

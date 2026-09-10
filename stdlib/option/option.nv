@@ -11,6 +11,10 @@ fn option_is_some(o: Option<Int>) -> Bool:
         Some(_): true
         None: false
 
+/// True when the option is empty.
+fn option_is_none(o: Option<Int>) -> Bool:
+    option_is_some(o) == false
+
 /// True when the option holds a value (String).
 fn option_is_some_string(o: Option<String>) -> Bool:
     match o:

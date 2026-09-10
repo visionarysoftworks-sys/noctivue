@@ -22,11 +22,31 @@ fn assert_some(o: Option<Int>):
         Some(_): assert(true, "")
         None: assert(false, "expected Some, found None")
 
+/// Assert the option is None.
+fn assert_none(o: Option<Int>):
+    match o:
+        Some(_): assert(false, "expected None, found Some")
+        None: assert(true, "")
+
 /// Assert the result is Ok.
 fn assert_ok(r: Result<Int, String>):
     match r:
         Ok(_): assert(true, "")
         Err(_): assert(false, "expected Ok, found Err")
+
+/// Assert the result is Err.
+fn assert_err(r: Result<Int, String>):
+    match r:
+        Ok(_): assert(false, "expected Err, found Ok")
+        Err(_): assert(true, "")
+
+/// Assert two Bools are equal.
+fn assert_bool_eq(a: Bool, b: Bool):
+    assert(a == b, "assert_bool_eq failed")
+
+/// Assert two Chars are equal.
+fn assert_char_eq(a: Char, b: Char):
+    assert(a == b, "assert_char_eq failed")
 
 /// Assert cond is false, with msg on failure.
 fn assert_false(cond: Bool, msg: String):

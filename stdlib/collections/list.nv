@@ -123,3 +123,18 @@ fn list_binary_search(xs: [Int], v: Int) -> Option<Int>:
             else:
                 hi = mid - 1
     None
+
+/// Element at i, or None when i is out of bounds (String twin — row
+/// access for `db/query`, which returns `List<String>`).
+fn list_get_string(xs: [String], i: Int) -> Option<String>:
+    if i < 0:
+        None
+    else:
+        if i < xs.length:
+            Some(xs[i])
+        else:
+            None
+
+/// First element, or None when empty (String twin).
+fn list_first_string(xs: [String]) -> Option<String>:
+    list_get_string(xs, 0)

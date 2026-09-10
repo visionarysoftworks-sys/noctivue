@@ -2,6 +2,21 @@
 fn double(x: Int) -> Int:
     x * 2
 
+struct Document:
+    path: String
+    contents: String
+
+fn line_count(document: Document) -> Int:
+    var lines = 1
+    var i = 0
+    while i < document.contents.length:
+        if document.contents[i] == '\n':
+            lines = lines + 1
+        i = i + 1
+    lines
+
 main():
     assert(double(21) == 42, "double works")
+    let document = Document { path: "main.nv", contents: "one\ntwo" }
+    assert(line_count(document) == 2, "document line count works")
     println("Nightshade tests ok")

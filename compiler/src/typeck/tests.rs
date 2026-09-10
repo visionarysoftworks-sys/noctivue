@@ -323,3 +323,23 @@ main():
         codes
     );
 }
+
+#[test]
+fn typeck_task_registers_int_handle_and_checks() {
+    // Task calls yield `Int` handles; `await` degrades to `Unknown`;
+    // the body checks exactly like a Unit function (no errors here).
+    let src = "task w(x: Int):\n    x\nfn main():\n    let h = w(1)\n    await h\n";
+    let mut sink = DiagnosticSink::new();
+    let tokens = lexer::lex(src, &mut sink);
+    let program = parse(&tokens, &mut sink);
+    let program = resolve(program, &mut sink);
+    let module = typecheck(program, &mut sink);
+    assert!(!has_errors(&sink), "errors: {:?}", sink.diagnostics());
+    let task = module
+        .functions
+        .iter()
+        .find(|f| f.name == "w")
+        .expect("task `w` in module");
+    assert!(task.is_task, "task flag must be set");
+    assert_eq!(task.return_ty, Ty::Unit);
+}

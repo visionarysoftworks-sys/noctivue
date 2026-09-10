@@ -8,3 +8,4 @@ description = "Noctivue tree-walking interpreter (Phase 1 / M0 deliverable)"
 
 [dependencies]
 compiler = { path = "../compiler" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }

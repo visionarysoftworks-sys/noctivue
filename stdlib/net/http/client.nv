@@ -34,4 +34,14 @@ fn http_delete(url: String) -> Result<String, String>:
 /// Low-level request builder used by all higher-level helpers.
 /// Method is the canonical string ("GET", "POST", ...).
 fn http_request(method: String, url: String, headers: [(String, String)], body: String) -> Result<String, String>:
-    http_send(method, url, headers, body)
+    http_send_builtin(method, url, headers, body)
+
+/// Send an HTTP request with automatic header construction.
+/// Builds a Content-Type header when the body is non-empty, then
+/// delegates to `http_send_builtin`. Pass an empty body for
+/// bodyless methods.
+fn http_send(method: String, url: String, headers: [(String, String)], body: String) -> Result<String, String>:
+    let mut all_headers = headers
+    if body.length > 0:
+        all_headers.push((("Content-Type", "text/plain")))
+    http_send_builtin(method, url, all_headers, body)

@@ -1,0 +1,33 @@
+//! Retained render commands for the first GUI backend boundary.
+//!
+//! Backends may translate these commands to a native compositor or GPU. The
+//! language-level API intentionally does not expose backend handles yet.
+
+export struct Color:
+    red: Int
+    green: Int
+    blue: Int
+    alpha: Int
+
+export struct Point:
+    x: Int
+    y: Int
+
+export struct Rect:
+    origin: Point
+    width: Int
+    height: Int
+
+export enum DrawCommand:
+    Clear(Color)
+    FillRect(Rect, Color)
+    Text(Point, String, Color)
+
+export fn rgb(red: Int, green: Int, blue: Int) -> Color:
+    Color { red: red, green: green, blue: blue, alpha: 255 }
+
+export fn point(x: Int, y: Int) -> Point:
+    Point { x: x, y: y }
+
+export fn rect(x: Int, y: Int, width: Int, height: Int) -> Rect:
+    Rect { origin: point(x, y), width: width, height: height }

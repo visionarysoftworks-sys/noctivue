@@ -1,1 +1,18 @@
 
+//! process/command — subprocess execution.
+//!
+//! Status: runnable M4 interpreter surface. The runtime owns process
+//! creation and captures stdout/stderr instead of exposing raw handles.
+
+ProcessOutput:
+    status: Int
+    stdout: String
+    stderr: String
+
+/// Run a command with arguments and capture its output.
+fn process_run(program: String, args: [String]) -> Result<ProcessOutput, String>:
+    process_run_builtin(program, args)
+
+/// True when a process completed successfully.
+fn process_succeeded(output: ProcessOutput) -> Bool:
+    output.status == 0

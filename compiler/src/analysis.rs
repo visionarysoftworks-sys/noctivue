@@ -5,7 +5,7 @@
 //! results suitable for LSP features: diagnostics, hover info, go-to-definition,
 //! and completions.
 
-use crate::ast::{Program, Item};
+use crate::ast::{Item, Program};
 use crate::diagnostics::{Diagnostic, DiagnosticSink, Severity, Span};
 use crate::hir::Module;
 use crate::lexer::lex;
@@ -93,22 +93,36 @@ pub fn diagnostic_to_lsp(source: &str, diag: &Diagnostic) -> lsp_types::Diagnost
 
     // Related information (additional labels beyond the first)
     let related: Option<Vec<lsp_types::DiagnosticRelatedInformation>> = if diag.labels.len() > 1 {
-        Some(diag.labels.iter().skip(1).map(|label| {
-            lsp_types::DiagnosticRelatedInformation {
-location: lsp_types::Location {
-                        uri: lsp_types::Uri::from_str("file://dummy").unwrap(), // Will be overridden by client
-                        range: span_to_range(source, &label.span),
-                    },
-                message: label.message.clone(),
-            }
-        }).collect())
+        Some(
+            diag.labels
+                .iter()
+                .skip(1)
+                .map(|label| {
+                    lsp_types::DiagnosticRelatedInformation {
+                        location: lsp_types::Location {
+                            uri: lsp_types::Uri::from_str("file://dummy").unwrap(), // Will be overridden by client
+                            range: span_to_range(source, &label.span),
+                        },
+                        message: label.message.clone(),
+                    }
+                })
+                .collect(),
+        )
     } else {
         None
     };
 
     let tags = None; // Could add Deprecated/Unnecessary tags if needed
 
-    lsp_types::Diagnostic::new(range, Some(severity), code, Some("noctivue".to_string()), diag.message.clone(), related, tags)
+    lsp_types::Diagnostic::new(
+        range,
+        Some(severity),
+        code,
+        Some("noctivue".to_string()),
+        diag.message.clone(),
+        related,
+        tags,
+    )
 }
 
 /// Internal: convert byte offset to (line, character) position.
@@ -154,6 +168,12 @@ pub fn collect_definitions(resolved: &Program) -> Vec<Definition> {
                 span: f.span.clone(),
                 detail: format!("fn {}(...)", f.name),
             }),
+            Item::Task(t) => defs.push(Definition {
+                name: t.name.clone(),
+                kind: DefinitionKind::Function,
+                span: t.span.clone(),
+                detail: format!("task {}(...) -> handle", t.name),
+            }),
             Item::Enum(e) => defs.push(Definition {
                 name: e.name.clone(),
                 kind: DefinitionKind::Enum,
@@ -164,7 +184,11 @@ pub fn collect_definitions(resolved: &Program) -> Vec<Definition> {
                 name: c.name.clone(),
                 kind: DefinitionKind::Const,
                 span: c.span.clone(),
-                detail: format!("const {}: {}", c.name, crate::ast::type_expr_to_string(&c.ty)),
+                detail: format!(
+                    "const {}: {}",
+                    c.name,
+                    crate::ast::type_expr_to_string(&c.ty)
+                ),
             }),
             Item::Trait(t) => defs.push(Definition {
                 name: t.name.clone(),
@@ -212,52 +236,82 @@ pub enum DefinitionKind {
 }
 
 /// Find the definition at a given position (for go-to-definition).
-pub fn find_definition_at(resolved: &Program, source: &str, position: lsp_types::Position) -> Option<Definition> {
+pub fn find_definition_at(
+    resolved: &Program,
+    source: &str,
+    position: lsp_types::Position,
+) -> Option<Definition> {
     let offset = position_to_byte_offset(source, position);
     for item in &resolved.items {
         match item {
-            Item::Struct(s) if span_contains(&s.span, offset) => return Some(Definition {
-                name: s.name.clone(),
-                kind: DefinitionKind::Struct,
-                span: s.span.clone(),
-                detail: format!("struct {}", s.name),
-            }),
-            Item::Function(f) if span_contains(&f.span, offset) => return Some(Definition {
-                name: f.name.clone(),
-                kind: DefinitionKind::Function,
-                span: f.span.clone(),
-                detail: format!("fn {}(...)", f.name),
-            }),
-            Item::Enum(e) if span_contains(&e.span, offset) => return Some(Definition {
-                name: e.name.clone(),
-                kind: DefinitionKind::Enum,
-                span: e.span.clone(),
-                detail: format!("enum {}", e.name),
-            }),
-            Item::Const(c) if span_contains(&c.span, offset) => return Some(Definition {
-                name: c.name.clone(),
-                kind: DefinitionKind::Const,
-                span: c.span.clone(),
-                detail: format!("const {}: {}", c.name, crate::ast::type_expr_to_string(&c.ty)),
-            }),
-            Item::Trait(t) if span_contains(&t.span, offset) => return Some(Definition {
-                name: t.name.clone(),
-                kind: DefinitionKind::Trait,
-                span: t.span.clone(),
-                detail: format!("trait {}", t.name),
-            }),
-            Item::BareDecl(d) if span_contains(&d.span, offset) => return Some(Definition {
-                name: d.name.clone(),
-                kind: DefinitionKind::Component,
-                span: d.span.clone(),
-                detail: format!("component {}", d.name),
-            }),
-            Item::Mod(m) if span_contains(&m.span, offset) => return Some(Definition {
-                name: m.name.clone(),
-                kind: DefinitionKind::Module,
-                span: m.span.clone(),
-                detail: format!("mod {}", m.name),
-            }),
+            Item::Struct(s) if span_contains(&s.span, offset) => {
+                return Some(Definition {
+                    name: s.name.clone(),
+                    kind: DefinitionKind::Struct,
+                    span: s.span.clone(),
+                    detail: format!("struct {}", s.name),
+                })
+            }
+            Item::Function(f) if span_contains(&f.span, offset) => {
+                return Some(Definition {
+                    name: f.name.clone(),
+                    kind: DefinitionKind::Function,
+                    span: f.span.clone(),
+                    detail: format!("fn {}(...)", f.name),
+                })
+            }
+            Item::Enum(e) if span_contains(&e.span, offset) => {
+                return Some(Definition {
+                    name: e.name.clone(),
+                    kind: DefinitionKind::Enum,
+                    span: e.span.clone(),
+                    detail: format!("enum {}", e.name),
+                })
+            }
+            Item::Const(c) if span_contains(&c.span, offset) => {
+                return Some(Definition {
+                    name: c.name.clone(),
+                    kind: DefinitionKind::Const,
+                    span: c.span.clone(),
+                    detail: format!(
+                        "const {}: {}",
+                        c.name,
+                        crate::ast::type_expr_to_string(&c.ty)
+                    ),
+                })
+            }
+            Item::Trait(t) if span_contains(&t.span, offset) => {
+                return Some(Definition {
+                    name: t.name.clone(),
+                    kind: DefinitionKind::Trait,
+                    span: t.span.clone(),
+                    detail: format!("trait {}", t.name),
+                })
+            }
+            Item::BareDecl(d) if span_contains(&d.span, offset) => {
+                return Some(Definition {
+                    name: d.name.clone(),
+                    kind: DefinitionKind::Component,
+                    span: d.span.clone(),
+                    detail: format!("component {}", d.name),
+                })
+            }
+            Item::Mod(m) if span_contains(&m.span, offset) => {
+                return Some(Definition {
+                    name: m.name.clone(),
+                    kind: DefinitionKind::Module,
+                    span: m.span.clone(),
+                    detail: format!("mod {}", m.name),
+                })
+            }
+            Item::Task(t) if span_contains(&t.span, offset) => {
+                return Some(Definition {
+                    name: t.name.clone(),
+                    kind: DefinitionKind::Function,
+                    span: t.span.clone(),
+                    detail: format!("task {}(...)", t.name),
+                })
+            }
             _ => {}
         }
     }
@@ -288,7 +342,11 @@ fn position_to_byte_offset(source: &str, position: lsp_types::Position) -> usize
 }
 
 /// Get completions at a position.
-pub fn get_completions(resolved: &Program, _source: &str, _position: lsp_types::Position) -> Vec<lsp_types::CompletionItem> {
+pub fn get_completions(
+    resolved: &Program,
+    _source: &str,
+    _position: lsp_types::Position,
+) -> Vec<lsp_types::CompletionItem> {
     let mut items = Vec::new();
     let definitions = collect_definitions(resolved);
     for def in definitions {
@@ -310,7 +368,11 @@ pub fn get_completions(resolved: &Program, _source: &str, _position: lsp_types::
         });
     }
     // Add keywords
-    for kw in &["fn", "struct", "enum", "const", "let", "var", "if", "else", "match", "while", "for", "loop", "return", "break", "continue", "import", "export", "mod", "use", "as", "trait", "impl", "unsafe", "async", "await"] {
+    for kw in &[
+        "fn", "struct", "enum", "const", "let", "var", "if", "else", "match", "while", "for",
+        "loop", "return", "break", "continue", "import", "export", "mod", "use", "as", "trait",
+        "impl", "unsafe", "async", "await",
+    ] {
         items.push(lsp_types::CompletionItem {
             label: (*kw).to_string(),
             kind: Some(lsp_types::CompletionItemKind::KEYWORD),
@@ -545,8 +607,8 @@ fn keyword_hover(name: &str) -> Option<HoverInfo> {
 /// Reserved words: lexed as keywords but not part of the language surface.
 fn reserved_hover(name: &str) -> Option<HoverInfo> {
     const RESERVED: &[&str] = &[
-        "actor", "defer", "extern", "macro", "native", "operator",
-        "protocol", "reflect", "spawn", "static", "where", "yield",
+        "actor", "defer", "extern", "macro", "native", "operator", "protocol", "reflect", "spawn",
+        "static", "where", "yield",
     ];
     if !RESERVED.contains(&name) {
         return None;
@@ -566,10 +628,26 @@ fn prelude_hover(name: &str) -> Option<HoverInfo> {
     let (signature, ty, docs): (&str, &str, &str) = match name {
         "true" => ("true", "Bool", "The `Bool` constant for truth."),
         "false" => ("false", "Bool", "The `Bool` constant for falsity."),
-        "None" => ("None", "Option<T> (empty)", "The empty `Option`: a value explicitly absent. Compare with `Some(v)`."),
-        "Some" => ("Some(value: T) -> Option<T>", "(T) -> Option<T>", "Wraps a value as a present `Option`. Unwrap with `match` or `?`."),
-        "Ok" => ("Ok(value: T) -> Result<T, E>", "(T) -> Result<T, Unknown>", "Wraps a success value as a `Result`. Unwrap with `match` or `?`."),
-        "Err" => ("Err(error: E) -> Result<T, E>", "(E) -> Result<Unknown, E>", "Wraps a failure value as a `Result`. Unwrap with `match` or `?`."),
+        "None" => (
+            "None",
+            "Option<T> (empty)",
+            "The empty `Option`: a value explicitly absent. Compare with `Some(v)`.",
+        ),
+        "Some" => (
+            "Some(value: T) -> Option<T>",
+            "(T) -> Option<T>",
+            "Wraps a value as a present `Option`. Unwrap with `match` or `?`.",
+        ),
+        "Ok" => (
+            "Ok(value: T) -> Result<T, E>",
+            "(T) -> Result<T, Unknown>",
+            "Wraps a success value as a `Result`. Unwrap with `match` or `?`.",
+        ),
+        "Err" => (
+            "Err(error: E) -> Result<T, E>",
+            "(E) -> Result<Unknown, E>",
+            "Wraps a failure value as a `Result`. Unwrap with `match` or `?`.",
+        ),
         _ => return None,
     };
     Some(HoverInfo {
@@ -609,49 +687,83 @@ fn get_hover_for_identifier(
     for item in &resolved.items {
         let (info, span) = match item {
             Item::Struct(s) if s.name == ident => {
-                let fields: Vec<String> = s.fields.iter().map(|f| format!("  {}: {}", f.name, crate::ast::type_expr_to_string(&f.ty))).collect();
-                (HoverInfo {
-                    signature: format!("struct {} {{\n{}\n}}", s.name, fields.join(",\n")),
-                    ty: None,
-                    declared_in: file_label.to_string(),
-                    docs: doc_comment_for(source, s.span.start),
-                }, s.span.clone())
+                let fields: Vec<String> = s
+                    .fields
+                    .iter()
+                    .map(|f| format!("  {}: {}", f.name, crate::ast::type_expr_to_string(&f.ty)))
+                    .collect();
+                (
+                    HoverInfo {
+                        signature: format!("struct {} {{\n{}\n}}", s.name, fields.join(",\n")),
+                        ty: None,
+                        declared_in: file_label.to_string(),
+                        docs: doc_comment_for(source, s.span.start),
+                    },
+                    s.span.clone(),
+                )
             }
             Item::Function(f) if f.name == ident => {
-                let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name, crate::ast::type_expr_to_string(&p.ty))).collect();
-                let ret = f.return_ty.as_ref().map(|t| format!(" -> {}", crate::ast::type_expr_to_string(t))).unwrap_or_default();
-                (HoverInfo {
-                    signature: format!("fn {}({}){}", f.name, params.join(", "), ret),
-                    ty: fn_type_of(typed, &f.name),
-                    declared_in: file_label.to_string(),
-                    docs: doc_comment_for(source, f.span.start),
-                }, f.span.clone())
+                let params: Vec<String> = f
+                    .params
+                    .iter()
+                    .map(|p| format!("{}: {}", p.name, crate::ast::type_expr_to_string(&p.ty)))
+                    .collect();
+                let ret = f
+                    .return_ty
+                    .as_ref()
+                    .map(|t| format!(" -> {}", crate::ast::type_expr_to_string(t)))
+                    .unwrap_or_default();
+                (
+                    HoverInfo {
+                        signature: format!("fn {}({}){}", f.name, params.join(", "), ret),
+                        ty: fn_type_of(typed, &f.name),
+                        declared_in: file_label.to_string(),
+                        docs: doc_comment_for(source, f.span.start),
+                    },
+                    f.span.clone(),
+                )
             }
             Item::Enum(e) if e.name == ident => {
-                let variants: Vec<String> = e.variants.iter().map(|v| format!("  {}", v.name)).collect();
-                (HoverInfo {
-                    signature: format!("enum {} {{\n{}\n}}", e.name, variants.join(",\n")),
-                    ty: None,
-                    declared_in: file_label.to_string(),
-                    docs: doc_comment_for(source, e.span.start),
-                }, e.span.clone())
+                let variants: Vec<String> =
+                    e.variants.iter().map(|v| format!("  {}", v.name)).collect();
+                (
+                    HoverInfo {
+                        signature: format!("enum {} {{\n{}\n}}", e.name, variants.join(",\n")),
+                        ty: None,
+                        declared_in: file_label.to_string(),
+                        docs: doc_comment_for(source, e.span.start),
+                    },
+                    e.span.clone(),
+                )
             }
-            Item::Const(c) if c.name == ident => {
-                (HoverInfo {
-                    signature: format!("const {}: {}", c.name, crate::ast::type_expr_to_string(&c.ty)),
+            Item::Const(c) if c.name == ident => (
+                HoverInfo {
+                    signature: format!(
+                        "const {}: {}",
+                        c.name,
+                        crate::ast::type_expr_to_string(&c.ty)
+                    ),
                     ty: None,
                     declared_in: file_label.to_string(),
                     docs: doc_comment_for(source, c.span.start),
-                }, c.span.clone())
-            }
+                },
+                c.span.clone(),
+            ),
             Item::Trait(t) if t.name == ident => {
-                let methods: Vec<String> = t.members.iter().map(|m| format!("  fn {}", m.name)).collect();
-                (HoverInfo {
-                    signature: format!("trait {} {{\n{}\n}}", t.name, methods.join(",\n")),
-                    ty: None,
-                    declared_in: file_label.to_string(),
-                    docs: doc_comment_for(source, t.span.start),
-                }, t.span.clone())
+                let methods: Vec<String> = t
+                    .members
+                    .iter()
+                    .map(|m| format!("  fn {}", m.name))
+                    .collect();
+                (
+                    HoverInfo {
+                        signature: format!("trait {} {{\n{}\n}}", t.name, methods.join(",\n")),
+                        ty: None,
+                        declared_in: file_label.to_string(),
+                        docs: doc_comment_for(source, t.span.start),
+                    },
+                    t.span.clone(),
+                )
             }
             _ => continue,
         };
@@ -766,43 +878,67 @@ fn extract_identifier_at(source: &str, offset: usize) -> Option<String> {
 }
 
 /// Recursively search for local variable/parameter in statements
-fn find_local_in_stmt(stmt: &crate::hir::items::TypedStmt, ident: &str, file_label: &str) -> Option<lsp_types::Hover> {
+fn find_local_in_stmt(
+    stmt: &crate::hir::items::TypedStmt,
+    ident: &str,
+    file_label: &str,
+) -> Option<lsp_types::Hover> {
     use crate::hir::items::TypedStmtKind;
 
     match &stmt.kind {
-        TypedStmtKind::Let { name, ty, .. } | TypedStmtKind::Var { name, ty, .. } | TypedStmtKind::Decl { name, ty, .. }
-            if name == ident => {
-            return Some(render_hover(HoverInfo {
-                signature: format!("let {name}: {ty}"),
-                ty: Some(ty.to_string()),
-                declared_in: format!("{file_label} (local binding)"),
-                docs: None,
-            }, None));
+        TypedStmtKind::Let { name, ty, .. }
+        | TypedStmtKind::Var { name, ty, .. }
+        | TypedStmtKind::Decl { name, ty, .. }
+            if name == ident =>
+        {
+            return Some(render_hover(
+                HoverInfo {
+                    signature: format!("let {name}: {ty}"),
+                    ty: Some(ty.to_string()),
+                    declared_in: format!("{file_label} (local binding)"),
+                    docs: None,
+                },
+                None,
+            ));
         }
         _ => {}
     }
 
     // Check nested statements
     match &stmt.kind {
-        TypedStmtKind::If { then_body, else_body, .. } => {
+        TypedStmtKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             for s in then_body {
-                if let Some(h) = find_local_in_stmt(s, ident, file_label) { return Some(h); }
+                if let Some(h) = find_local_in_stmt(s, ident, file_label) {
+                    return Some(h);
+                }
             }
             if let Some(eb) = else_body {
                 for s in eb {
-                    if let Some(h) = find_local_in_stmt(s, ident, file_label) { return Some(h); }
+                    if let Some(h) = find_local_in_stmt(s, ident, file_label) {
+                        return Some(h);
+                    }
                 }
             }
         }
-        TypedStmtKind::While { body, .. } | TypedStmtKind::Loop { body, .. } | TypedStmtKind::For { body, .. } => {
+        TypedStmtKind::While { body, .. }
+        | TypedStmtKind::Loop { body, .. }
+        | TypedStmtKind::For { body, .. } => {
             for s in body {
-                if let Some(h) = find_local_in_stmt(s, ident, file_label) { return Some(h); }
+                if let Some(h) = find_local_in_stmt(s, ident, file_label) {
+                    return Some(h);
+                }
             }
         }
         TypedStmtKind::Match { arms, .. } => {
             for arm in arms {
                 for s in &arm.body {
-                    if let Some(h) = find_local_in_stmt(s, ident, file_label) { return Some(h); }
+                    if let Some(h) = find_local_in_stmt(s, ident, file_label) {
+                        return Some(h);
+                    }
                 }
             }
         }
@@ -820,7 +956,13 @@ mod tests {
     fn hover_text_at(source: &str, line: u32, character: u32) -> Option<String> {
         let a = analyze_file("test.nv", source);
         let label = file_label_of(&a.file_path);
-        let h = get_hover(&a.resolved, &a.typed, source, lsp_types::Position::new(line, character), &label)?;
+        let h = get_hover(
+            &a.resolved,
+            &a.typed,
+            source,
+            lsp_types::Position::new(line, character),
+            &label,
+        )?;
         match h.contents {
             lsp_types::HoverContents::Markup(m) => Some(m.value),
             _ => None,
@@ -831,7 +973,10 @@ mod tests {
     fn hover_call_site_shows_callee_signature() {
         // `greet` call on line 7: `    print(greet("World"))` — col of `greet` is 10
         let text = hover_text_at(DEMO, 7, 11).expect("expected hover on greet call");
-        assert!(text.contains("fn greet(name: String) -> String"), "got: {text}");
+        assert!(
+            text.contains("fn greet(name: String) -> String"),
+            "got: {text}"
+        );
     }
 
     #[test]
@@ -852,14 +997,20 @@ mod tests {
     fn hover_local_binding_shows_type() {
         // `user` use on line 9: `    print("User 99: {user}")` — col of `user` is 22
         let text = hover_text_at(DEMO, 9, 23).expect("expected hover on local user");
-        assert!(text.contains("user") && text.contains("String"), "got: {text}");
+        assert!(
+            text.contains("user") && text.contains("String"),
+            "got: {text}"
+        );
     }
 
     #[test]
     fn hover_definition_name_shows_signature() {
         // `add` definition on line 3, col 3
         let text = hover_text_at(DEMO, 3, 4).expect("expected hover on add def");
-        assert!(text.contains("fn add(a: Int, b: Int) -> Int"), "got: {text}");
+        assert!(
+            text.contains("fn add(a: Int, b: Int) -> Int"),
+            "got: {text}"
+        );
     }
 
     #[test]
@@ -912,14 +1063,22 @@ mod tests {
     fn hover_reserved_word_shows_reserved_note() {
         let a = analyze_file("test.nv", "actor:\n    x = 1\n");
         let label = file_label_of(&a.file_path);
-        let h = get_hover(&a.resolved, &a.typed, "actor:\n    x = 1\n",
-            lsp_types::Position::new(0, 2), &label);
+        let h = get_hover(
+            &a.resolved,
+            &a.typed,
+            "actor:\n    x = 1\n",
+            lsp_types::Position::new(0, 2),
+            &label,
+        );
         let text = match h.expect("expected hover on reserved word").contents {
             lsp_types::HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup"),
         };
         assert!(text.contains("Reserved word"), "got: {text}");
-        assert!(text.contains("Declared in keyword (reserved)."), "got: {text}");
+        assert!(
+            text.contains("Declared in keyword (reserved)."),
+            "got: {text}"
+        );
     }
 
     #[test]

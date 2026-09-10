@@ -1,1 +1,86 @@
 
+//! fs/path — portable lexical path helpers.
+//!
+//! Status: runnable M4 foundation. These helpers do not touch the
+//! filesystem; they operate on path text and use both slash styles.
+
+/// True when path starts at a filesystem root or Windows drive.
+fn path_is_absolute(path: String) -> Bool:
+    if path.length == 0:
+        false
+    else:
+        if path[0] == '/' || path[0] == '\\':
+            true
+        else:
+            if path.length > 1:
+                path[1] == ':'
+            else:
+                false
+
+/// Join two path fragments with one slash.
+fn path_join(parent: String, child: String) -> String:
+    if parent.length == 0:
+        child
+    else:
+        if child.length == 0:
+            parent
+        else:
+            if parent[parent.length - 1] == '/' || parent[parent.length - 1] == '\\':
+                parent + child
+            else:
+                parent + "/" + child
+
+/// Return the final path component.
+fn path_basename(path: String) -> String:
+    var start = 0
+    var i = 0
+    while i < path.length:
+        if path[i] == '/' || path[i] == '\\':
+            start = i + 1
+        i = i + 1
+    var out = ""
+    i = start
+    while i < path.length:
+        out = out + "{path[i]}"
+        i = i + 1
+    out
+
+/// Return the directory portion, or "." when there is no separator.
+fn path_dirname(path: String) -> String:
+    var last = 0 - 1
+    var i = 0
+    while i < path.length:
+        if path[i] == '/' || path[i] == '\\':
+            last = i
+        i = i + 1
+    if last < 0:
+        "."
+    else:
+        if last == 0:
+            "{path[0]}"
+        else:
+            var out = ""
+            i = 0
+            while i < last:
+                out = out + "{path[i]}"
+                i = i + 1
+            out
+
+/// Return the final extension including its dot, or an empty string.
+fn path_extension(path: String) -> String:
+    var base = path_basename(path)
+    var dot = 0 - 1
+    var i = 0
+    while i < base.length:
+        if base[i] == '.':
+            dot = i
+        i = i + 1
+    if dot <= 0:
+        ""
+    else:
+        var out = ""
+        i = dot
+        while i < base.length:
+            out = out + "{base[i]}"
+            i = i + 1
+        out

@@ -1,0 +1,14 @@
+//! encoding/json/serializer — JSON serialization of values.
+//!
+//! Status: runnable M4 surface.
+//!
+//! `json_serialize` converts a value (struct, enum, list, primitive)
+//! into a JSON string. The interpreter handles full recursive
+//! serialization; native mode (`noct build`) supports string and
+//! primitive values directly via the runtime FFI.
+
+/// Serialize a value to a JSON string.
+/// Accepts any type — structs become objects, enums become tagged
+/// values, lists become arrays, primitives become JSON scalars.
+fn json_serialize(value: Unknown) -> Result<String, String>:
+    json_serialize_builtin(value)

@@ -1,1 +1,30 @@
+//! concurrency/task — spawn/await surface + cooperative sleep (Phase 5/M4).
+//!
+//! Status: runnable M4 surface. `task` declarations and `await`
+//! expressions are syntax (see CONCURRENCY.md §§1-3, §7); this module
+//! holds the only runtime helper tasks need today: `sleep`.
+//!
+//! Spawning needs no import: calling a `task` returns an opaque
+//! join-handle (`Int`), and `await handle` blocks for its value:
+//!
+//! ```nv
+//! task fetch_status(url: String):
+//!     sleep(50)
+//!
+//! fn main():
+//!     let h = fetch_status("https://example.com")
+//!     await h
+//! ```
+//!
+//! Handles are values — pass them around, await them once. Awaiting
+//! anything that is not a live handle fails loudly, as does awaiting
+//! the same handle twice. Tasks still running when `main` returns
+//! are joined before the process exits (no fire-and-forget).
 
+/// Sleep the calling thread for `ms` milliseconds (non-negative).
+/// This is a cooperative BLOCKING sleep — the M4 floor, not a timer:
+/// inside a task it yields the illusion of waiting while holding its
+/// OS thread; a non-blocking timer arrives with the async executor.
+/// Negative inputs panic.
+fn sleep(ms: Int) -> Unit:
+    sleep_builtin(ms)

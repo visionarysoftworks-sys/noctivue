@@ -129,6 +129,26 @@ fn item_to_json(item: &Item) -> String {
                 params.join(", ")
             )
         }
+        Item::Task(t) => {
+            let params: Vec<String> = t
+                .params
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{{\"name\": {}, \"ty\": {}}}",
+                        json_string(&p.name),
+                        json_string(&type_expr_str(&p.ty))
+                    )
+                })
+                .collect();
+            format!(
+                "    {{\"kind\": \"Task\", \"name\": {}, \"params\": [{}], \
+                 \"body_stmt_count\": {}}}",
+                json_string(&t.name),
+                params.join(", "),
+                t.body.stmts.len()
+            )
+        }
         Item::Struct(s) => {
             let fields: Vec<String> = s
                 .fields

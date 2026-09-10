@@ -79,3 +79,29 @@ fn string_contains(s: String, needle: String) -> Bool:
                     found = true
                 start = start + 1
             found
+
+/// Return the first character index of needle, or None when absent.
+fn string_index_of(s: String, needle: String) -> Option<Int>:
+    if needle.length == 0:
+        Some(0)
+    else:
+        if needle.length > s.length:
+            None
+        else:
+            var found = 0 - 1
+            var start = 0
+            while start <= s.length - needle.length:
+                var hit = true
+                var j = 0
+                while j < needle.length:
+                    if s[start + j] != needle[j]:
+                        hit = false
+                    j = j + 1
+                if hit:
+                    if found == 0 - 1:
+                        found = start
+                start = start + 1
+            if found == 0 - 1:
+                None
+            else:
+                Some(found)

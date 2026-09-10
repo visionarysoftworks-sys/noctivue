@@ -1,3 +1,4 @@
+// @skip-test (module-graph fixture: resolves only through ModuleGraph linkage, covered by modules::tests)
 import support::public as api
 
 main():

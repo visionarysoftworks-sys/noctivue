@@ -43,6 +43,10 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("noct run: {message}");
         return 1;
     }
+    // 0. Auto-load `./*.nv.env` (ADR-017): sorted, process wins,
+    // malformed lines warn. Runs before everything so `config_or` /
+    // `env_get` see file values during interpretation.
+    autoload_dotenv_files();
     // 1. Resolve file paths (all non-flag args, or "main.nv" in cwd)
     let paths: Vec<&str> = args
         .iter()
@@ -98,6 +102,28 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     exit_code
+}
+
+/// Auto-load every `./*.nv.env` file (ADR-017) into the process
+/// environment before running. Files are loaded in sorted order;
+/// the process environment always wins; malformed lines warn on
+/// stderr (via the shared `interp::dotenv_load_file` core) and are
+/// skipped. A missing/unreadable directory simply loads nothing.
+fn autoload_dotenv_files() {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(".") {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".nv.env") {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    for name in names {
+        let _ = interp::dotenv_load_file(&name, |m| eprintln!("{m}"));
+    }
 }
 
 /// Print all diagnostics in the sink to stderr in a human-readable format.

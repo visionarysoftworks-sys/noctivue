@@ -27,8 +27,17 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [Spanned<Token>], sink: &'a mut DiagnosticSink, known_types: HashSet<String>) -> Self {
-        Parser { tokens, pos: 0, sink, known_types }
+    pub fn new(
+        tokens: &'a [Spanned<Token>],
+        sink: &'a mut DiagnosticSink,
+        known_types: HashSet<String>,
+    ) -> Self {
+        Parser {
+            tokens,
+            pos: 0,
+            sink,
+            known_types,
+        }
     }
 
     // ── Token navigation ──────────────────────────────────────────────────
@@ -41,7 +50,10 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_spanned(&self) -> &Spanned<Token> {
-        static EOF: Spanned<Token> = Spanned { node: Token::Eof, span: Span { start: 0, end: 0 } };
+        static EOF: Spanned<Token> = Spanned {
+            node: Token::Eof,
+            span: Span { start: 0, end: 0 },
+        };
         self.tokens.get(self.pos).unwrap_or(&EOF)
     }
 
@@ -72,8 +84,10 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) -> &Spanned<Token> {
         let s = self.tokens.get(self.pos).unwrap_or_else(|| {
-            static EOF: Spanned<Token> =
-                Spanned { node: Token::Eof, span: Span { start: 0, end: 0 } };
+            static EOF: Spanned<Token> = Spanned {
+                node: Token::Eof,
+                span: Span { start: 0, end: 0 },
+            };
             &EOF
         });
         if self.pos < self.tokens.len() {
@@ -208,7 +222,11 @@ impl<'a> Parser<'a> {
 
         let end = self.current_span().end;
         self.skip_newlines();
-        Some(ImportDecl { path, alias, span: Span { start, end } })
+        Some(ImportDecl {
+            path,
+            alias,
+            span: Span { start, end },
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -224,6 +242,7 @@ impl<'a> Parser<'a> {
                 Some(Item::Export(Box::new(inner)))
             }
             Token::Fn => Some(Item::Function(self.parse_fn_decl()?)),
+            Token::Task => Some(Item::Task(self.parse_task_decl()?)),
             Token::Struct => Some(Item::Struct(self.parse_struct_decl()?)),
             Token::Enum => Some(Item::Enum(self.parse_enum_decl()?)),
             Token::Trait => Some(Item::Trait(self.parse_trait_decl()?)),
@@ -248,12 +267,9 @@ impl<'a> Parser<'a> {
             _ => {
                 let span = self.current_span();
                 self.sink.emit(
-                    Diagnostic::error(format!(
-                        "unexpected token `{:?}` at top level",
-                        self.peek()
-                    ))
-                    .with_span(span, "here")
-                    .with_code("E0101"),
+                    Diagnostic::error(format!("unexpected token `{:?}` at top level", self.peek()))
+                        .with_span(span, "here")
+                        .with_code("E0101"),
                 );
                 None
             }
@@ -293,7 +309,10 @@ impl<'a> Parser<'a> {
             // Not a declaration — this was a bare expression statement at top level.
             // Reconstruct as an expression item (unusual at top level, but valid for
             // components in some positions). Error-recover.
-            let span = Span { start, end: self.current_span().end };
+            let span = Span {
+                start,
+                end: self.current_span().end,
+            };
             self.sink.emit(
                 Diagnostic::error(format!(
                     "expected `:` after `{name}` to begin a declaration block"
@@ -357,7 +376,12 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Colon)?;
         let fields = self.parse_field_block()?;
         let end = self.current_span().start;
-        Some(StructDecl { name, generic_params, fields, span: Span { start, end } })
+        Some(StructDecl {
+            name,
+            generic_params,
+            fields,
+            span: Span { start, end },
+        })
     }
 
     fn parse_enum_decl(&mut self) -> Option<EnumDecl> {
@@ -368,7 +392,12 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Colon)?;
         let variants = self.parse_enum_body()?;
         let end = self.current_span().start;
-        Some(EnumDecl { name, generic_params, variants, span: Span { start, end } })
+        Some(EnumDecl {
+            name,
+            generic_params,
+            variants,
+            span: Span { start, end },
+        })
     }
 
     fn parse_trait_decl(&mut self) -> Option<TraitDecl> {
@@ -379,7 +408,12 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Colon)?;
         let members = self.parse_trait_body()?;
         let end = self.current_span().start;
-        Some(TraitDecl { name, generic_params, members, span: Span { start, end } })
+        Some(TraitDecl {
+            name,
+            generic_params,
+            members,
+            span: Span { start, end },
+        })
     }
 
     fn parse_impl_block(&mut self) -> Option<ImplBlock> {
@@ -401,7 +435,12 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Colon)?;
         let methods = self.parse_impl_body()?;
         let end = self.current_span().start;
-        Some(ImplBlock { ty: impl_ty, for_trait: trait_ty, methods, span: Span { start, end } })
+        Some(ImplBlock {
+            ty: impl_ty,
+            for_trait: trait_ty,
+            methods,
+            span: Span { start, end },
+        })
     }
 
     fn parse_const_decl(&mut self) -> Option<ConstDecl> {
@@ -414,7 +453,12 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(ConstDecl { name, ty, value, span: Span { start, end } })
+        Some(ConstDecl {
+            name,
+            ty,
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_mod_decl(&mut self) -> Option<ModDecl> {
@@ -424,7 +468,11 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Colon)?;
         let items = self.parse_colon_block()?.stmts;
         let end = self.current_span().start;
-        Some(ModDecl { name, items, span: Span { start, end } })
+        Some(ModDecl {
+            name,
+            items,
+            span: Span { start, end },
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -445,7 +493,10 @@ impl<'a> Parser<'a> {
                 let stmts = self.parse_stmt_list_braced();
                 let end = self.current_span().end;
                 self.expect(&Token::RBrace);
-                Some(Block { stmts, span: Span { start, end } })
+                Some(Block {
+                    stmts,
+                    span: Span { start, end },
+                })
             }
             // Newline → INDENT block
             Token::Newline => {
@@ -457,7 +508,10 @@ impl<'a> Parser<'a> {
                 let start = colon_span.start;
                 let stmts = self.parse_inline_stmt_list();
                 let end = self.current_span().start;
-                Some(Block { stmts, span: Span { start, end } })
+                Some(Block {
+                    stmts,
+                    span: Span { start, end },
+                })
             }
         }
     }
@@ -467,7 +521,10 @@ impl<'a> Parser<'a> {
         let start = self.current_span().start;
         if *self.peek() != Token::Indent {
             // Empty body — valid (e.g. empty struct, Phase 0 decision: → struct).
-            return Some(Block { stmts: vec![], span: Span { start, end: start } });
+            return Some(Block {
+                stmts: vec![],
+                span: Span { start, end: start },
+            });
         }
         self.advance(); // INDENT
         let stmts = self.parse_stmt_list_indented();
@@ -476,7 +533,10 @@ impl<'a> Parser<'a> {
         if *self.peek() == Token::Dedent {
             self.advance();
         }
-        Some(Block { stmts, span: Span { start, end } })
+        Some(Block {
+            stmts,
+            span: Span { start, end },
+        })
     }
 
     fn parse_stmt_list_indented(&mut self) -> Vec<Stmt> {
@@ -510,7 +570,10 @@ impl<'a> Parser<'a> {
                     if let Some(s) = self.parse_stmt() {
                         stmts.push(s);
                     } else {
-                        while !matches!(self.peek(), Token::Semi | Token::Newline | Token::RBrace | Token::Eof) {
+                        while !matches!(
+                            self.peek(),
+                            Token::Semi | Token::Newline | Token::RBrace | Token::Eof
+                        ) {
                             self.advance();
                         }
                     }
@@ -527,7 +590,9 @@ impl<'a> Parser<'a> {
             self.skip_newlines_and_semis();
             match self.peek() {
                 Token::Newline | Token::Eof | Token::Dedent => break,
-                Token::Semi => { self.advance(); }
+                Token::Semi => {
+                    self.advance();
+                }
                 _ => {
                     if let Some(s) = self.parse_stmt() {
                         stmts.push(s);
@@ -597,7 +662,11 @@ impl<'a> Parser<'a> {
                 };
                 let end = self.current_span().start;
                 self.skip_newlines();
-                fields.push(FieldDecl { name, ty, span: Span { start, end } });
+                fields.push(FieldDecl {
+                    name,
+                    ty,
+                    span: Span { start, end },
+                });
             } else {
                 break;
             }
@@ -685,7 +754,11 @@ impl<'a> Parser<'a> {
         };
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(EnumVariant { name, fields, span: Span { start, end } })
+        Some(EnumVariant {
+            name,
+            fields,
+            span: Span { start, end },
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -740,7 +813,13 @@ impl<'a> Parser<'a> {
         };
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(FunctionSig { name, generic_params, params, return_ty, span: Span { start, end } })
+        Some(FunctionSig {
+            name,
+            generic_params,
+            params,
+            return_ty,
+            span: Span { start, end },
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -797,7 +876,10 @@ impl<'a> Parser<'a> {
                 let stmts = self.parse_stmt_list_braced();
                 let end = self.current_span().end;
                 self.expect(&Token::RBrace);
-                Some(FunctionBody::Block(Block { stmts, span: Span { start, end } }))
+                Some(FunctionBody::Block(Block {
+                    stmts,
+                    span: Span { start, end },
+                }))
             }
             // Newline → indented block
             Token::Newline => {
@@ -818,7 +900,10 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                Some(FunctionBody::Block(Block { stmts, span: Span { start, end } }))
+                Some(FunctionBody::Block(Block {
+                    stmts,
+                    span: Span { start, end },
+                }))
             }
         }
     }
@@ -860,7 +945,12 @@ impl<'a> Parser<'a> {
             None
         };
         let end = self.current_span().start;
-        Some(Param { name, ty, default, span: Span { start, end } })
+        Some(Param {
+            name,
+            ty,
+            default,
+            span: Span { start, end },
+        })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -902,7 +992,11 @@ impl<'a> Parser<'a> {
                 vec![]
             };
             let end = self.current_span().start;
-            params.push(GenericParam { name, bounds, span: Span { start, end } });
+            params.push(GenericParam {
+                name,
+                bounds,
+                span: Span { start, end },
+            });
             if !self.eat(&Token::Comma) {
                 break;
             }
@@ -918,30 +1012,29 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self) -> Option<Stmt> {
         self.skip_newlines_and_semis();
         match self.peek() {
-            Token::Let   => self.parse_let_stmt().map(Stmt::Let),
-            Token::Var   => self.parse_var_stmt().map(Stmt::Var),
+            Token::Let => self.parse_let_stmt().map(Stmt::Let),
+            Token::Var => self.parse_var_stmt().map(Stmt::Var),
             Token::Return => self.parse_return_stmt().map(Stmt::Return),
-            Token::Break  => self.parse_break_stmt().map(Stmt::Break),
+            Token::Break => self.parse_break_stmt().map(Stmt::Break),
             Token::Continue => {
                 let span = self.current_span();
                 self.advance();
                 self.skip_newlines();
                 Some(Stmt::Continue(span))
             }
-            Token::If    => self.parse_if_stmt().map(Stmt::If),
+            Token::If => self.parse_if_stmt().map(Stmt::If),
             Token::While => self.parse_while_stmt().map(Stmt::While),
-            Token::Loop  => self.parse_loop_stmt().map(Stmt::Loop),
-            Token::For   => self.parse_for_stmt().map(Stmt::For),
+            Token::Loop => self.parse_loop_stmt().map(Stmt::Loop),
+            Token::For => self.parse_for_stmt().map(Stmt::For),
             Token::Match => self.parse_match_stmt().map(Stmt::Match),
-            Token::Fn    => self.parse_fn_decl().map(|f| Stmt::Function(f)),
+            Token::Fn => self.parse_fn_decl().map(|f| Stmt::Function(f)),
+            Token::Task => self.parse_task_decl().map(|t| Stmt::Task(t)),
             Token::Struct => self.parse_struct_decl().map(|s| Stmt::Struct(s)),
             Token::DocComment(_) | Token::LineComment(_) | Token::BlockComment(_) => {
                 self.advance();
                 self.parse_stmt()
             }
-            Token::Ident(s) if s == "state" => {
-                self.parse_state_stmt().map(Stmt::State)
-            }
+            Token::Ident(s) if s == "state" => self.parse_state_stmt().map(Stmt::State),
             Token::Ident(_) => {
                 if *self.peek2() == Token::LParen {
                     self.parse_ident_paren_stmt()
@@ -1065,7 +1158,11 @@ impl<'a> Parser<'a> {
         let ty = self.parse_type_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(Stmt::BareField(FieldDecl { name, ty, span: Span { start, end } }))
+        Some(Stmt::BareField(FieldDecl {
+            name,
+            ty,
+            span: Span { start, end },
+        }))
     }
 
     fn parse_bare_decl_stmt(&mut self) -> Option<Stmt> {
@@ -1096,6 +1193,29 @@ impl<'a> Parser<'a> {
         Some(Stmt::Function(func))
     }
 
+    /// Parse a task declaration `task name[(params)]: block` into a
+    /// `TaskDecl`. Explicit form only (see `ast::TaskDecl`): no
+    /// classification, no return-type annotation (calls yield opaque
+    /// join handles), always a block body.
+    fn parse_task_decl(&mut self) -> Option<TaskDecl> {
+        let start = self.current_span().start;
+        self.expect(&Token::Task)?;
+        let name = self.parse_ident()?;
+        let params = if *self.peek() == Token::LParen {
+            self.parse_param_list()?
+        } else {
+            Vec::new()
+        };
+        let body = self.parse_colon_block()?;
+        let end = body.span.end;
+        Some(TaskDecl {
+            name,
+            params,
+            body,
+            span: Span { start, end },
+        })
+    }
+
     /// Parse a bare declaration `name: expr` without a type annotation.
     fn parse_decl_stmt(&mut self) -> Option<Stmt> {
         let start = self.current_span().start;
@@ -1104,7 +1224,11 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(Stmt::Decl(DeclStmt { name, value, span: Span { start, end } }))
+        Some(Stmt::Decl(DeclStmt {
+            name,
+            value,
+            span: Span { start, end },
+        }))
     }
 
     fn parse_let_stmt(&mut self) -> Option<LetStmt> {
@@ -1121,7 +1245,12 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(LetStmt { name, ty, value, span: Span { start, end } })
+        Some(LetStmt {
+            name,
+            ty,
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_var_stmt(&mut self) -> Option<VarStmt> {
@@ -1138,7 +1267,12 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(VarStmt { name, ty, value, span: Span { start, end } })
+        Some(VarStmt {
+            name,
+            ty,
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_state_stmt(&mut self) -> Option<StateStmt> {
@@ -1154,33 +1288,49 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(StateStmt { name, value, span: Span { start, end } })
+        Some(StateStmt {
+            name,
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_return_stmt(&mut self) -> Option<ReturnStmt> {
         let start = self.current_span().start;
         self.advance(); // `return`
-        let value = if !matches!(self.peek(), Token::Newline | Token::Semi | Token::Eof | Token::Dedent) {
+        let value = if !matches!(
+            self.peek(),
+            Token::Newline | Token::Semi | Token::Eof | Token::Dedent
+        ) {
             Some(self.parse_expr()?)
         } else {
             None
         };
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(ReturnStmt { value, span: Span { start, end } })
+        Some(ReturnStmt {
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_break_stmt(&mut self) -> Option<BreakStmt> {
         let start = self.current_span().start;
         self.advance(); // `break`
-        let value = if !matches!(self.peek(), Token::Newline | Token::Semi | Token::Eof | Token::Dedent) {
+        let value = if !matches!(
+            self.peek(),
+            Token::Newline | Token::Semi | Token::Eof | Token::Dedent
+        ) {
             Some(self.parse_expr()?)
         } else {
             None
         };
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(BreakStmt { value, span: Span { start, end } })
+        Some(BreakStmt {
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_if_stmt(&mut self) -> Option<IfStmt> {
@@ -1191,7 +1341,7 @@ impl<'a> Parser<'a> {
         // to expression for now.
         if *self.peek() == Token::Let {
             self.advance(); // `let`
-            // parse the pattern loosely as ident or Type(ident)
+                            // parse the pattern loosely as ident or Type(ident)
             self.parse_pattern(); // discard — we just need to consume it
             self.expect(&Token::Eq);
         }
@@ -1221,7 +1371,13 @@ impl<'a> Parser<'a> {
         }
 
         let end = self.current_span().start;
-        Some(IfStmt { condition, then_block, else_if_clauses, else_block, span: Span { start, end } })
+        Some(IfStmt {
+            condition,
+            then_block,
+            else_if_clauses,
+            else_block,
+            span: Span { start, end },
+        })
     }
 
     fn parse_while_stmt(&mut self) -> Option<WhileStmt> {
@@ -1230,7 +1386,11 @@ impl<'a> Parser<'a> {
         let condition = self.parse_expr()?;
         let body = self.parse_colon_block()?;
         let end = self.current_span().start;
-        Some(WhileStmt { condition, body, span: Span { start, end } })
+        Some(WhileStmt {
+            condition,
+            body,
+            span: Span { start, end },
+        })
     }
 
     fn parse_loop_stmt(&mut self) -> Option<LoopStmt> {
@@ -1238,7 +1398,10 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Loop)?;
         let body = self.parse_colon_block()?;
         let end = self.current_span().start;
-        Some(LoopStmt { body, span: Span { start, end } })
+        Some(LoopStmt {
+            body,
+            span: Span { start, end },
+        })
     }
 
     fn parse_for_stmt(&mut self) -> Option<ForStmt> {
@@ -1249,7 +1412,12 @@ impl<'a> Parser<'a> {
         let iterable = self.parse_expr()?;
         let body = self.parse_colon_block()?;
         let end = self.current_span().start;
-        Some(ForStmt { binding, iterable, body, span: Span { start, end } })
+        Some(ForStmt {
+            binding,
+            iterable,
+            body,
+            span: Span { start, end },
+        })
     }
 
     fn parse_match_stmt(&mut self) -> Option<MatchStmt> {
@@ -1284,7 +1452,11 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         let end = self.current_span().start;
-        Some(MatchStmt { scrutinee, arms, span: Span { start, end } })
+        Some(MatchStmt {
+            scrutinee,
+            arms,
+            span: Span { start, end },
+        })
     }
 
     fn parse_match_arm(&mut self) -> Option<MatchArm> {
@@ -1321,18 +1493,23 @@ impl<'a> Parser<'a> {
         };
         let end = self.current_span().start;
         self.skip_newlines();
-        Some(MatchArm { pattern, guard, body, span: Span { start, end } })
+        Some(MatchArm {
+            pattern,
+            guard,
+            body,
+            span: Span { start, end },
+        })
     }
 
     /// Expression statement or assignment: `expr` or `lvalue op= expr`.
     fn parse_expr_or_assign_stmt(&mut self) -> Option<Stmt> {
         let expr = self.parse_expr()?;
         let op = match self.peek() {
-            Token::Eq       => Some(AssignOp::Eq),
-            Token::PlusEq   => Some(AssignOp::PlusEq),
-            Token::MinusEq  => Some(AssignOp::MinusEq),
-            Token::StarEq   => Some(AssignOp::StarEq),
-            Token::SlashEq  => Some(AssignOp::SlashEq),
+            Token::Eq => Some(AssignOp::Eq),
+            Token::PlusEq => Some(AssignOp::PlusEq),
+            Token::MinusEq => Some(AssignOp::MinusEq),
+            Token::StarEq => Some(AssignOp::StarEq),
+            Token::SlashEq => Some(AssignOp::SlashEq),
             Token::PercentEq => Some(AssignOp::PercentEq),
             _ => None,
         };
@@ -1356,7 +1533,10 @@ impl<'a> Parser<'a> {
         if *self.peek() == Token::Colon {
             if let Expr::Call(ref call) = expr {
                 let block = self.parse_colon_block()?;
-                let span = Span { start: expr_span(&expr).start, end: block.span.end };
+                let span = Span {
+                    start: expr_span(&expr).start,
+                    end: block.span.end,
+                };
                 let expr = Expr::Call(CallExpr {
                     callee: call.callee.clone(),
                     args: call.args.clone(),
@@ -1456,7 +1636,10 @@ impl<'a> Parser<'a> {
             let op_span = self.current_span();
             self.advance();
             let right = self.parse_or_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
             left = Expr::BinOp(BinOpExpr {
                 op: BinOp::Coalesce,
                 left: Box::new(left),
@@ -1473,8 +1656,16 @@ impl<'a> Parser<'a> {
         while *self.peek() == Token::PipePipe {
             self.advance();
             let right = self.parse_and_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op: BinOp::Or, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op: BinOp::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1484,8 +1675,16 @@ impl<'a> Parser<'a> {
         while *self.peek() == Token::AmpAmp {
             self.advance();
             let right = self.parse_eq_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op: BinOp::And, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op: BinOp::And,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1494,14 +1693,22 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_cmp_expr()?;
         loop {
             let op = match self.peek() {
-                Token::EqEq  => BinOp::Eq,
+                Token::EqEq => BinOp::Eq,
                 Token::BangEq => BinOp::Ne,
                 _ => break,
             };
             self.advance();
             let right = self.parse_cmp_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1510,16 +1717,24 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_range_expr()?;
         loop {
             let op = match self.peek() {
-                Token::Lt   => BinOp::Lt,
+                Token::Lt => BinOp::Lt,
                 Token::LtEq => BinOp::Le,
-                Token::Gt   => BinOp::Gt,
+                Token::Gt => BinOp::Gt,
                 Token::GtEq => BinOp::Ge,
                 _ => break,
             };
             self.advance();
             let right = self.parse_range_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1531,8 +1746,16 @@ impl<'a> Parser<'a> {
                 let inclusive = *self.peek() == Token::DotDotEq;
                 self.advance();
                 let right = self.parse_add_expr()?;
-                let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-                Some(Expr::Range(RangeExpr { start: Box::new(left), end: Box::new(right), inclusive, span }))
+                let span = Span {
+                    start: expr_span(&left).start,
+                    end: expr_span(&right).end,
+                };
+                Some(Expr::Range(RangeExpr {
+                    start: Box::new(left),
+                    end: Box::new(right),
+                    inclusive,
+                    span,
+                }))
             }
             _ => Some(left),
         }
@@ -1542,14 +1765,22 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_mul_expr()?;
         loop {
             let op = match self.peek() {
-                Token::Plus  => BinOp::Add,
+                Token::Plus => BinOp::Add,
                 Token::Minus => BinOp::Sub,
                 _ => break,
             };
             self.advance();
             let right = self.parse_mul_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1558,15 +1789,23 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_unary_expr()?;
         loop {
             let op = match self.peek() {
-                Token::Star    => BinOp::Mul,
-                Token::Slash   => BinOp::Div,
+                Token::Star => BinOp::Mul,
+                Token::Slash => BinOp::Div,
                 Token::Percent => BinOp::Rem,
                 _ => break,
             };
             self.advance();
             let right = self.parse_unary_expr()?;
-            let span = Span { start: expr_span(&left).start, end: expr_span(&right).end };
-            left = Expr::BinOp(BinOpExpr { op, left: Box::new(left), right: Box::new(right), span });
+            let span = Span {
+                start: expr_span(&left).start,
+                end: expr_span(&right).end,
+            };
+            left = Expr::BinOp(BinOpExpr {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
         Some(left)
     }
@@ -1621,7 +1860,11 @@ impl<'a> Parser<'a> {
                         start: expr_span(&expr).start,
                         end: self.current_span().start,
                     };
-                    expr = Expr::Member(MemberExpr { object: Box::new(expr), field, span });
+                    expr = Expr::Member(MemberExpr {
+                        object: Box::new(expr),
+                        field,
+                        span,
+                    });
                 }
                 // Call: `expr(args)`
                 Token::LParen => {
@@ -1658,7 +1901,10 @@ impl<'a> Parser<'a> {
                     let start = expr_span(&expr).start;
                     let end = self.current_span().end;
                     self.advance();
-                    expr = Expr::Try(TryExpr { expr: Box::new(expr), span: Span { start, end } });
+                    expr = Expr::Try(TryExpr {
+                        expr: Box::new(expr),
+                        span: Span { start, end },
+                    });
                 }
                 // Path separator: `Name::Variant` → treat as a further member
                 Token::ColonColon => {
@@ -1668,7 +1914,11 @@ impl<'a> Parser<'a> {
                         start: expr_span(&expr).start,
                         end: self.current_span().start,
                     };
-                    expr = Expr::Member(MemberExpr { object: Box::new(expr), field, span });
+                    expr = Expr::Member(MemberExpr {
+                        object: Box::new(expr),
+                        field,
+                        span,
+                    });
                 }
                 // Single-argument call sugar: `ident: expr` → `ident(expr)`.
                 // Only apply when the token after `:` starts an expression.
@@ -1679,7 +1929,11 @@ impl<'a> Parser<'a> {
                     if let Expr::Ident(ref name, _) = expr {
                         if !matches!(
                             self.peek2(),
-                            Token::Newline | Token::Indent | Token::LBrace | Token::Dedent | Token::Eof
+                            Token::Newline
+                                | Token::Indent
+                                | Token::LBrace
+                                | Token::Dedent
+                                | Token::Eof
                         ) {
                             self.advance(); // consume `:`
                             let arg = self.parse_expr()?;
@@ -1689,8 +1943,15 @@ impl<'a> Parser<'a> {
                                 end: arg_span.end,
                             };
                             expr = Expr::Call(CallExpr {
-                                callee: Box::new(Expr::Ident(name.clone(), expr_span(&expr).clone())),
-                                args: vec![Arg { label: None, value: arg, span: arg_span }],
+                                callee: Box::new(Expr::Ident(
+                                    name.clone(),
+                                    expr_span(&expr).clone(),
+                                )),
+                                args: vec![Arg {
+                                    label: None,
+                                    value: arg,
+                                    span: arg_span,
+                                }],
                                 trailing_block: None,
                                 span,
                             });
@@ -1743,7 +2004,11 @@ impl<'a> Parser<'a> {
         };
         let value = self.parse_expr()?;
         let end = self.current_span().start;
-        Some(Arg { label, value, span: Span { start, end } })
+        Some(Arg {
+            label,
+            value,
+            span: Span { start, end },
+        })
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -1799,14 +2064,23 @@ impl<'a> Parser<'a> {
                             parts.push(InterpPart::Literal(e));
                             return Some(Expr::StringInterp(StringInterpExpr {
                                 parts,
-                                span: Span { start: span_start, end: span_end },
+                                span: Span {
+                                    start: span_start,
+                                    end: span_end,
+                                },
                             }));
                         }
                         _ => break,
                     }
                 }
                 let end = self.current_span().start;
-                Some(Expr::StringInterp(StringInterpExpr { parts, span: Span { start: span_start, end } }))
+                Some(Expr::StringInterp(StringInterpExpr {
+                    parts,
+                    span: Span {
+                        start: span_start,
+                        end,
+                    },
+                }))
             }
             Token::Ident(ref s) => {
                 let s = s.clone();
@@ -1868,9 +2142,15 @@ impl<'a> Parser<'a> {
                     let mut elems = vec![expr];
                     loop {
                         self.skip_newlines();
-                        if matches!(self.peek(), Token::RParen | Token::Eof) { break; }
-                        if let Some(e) = self.parse_expr() { elems.push(e); }
-                        if !self.eat(&Token::Comma) { break; }
+                        if matches!(self.peek(), Token::RParen | Token::Eof) {
+                            break;
+                        }
+                        if let Some(e) = self.parse_expr() {
+                            elems.push(e);
+                        }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
                     }
                     self.expect(&Token::RParen);
                     // Represent as a call to a synthetic "tuple" — for now just return first element
@@ -1927,23 +2207,29 @@ impl<'a> Parser<'a> {
                 let mut elements = Vec::new();
                 loop {
                     self.skip_newlines();
-                    if matches!(self.peek(), Token::RBracket | Token::Eof) { break; }
-                    if let Some(e) = self.parse_expr() { elements.push(e); }
-                    if !self.eat(&Token::Comma) { break; }
+                    if matches!(self.peek(), Token::RBracket | Token::Eof) {
+                        break;
+                    }
+                    if let Some(e) = self.parse_expr() {
+                        elements.push(e);
+                    }
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
                 }
                 let end = self.current_span().end;
                 self.expect(&Token::RBracket);
-                Some(Expr::ListLit(ListLitExpr { elements, span: Span { start, end } }))
+                Some(Expr::ListLit(ListLitExpr {
+                    elements,
+                    span: Span { start, end },
+                }))
             }
             _ => {
                 let span = self.current_span();
                 self.sink.emit(
-                    Diagnostic::error(format!(
-                        "expected expression, found `{:?}`",
-                        self.peek()
-                    ))
-                    .with_span(span, "here")
-                    .with_code("E0106"),
+                    Diagnostic::error(format!("expected expression, found `{:?}`", self.peek()))
+                        .with_span(span, "here")
+                        .with_code("E0106"),
                 );
                 None
             }
@@ -1971,16 +2257,26 @@ impl<'a> Parser<'a> {
                 let mut types = Vec::new();
                 loop {
                     self.skip_newlines();
-                    if matches!(self.peek(), Token::RParen | Token::Eof) { break; }
-                    if let Some(t) = self.parse_type_expr() { types.push(t); }
-                    if !self.eat(&Token::Comma) { break; }
+                    if matches!(self.peek(), Token::RParen | Token::Eof) {
+                        break;
+                    }
+                    if let Some(t) = self.parse_type_expr() {
+                        types.push(t);
+                    }
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
                 }
                 self.expect(&Token::RParen);
                 if *self.peek() == Token::Arrow {
                     self.advance();
                     let ret = self.parse_type_expr()?;
                     let end = self.current_span().start;
-                    Some(TypeExpr::Function(types, Box::new(ret), Span { start, end }))
+                    Some(TypeExpr::Function(
+                        types,
+                        Box::new(ret),
+                        Span { start, end },
+                    ))
                 } else {
                     let end = self.current_span().start;
                     Some(TypeExpr::Tuple(types, Span { start, end }))
@@ -1995,9 +2291,15 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     loop {
                         self.skip_newlines();
-                        if matches!(self.peek(), Token::Gt | Token::Eof) { break; }
-                        if let Some(t) = self.parse_type_expr() { args.push(t); }
-                        if !self.eat(&Token::Comma) { break; }
+                        if matches!(self.peek(), Token::Gt | Token::Eof) {
+                            break;
+                        }
+                        if let Some(t) = self.parse_type_expr() {
+                            args.push(t);
+                        }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
                     }
                     self.expect(&Token::Gt);
                     args
@@ -2032,12 +2334,9 @@ impl<'a> Parser<'a> {
             _ => {
                 let span = self.current_span();
                 self.sink.emit(
-                    Diagnostic::error(format!(
-                        "expected identifier, found `{:?}`",
-                        self.peek()
-                    ))
-                    .with_span(span, "here")
-                    .with_code("E0108"),
+                    Diagnostic::error(format!("expected identifier, found `{:?}`", self.peek()))
+                        .with_span(span, "here")
+                        .with_code("E0108"),
                 );
                 None
             }
@@ -2054,8 +2353,13 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 Token::Eof => break,
-                Token::Fn | Token::Struct | Token::Enum | Token::Trait
-                | Token::Impl | Token::Const | Token::Export => break,
+                Token::Fn
+                | Token::Struct
+                | Token::Enum
+                | Token::Trait
+                | Token::Impl
+                | Token::Const
+                | Token::Export => break,
                 Token::Newline => {
                     self.advance();
                     // After a newline, if the next token is NOT indented (no Indent token),
@@ -2064,7 +2368,9 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                _ => { self.advance(); }
+                _ => {
+                    self.advance();
+                }
             }
         }
     }

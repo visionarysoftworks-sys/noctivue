@@ -1,1 +1,17 @@
 
+//! fs/file — text-file operations.
+//!
+//! Status: runnable M4 interpreter surface. The `fs_*` calls are explicit
+//! runtime boundaries and return Result instead of hiding OS failures.
+
+/// Read a UTF-8 text file.
+fn file_read_text(path: String) -> Result<String, String>:
+    fs_read_text(path)
+
+/// Write a UTF-8 text file, replacing any existing contents.
+fn file_write_text(path: String, contents: String) -> Result<Unit, String>:
+    fs_write_text(path, contents)
+
+/// Check whether a path currently exists.
+fn file_exists(path: String) -> Bool:
+    fs_exists(path)

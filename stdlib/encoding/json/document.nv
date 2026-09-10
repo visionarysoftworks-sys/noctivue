@@ -1,0 +1,68 @@
+
+//! encoding/json/document — parsed JSON documents as first-class values.
+//!
+//! Status: runnable M4 surface. A `JsonDoc` is an opaque handle over a
+//! Rust-side parsed document (`doc_*_builtin`). Handles exist because
+//! the language has no `Map` value to hold objects directly (ADR-018);
+//! revisit if `Map` ever lands. Objects keep insertion order, so
+//! `doc_stringify` round-trips field order.
+//!
+//! Errors name themselves: unknown handles, non-object access,
+//! missing keys, and mistyped values are all distinct messages.
+//! Backends: interpreter builtins; `run-vm`/`build` fail loud.
+
+/// A parsed JSON document (opaque handle — never forge one).
+JsonDoc:
+    id: Int
+
+/// Parse exactly one JSON value (objects, arrays, scalars).
+fn doc_parse(text: String) -> Result<JsonDoc, String>:
+    match doc_parse_builtin(text):
+        Ok(id):
+            Ok(JsonDoc { id: id })
+        Err(e):
+            Err(e)
+
+/// Release a document (unknown handles are errors, never silent).
+fn doc_free(doc: JsonDoc) -> Result<Unit, String>:
+    doc_free_builtin(doc.id)
+
+/// Read a string field.
+fn doc_get_string(doc: JsonDoc, key: String) -> Result<String, String>:
+    doc_get_string_builtin(doc.id, key)
+
+/// Read an integer field (floats are NOT coerced — use
+/// `doc_get_float` for those).
+fn doc_get_int(doc: JsonDoc, key: String) -> Result<Int, String>:
+    doc_get_int_builtin(doc.id, key)
+
+/// Read a float field (whole-number JSON integers coerce, so
+/// `42` decodes to `42.0` and round-trips hold at the value level).
+fn doc_get_float(doc: JsonDoc, key: String) -> Result<Float, String>:
+    doc_get_float_builtin(doc.id, key)
+
+/// Read a boolean field.
+fn doc_get_bool(doc: JsonDoc, key: String) -> Result<Bool, String>:
+    doc_get_bool_builtin(doc.id, key)
+
+/// True when an object has `key` (false for unknown handles too —
+/// presence probes must not fail).
+fn doc_has(doc: JsonDoc, key: String) -> Bool:
+    doc_has_builtin(doc.id, key)
+
+/// Open a nested object/array field as its own document.
+fn doc_get_doc(doc: JsonDoc, key: String) -> Result<JsonDoc, String>:
+    match doc_get_doc_builtin(doc.id, key):
+        Ok(id):
+            Ok(JsonDoc { id: id })
+        Err(e):
+            Err(e)
+
+/// Array length / object field count (scalars are errors).
+fn doc_len(doc: JsonDoc) -> Result<Int, String>:
+    doc_len_builtin(doc.id)
+
+/// Canonical re-serialization (insertion order, shortest floats,
+/// quoted strings).
+fn doc_stringify(doc: JsonDoc) -> Result<String, String>:
+    doc_stringify_builtin(doc.id)

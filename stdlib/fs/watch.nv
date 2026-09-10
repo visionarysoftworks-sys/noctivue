@@ -1,0 +1,15 @@
+//! fs/watch — deterministic filesystem change polling.
+//!
+//! Status: runnable M4 interpreter surface. A caller stores a timestamp
+//! snapshot and compares it on the next poll; native event streams remain
+//! future runtime work.
+
+/// Return the current modification timestamp.
+fn watch_snapshot(path: String) -> Result<Int, String>:
+    file_modified_millis(path)
+
+/// Report whether the current timestamp differs from a previous snapshot.
+fn watch_changed(path: String, previous: Int) -> Result<Bool, String>:
+    match file_modified_millis(path):
+        Ok(current): Ok(current != previous)
+        Err(error): Err(error)

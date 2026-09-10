@@ -1,6 +1,9 @@
 //! Nightshade's runnable text-mode entrypoint.
 
 import editor::document
+import editor::project_loader
+import editor::diagnostics
+import core::constants
 
 struct AppConfig:
     name: String
@@ -10,13 +13,30 @@ fn banner(config: AppConfig) -> String:
     "{config.name} {config.version}"
 
 fn dashboard(projects: [String]) -> Unit:
-    println("Projects:")
+    print("Projects:")
     for project in projects:
-        println("- {project}")
+        print("- {project}")
 
 main():
-    let config = AppConfig { name: "Nightshade", version: "0.1.0" }
-    println(banner(config))
-    println("Welcome to the project tracker")
-    println(document_title())
+    let config = AppConfig { name: app_name(), version: app_version() }
+    print(banner(config))
+    print("Welcome to the project tracker")
+    print(document_title())
+
+    let workspace = load_workspace(".", "nightshade", "nestpkg.nvpm")
+    print("Workspace: {workspace.name}")
+
+    match workspace_manifest_text(workspace):
+        Ok(manifest): print("Manifest loaded: {manifest.length} bytes")
+        Err(error): print("Manifest error: {error}")
+
+    match workspace_document(workspace, "lib/main.nv"):
+        Ok(document): print("Document: {document_label(document)}")
+        Err(error): print("Document error: {error}")
+
+    let document = new_document("lib/main.nv", "Nightshade")
+    
+    print(diagnostics_title())
+    print("Diagnostics: {document_diagnostic_count(document)}")
+    print(document_diagnostic_summary(document))
     dashboard(["Compiler", "Documentation", "Release"])

@@ -1,8 +1,6 @@
-fn app_name() -> String:
-    "Nightshade"
+fn app_name() -> String:    "Nightshade",
 
-fn app_version() -> String:
-    "0.1.0"
+fn app_version() -> String: "0.1.0",
 
 fn default_timeout() -> Int:
     30

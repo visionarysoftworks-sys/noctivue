@@ -66,9 +66,11 @@ equivalent AST shapes. The formatter converts between them
 losslessly. See SYNTAX.md §3, TOOLCHAIN.md.
 
 ### ADR-009 — Structured Concurrency
-**Status:** Confirmed (model) / **Open** (exact channel/sync-primitive
-API surface). One official async runtime; no competing executors in the
-core ecosystem. See CONCURRENCY.md.
+**Status:** Confirmed (model + M4 surface). One official async runtime;
+no competing executors in the core ecosystem. M4 surface is `task` +
+`await` + `sleep` (blocking threads, structured join at scope exit);
+`async fn` and non-blocking executor are Deferred to M5. See
+CONCURRENCY.md.
 
 ### ADR-010 — One Official Package Manager
 **Status:** Confirmed
@@ -273,6 +275,86 @@ format) but no name.
 package manager as already planned; env loading lands in Phase 5 (M4)
 with config support as already planned. No roadmap surgery — these are
 naming/format decisions inside existing scheduled work.
+**Amendment (2026-09-06, Phase 4 execution — P-003 §§1–8 as built):**
+grammar, caret/exact requirements, tier + opt-in (incl. the
+transitivity rule), canonical lock, and the TOFU-with-paper-trail
+Ed25519 design are implemented as specified (`noct-cli/src/manifest.rs`
++ `registry.rs`). Implementation choices the proposal left open,
+recorded here rather than silently assumed: the registry backend is a
+file-backed directory index (`<root>/<name>/<version>/` with
+`manifest.nvpm`, `pkg.bin`, `pkg.hash`, `pkg.sig`, `pkg.key`, plus
+`<root>/_keys/`; the HTTP API stays deferred); resolution is highest-
+satisfying-version over the closure by fixpoint (constraints only
+accumulate — no backtracking false-conflicts), tier conflicts and
+transitive-only foreign-runtime fail loud with chains named; tarball
+framing is a minimal length-prefixed v1 (fixture interchange, not a
+wire format); fetched packages unpack under `.noct/` (cache +
+unpacked tree); key material lives per-OS config home with a
+`NOCT_KEYS` override for tests/hermetic use. `noct build`/`run`/`test`
+enforce manifest-vs-lock-vs-cache consistency (the lock is the build
+input); `noct audit` prints the trust columns from lock data alone;
+`noct publish --dry-run` validates locally while real publish stays
+refused (no registry, no verification path yet). Still deferred:
+HTTP registry API, compound version ranges (v2), yank/revoke flows,
+vulnerability database (M5).
+
+### ADR-018 — Narrowly-Scoped Derive for Serialization (Phase 5/M4)
+
+**Status:** Proposed (required by IMPLEMENTATION_PLAN.md Phase 5
+before serialization work: the derive scoping decision is recorded
+here, not in a general macro reopening).
+
+**The constraint.** ROADMAP keeps general macros deferred, and the
+language has no attribute syntax, no method-call syntax, no Map
+values, and no trait dispatch (C1/C4). A general derive/macro
+system is out of the question for M4. What the reference
+application actually needs is narrower: turn request structs into
+JSON text and back, without hand-writing (and hand-rotting) the
+field lists.
+
+**Decision.** Exactly one new declaration form, exactly two
+derivable traits, expanding to ordinary items at resolve time —
+never a macro system, never user-extensible in M4:
+
+```nv
+derive Serialize for User:
+derive Deserialize for User:
+```
+
+- `derive` becomes a keyword (no corpus use as an identifier — safe).
+- Only `Serialize` and `Deserialize` (both marker traits declared in
+  `encoding/json/serialize.nv`) may follow it; anything else is a
+  loud error naming the closed set. Only `struct` targets are
+  accepted in v1 (`enum` targets are a loud "not yet" — their tagged
+  representation is its own future ADR).
+- Expansion is desugaring, not code generation into text: the
+  resolver appends synthesized `FunctionDecl`s plus a marker
+  `ImplBlock` to the program, and every downstream stage (typeck,
+  HIR, VM, native) treats them as hand-written items. No backend
+  work, no hygiene questions (fixed expansion), no new name
+  resolution rules (synthesized names are fixed and documented).
+- Synthesized surface (the contract — rename only via a new ADR):
+  `to_json_<Type>(v: Type) -> String` and
+  `from_json_<Type>(doc: JsonDoc) -> Result<Type, String>`, built
+  from `string_concat`, `json_quote`, and the `JsonDoc` accessors.
+  Field coverage v1: `Int`, `Float`, `Bool`, `Char`, `String`,
+  nested derived structs (missing derive on the field type is a
+  loud error naming it), `Option<T>` of those (absent key or
+  explicit `null` both decode to `None`), `List<T>` of those
+  (emitted via loops over `string_concat`). Anything else in field
+  position (`Result`, tuples, function types, maps) is a loud
+  "unsupported derive field" error, never a silent skip.
+- Missing JSON fields decode-error naming type and field; extra
+  fields are ignored (documented); whole-number floats cross as
+  integers on the wire and coerce back on decode (documented
+  `doc_get_float` behavior, not a derive special case).
+- `JsonDoc` itself (opaque handle over a Rust-side parsed document)
+  is specified alongside: no `Map` value, no `Ty`/`Value` surgery —
+  revisit if `Map` ever lands.
+
+**Non-goals (still deferred, explicitly):** general macros,
+user-defined derives, derive for enums, `impl`-block method
+synthesis beyond the marker, reflection of any kind.
 
 ## 3. Technical Consistency Review
 

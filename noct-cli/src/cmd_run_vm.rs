@@ -1,7 +1,7 @@
 //! `noct run-vm` — execute a .nv program via the NIR bytecode VM (M1)
 
-use compiler::{lexer, parser, resolver, typeck};
 use compiler::diagnostics::DiagnosticSink;
+use compiler::{lexer, parser, resolver, typeck};
 
 pub fn run(args: &[String]) -> i32 {
     // Multi-file like `noct run` (see cmd_run::read_sources): libraries
@@ -41,6 +41,18 @@ pub fn run(args: &[String]) -> i32 {
     // to be absent before Phase 3 can start.
     if sink.has_errors() {
         crate::cmd_run::print_diagnostics_multi(&files, &sink);
+        return 1;
+    }
+
+    // Phase 5/M4: the NIR VM executes functions synchronously — a task
+    // call would run inline and `await` would hand back the raw handle
+    // instead of the value. Refuse loudly; `noct run` (interpreter)
+    // is the task-capable backend.
+    if let Some(t) = module.functions.iter().find(|f| f.is_task) {
+        eprintln!(
+            "error: task `{}` requires the async runtime: `noct run-vm` executes synchronously (see CONCURRENCY.md §7)",
+            t.name
+        );
         return 1;
     }
 

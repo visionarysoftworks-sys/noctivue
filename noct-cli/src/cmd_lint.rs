@@ -184,8 +184,11 @@ fn print_json(all: &[(String, String, Vec<Warning>)]) {
     let mut items = Vec::new();
     for (file, ws) in all.iter().map(|(f, _, ws)| (f, ws)) {
         for w in ws {
-            let details: Vec<String> =
-                w.details.iter().map(|d| format!("\"{}\"", esc(d))).collect();
+            let details: Vec<String> = w
+                .details
+                .iter()
+                .map(|d| format!("\"{}\"", esc(d)))
+                .collect();
             items.push(format!(
                 "{{\"rule\":\"{}\",\"file\":\"{}\",\"line\":{},\"message\":\"{}\",\"details\":[{}]}}",
                 w.rule,
@@ -299,6 +302,7 @@ fn check_program(
 fn check_item(item: &Item, variants: &HashSet<String>, source: &str, out: &mut Vec<Warning>) {
     match item {
         Item::Function(f) => check_function(f, variants, source, out),
+        Item::Task(t) => check_block(&t.body, variants, source, out),
         Item::BareDecl(b) => check_block(&b.body, variants, source, out),
         Item::Impl(ib) => {
             for m in &ib.methods {
@@ -343,6 +347,7 @@ fn check_stmts(stmts: &[Stmt], variants: &HashSet<String>, source: &str, out: &m
             Stmt::Loop(l) => check_block(&l.body, variants, source, out),
             Stmt::For(f) => check_block(&f.body, variants, source, out),
             Stmt::Function(f) => check_function(f, variants, source, out),
+            Stmt::Task(t) => check_block(&t.body, variants, source, out),
             _ => {}
         }
     }
@@ -418,6 +423,15 @@ fn collect_item_refs(item: &Item, refs: &mut HashSet<String>) {
                 FunctionBody::Block(b) => collect_block_refs(b, refs),
                 FunctionBody::Expr(e) => collect_expr_refs(e, refs),
             }
+        }
+        Item::Task(t) => {
+            for p in &t.params {
+                collect_type_refs(&p.ty, refs);
+                if let Some(v) = &p.default {
+                    collect_expr_refs(v, refs);
+                }
+            }
+            collect_block_refs(&t.body, refs);
         }
         Item::BareDecl(b) => collect_block_refs(&b.body, refs),
         Item::Struct(s) => {
@@ -535,6 +549,7 @@ fn collect_stmt_refs(stmt: &Stmt, refs: &mut HashSet<String>) {
             }
         }
         Stmt::Function(f) => collect_item_refs(&Item::Function(f.clone()), refs),
+        Stmt::Task(t) => collect_item_refs(&Item::Task(t.clone()), refs),
         Stmt::Struct(s) => collect_item_refs(&Item::Struct(s.clone()), refs),
         Stmt::BareField(f) => collect_type_refs(&f.ty, refs),
         Stmt::Decl(d) => collect_expr_refs(&d.value, refs),

@@ -1,6 +1,7 @@
-//! error/types — Error type definitions.
+//! error/types — structured error records.
 //!
-//! Status: reserved (M3 foundation, stdlib/SPEC.md §4).
+//! Status: runnable M4 foundation. Trait-based error dispatch remains
+//! reserved, but structured records are supported by the current type system.
 //!
 //! M3 error convention (SPEC.md §4, "Error conventions"):
 //! - E1: `panic(msg)` for violated preconditions / invariant failures.
@@ -8,9 +9,26 @@
 //! - E3: `Result<T, String>` for foundation fallible fns that must explain failure.
 //! - E4: `?` / `??` are the only propagation tools; no exceptions.
 //!
-//! There is no `Error` trait in M3 and `E` in `Result<T, E>` stays an
-//! ordinary type — `String` is the error type throughout M3 (E3). Typed
-//! error enums (enums carrying structured error payloads) land with M4,
-//! when the trait/impl system (SPEC.md C4) is in place.
-//!
-//! Unblock condition: M4 trait + enum-with-payload support.
+ErrorInfo:
+    code: String
+    message: String
+    source: String
+
+/// Create a structured error record.
+fn error_info(code: String, message: String, source: String) -> ErrorInfo:
+    ErrorInfo { code: code, message: message, source: source }
+
+/// Render an error for logs and diagnostics.
+fn error_info_display(error: ErrorInfo) -> String:
+    if error.source.length == 0:
+        error.code + ": " + error.message
+    else:
+        error.source + ": " + error.code + ": " + error.message
+
+/// Add context while preserving the original error code.
+fn error_info_context(error: ErrorInfo, context: String) -> ErrorInfo:
+    ErrorInfo {
+        code: error.code,
+        message: error.message + ": " + context,
+        source: error.source
+    }

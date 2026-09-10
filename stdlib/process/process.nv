@@ -1,1 +1,16 @@
 
+//! process/process — process result helpers.
+//!
+//! Status: runnable M4 interpreter surface.
+
+/// Return the exit status from a completed process.
+fn process_status(output: ProcessOutput) -> Int:
+    output.status
+
+/// Return captured standard output.
+fn process_stdout(output: ProcessOutput) -> String:
+    output.stdout
+
+/// Return captured standard error.
+fn process_stderr(output: ProcessOutput) -> String:
+    output.stderr

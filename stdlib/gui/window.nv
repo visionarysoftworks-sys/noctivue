@@ -1,0 +1,34 @@
+//! GUI window state shared by platform backends.
+//!
+//! This is the first GUI contract. It describes an application window without
+//! selecting Win32, Cocoa, X11, Wayland, or a particular rendering API.
+
+export struct WindowSize:
+    width: Int
+    height: Int
+
+export struct WindowConfig:
+    title: String
+    size: WindowSize
+    resizable: Bool
+
+export struct Window:
+    title: String
+    size: WindowSize
+    open: Bool
+
+export fn window_size(width: Int, height: Int) -> WindowSize:
+    WindowSize { width: width, height: height }
+
+export fn window_config(title: String, width: Int, height: Int) -> WindowConfig:
+    WindowConfig {
+        title: title
+        size: window_size(width, height)
+        resizable: true
+    }
+
+export fn open_window(config: WindowConfig) -> Window:
+    Window { title: config.title, size: config.size, open: true }
+
+export fn close_window(window: Window) -> Window:
+    Window { title: window.title, size: window.size, open: false }

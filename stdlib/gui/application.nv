@@ -1,0 +1,16 @@
+//! Minimal application lifecycle contract for GUI programs.
+
+export struct Application:
+    name: String
+    running: Bool
+
+export fn application(name: String) -> Application:
+    Application { name: name, running: true }
+
+export fn stop(application_state: Application) -> Application:
+    Application { name: application_state.name, running: false }
+
+export fn should_close(event: GuiEvent) -> Bool:
+    match event:
+        Window(Closed): true
+        _: false

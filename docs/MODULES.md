@@ -38,10 +38,12 @@ Principle 7).
 
 ## 4. Path Resolution
 
-Paths are resolved relative to the importing file, then against the nearest
-`lib/` directory in the current package. Every file is parsed independently,
-linked through its import graph, and cycles are diagnosed at the import edge.
-External dependencies remain package-manifest work (TOOLCHAIN.md §3).
+Paths are resolved relative to the importing file, then against the current
+package's `lib/` directory. Workspace package names are also searched as
+checked-out sibling packages, `packages/<name>/lib`, and cached packages
+under `.noct/packages/<name>-<version>/lib`. Every file is parsed
+independently, linked through its import graph, and cycles are diagnosed at
+the import edge. Registry and Git fetching remain package-manager work.
 
 ## 5. Re-exports — Proposed
 

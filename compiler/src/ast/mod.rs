@@ -29,7 +29,10 @@ pub struct Program {
 impl Program {
     /// Returns an empty program (used as a stub before the parser is implemented).
     pub fn empty() -> Self {
-        Program { imports: Vec::new(), items: Vec::new() }
+        Program {
+            imports: Vec::new(),
+            items: Vec::new(),
+        }
     }
 }
 
@@ -55,6 +58,10 @@ pub enum Item {
 
     /// Explicitly-keyworded function declaration (`fn …`).
     Function(FunctionDecl),
+    /// Concurrent task declaration (`task …` — Phase 5/M4). Like a
+    /// function but invoked by spawning (see `TaskDecl`); never
+    /// produced by bare-decl classification.
+    Task(TaskDecl),
     /// Explicitly-keyworded struct declaration (`struct …`).
     Struct(StructDecl),
     /// Enum declaration (`enum …`). Always explicit.
@@ -106,6 +113,21 @@ pub struct FunctionDecl {
     pub params: Vec<Param>,
     pub return_ty: Option<TypeExpr>,
     pub body: FunctionBody,
+    pub span: Span,
+}
+
+/// A concurrent task declaration (`task name(params): block`).
+///
+/// Explicit form only — never produced by bare-decl classification
+/// (which cannot know whether concurrent execution is intended).
+/// Bodies are always blocks (a single-expression task body has no
+/// distinct spelling need: `task f():` with an expression statement
+/// inside covers it). See CONCURRENCY.md §§1–3 and `Item::Task`.
+#[derive(Debug, Clone)]
+pub struct TaskDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: Block,
     pub span: Span,
 }
 
@@ -223,6 +245,8 @@ pub enum Stmt {
     Match(MatchStmt),
     /// Local function definition.
     Function(FunctionDecl),
+    /// Local task definition (`task …`).
+    Task(TaskDecl),
     /// Local struct definition.
     Struct(StructDecl),
     /// A field-declaration shaped line `name: TypeExpr` inside a BareDecl body.
@@ -273,7 +297,14 @@ pub struct AssignStmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssignOp { Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq }
+pub enum AssignOp {
+    Eq,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReturnStmt {
@@ -472,10 +503,21 @@ pub struct BinOpExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-    Range, RangeInclusive,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    Range,
+    RangeInclusive,
     Coalesce,
 }
 
@@ -487,7 +529,11 @@ pub struct UnaryOpExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnaryOp { Neg, Not, Await }
+pub enum UnaryOp {
+    Neg,
+    Not,
+    Await,
+}
 
 #[derive(Debug, Clone)]
 pub struct TryExpr {
@@ -574,7 +620,11 @@ pub fn type_expr_to_string(ty: &TypeExpr) -> String {
         }
         TypeExpr::Function(params, ret, _) => {
             let param_strs: Vec<String> = params.iter().map(type_expr_to_string).collect();
-            format!("({}) -> {}", param_strs.join(", "), type_expr_to_string(ret))
+            format!(
+                "({}) -> {}",
+                param_strs.join(", "),
+                type_expr_to_string(ret)
+            )
         }
     }
 }

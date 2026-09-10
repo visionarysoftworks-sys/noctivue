@@ -1,61 +1,60 @@
 # CONCURRENCY.md — Concurrency Model
 
-**Status:** Structured-concurrency model Confirmed; API surface Open.
+**Status:** M4 surface Confirmed (task/await/sleep); async fn Deferred.
 
-## 1. Structured Concurrency
+## 1. Structured Concurrency (M4 floor)
 
-Every asynchronous task has a bounded, statically visible lifetime tied
-to the scope that spawned it. There is no "fire and forget" spawn by
-default — a task's parent scope **MUST** either await or explicitly
-detach it, and detaching is a deliberate, visible operation rather than
-the default.
+Every task has a bounded lifetime tied to the scope that spawned it.
+There is no "fire and forget" — a task's parent scope **MUST** join
+(or the runtime joins it at scope exit). Detaching is not yet in the
+surface.
 
-## 2. Core Keywords
+## 2. Core Keywords (M4: task/await)
 
 ```nv
-async fn fetch_data() -> Result<Data, Error>:
-    let response = await http.get(url)?
-    parse(response)
+task fetch_status(url: String) -> Int:
+    sleep(50)
+    200
 
-task worker():
-    loop:
-        process_next()
+fn main():
+    let h = fetch_status("https://example.com")
+    let code = await h
+    println("status={code}")
 ```
 
-- `async` marks a function as asynchronous; calling it produces a
-  suspended computation.
-- `await` suspends the current async context until the awaited
-  computation completes.
-- `task` introduces a unit of concurrent work managed by the structured
-  task hierarchy.
+- `task` introduces a top-level concurrent unit; calling it spawns
+  a new OS thread and returns an opaque join-handle (`Int`).
+- `await` blocks the caller until the task completes and yields the
+  task body's value. Awaiting anything other than a live handle fails
+  loudly; handles are single-use.
+- `async fn` is **Deferred** (M5+): the current surface is `task` +
+  `await` + `sleep` only. The parser has `Token::Async` reserved; the
+  interpreter has no `async` lowering yet.
 
 ## 3. Task Lifetime & Hierarchy
 
-- A `task` spawned within a scope is a **child** of that scope.
-- A scope's exit (normal, early return, or error) **MUST** wait for all
-  child tasks to complete or be cancelled before the scope itself
-  completes — no child task outlives its parent scope silently.
-- Cancellation propagates top-down: cancelling a parent scope cancels
-  its children.
+- A `task` is always top-level; local `task` declarations type-check
+  (bound to `Int` handle) but calling them fails loudly with
+  `undefined name` — lift to top level to spawn.
+- A scope's exit (normal return, early return, or error) **joins all
+  outstanding tasks** before the process exits (implemented in
+  `Interpreter::drain_tasks`). No child task outlives its parent scope.
+- Failure propagation: a task that panics or returns `UncaughtError`
+  fails the awaiting scope with the same value; un-awaited task
+  failures are reported at drain time.
 
-## 4. Failure Propagation
+## 4. One Official Runtime (M4: blocking threads)
 
-An unhandled error in a child task propagates to its parent scope
-(consistent with `Result`-based error handling, ERROR_HANDLING.md), which
-**SHOULD** surface as a `Result::Err` from the awaited join point rather
-than an out-of-band panic, except for genuine invariant violations
-(which panic per ERROR_HANDLING.md §4).
+- M4 uses real OS threads (`std::thread::spawn`), one per task call.
+  This is the structured-concurrency floor, not a tuned executor.
+- No shared mutable state crosses threads: arguments and return
+  values are the only channel. Each worker gets a fresh interpreter
+  with empty `db`/JSON/task registries (handles are meaningless
+  across threads).
+- A non-blocking executor with `async fn` and proper cancellation
+  arrives at M5 (see ROADMAP.md).
 
-## 5. One Official Runtime
-
-Noctivue ships exactly one official async runtime/executor as part of
-the standard toolchain, to avoid the ecosystem fragmentation seen in
-languages with multiple competing async runtimes (Principle 9). Native
-mode and managed mode each have runtime-appropriate scheduling
-(RUNTIME.md), but the *language-level* `async`/`await`/`task` API is
-shared.
-
-## 6. Channels & Synchronization — Open
+## 5. Channels & Synchronization — Open
 
 The exact API surface for channels, mutexes/locks, and other
 synchronization primitives is **Open**. What's Confirmed is only that:
@@ -64,12 +63,14 @@ synchronization primitives is **Open**. What's Confirmed is only that:
   with ownership/borrowing (no implicit sharing without an explicit
   synchronization type).
 - Managed-mode primitives integrate with ARC and the (also
-  under-design, see MEMORY_MODEL.md §4) UI event-loop model.
+  under-design, see MEMORY_MODEL.md A4) UI event-loop model.
+- The current M4 stdlib helper is `sleep_builtin(ms: Int) -> Unit`
+  (blocking, wrapped by `stdlib/concurrency/task.nv::sleep`).
 
-## 7. Async Lowering (compiler-internal)
+## 6. Async Lowering (compiler-internal) — Deferred
 
-At the NIR level, `async` functions lower to an explicit state-machine
-representation (mirroring common industry approaches) rather than
-being interpreted directly; this is an implementation detail, not
-user-visible surface syntax, and is elaborated in NIR.md §5 once M1
-begins — considered **Deferred** design work, not required for M0.
+At the NIR level, `async` functions would lower to an explicit
+state-machine; this is **Deferred** design work for M5. The current
+M4 NIR path refuses `task` calls loudly (no lowering attempted); the
+VM path (`run-vm`) also refuses them. The interpreter is the only
+task-capable backend today.

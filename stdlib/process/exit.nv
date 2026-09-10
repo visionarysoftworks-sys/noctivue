@@ -1,1 +1,4 @@
 
+//! process/exit — reserved process termination API.
+//!
+//! Status: reserved until explicit termination semantics are finalized.

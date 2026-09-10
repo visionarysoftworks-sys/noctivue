@@ -1,0 +1,46 @@
+//! db/sqlite — SQLite through an isolated runtime boundary.
+//!
+//! Status: runnable M4 surface (interpreter only — see below).
+//! A `Db` is an opaque handle (a struct wrapping a connection id);
+//! every fallible operation returns `Result` per ERROR_HANDLING.md.
+//!
+//! Value interchange is JSON text: query parameters arrive as one
+//! JSON array of scalars (`[1, "x", true, null]`), and each result
+//! row comes back as one JSON array string (`["Alice", 30]`).
+//! Integers render bare, reals shortest-round-trip, text quoted,
+//! blobs as lowercase hex strings, NULL as `null`. Parse rows with
+//! `encoding/json` helpers or the `testing` assertions.
+//!
+//! Backends: implemented as interpreter builtins over a bundled
+//! SQLite (`rusqlite`, no system dependency). `run-vm` and native
+//! `build` fail LOUDLY on these builtins (unknown-runtime-symbol,
+//! never silent) — the established pattern for host-IO builtins.
+//! Native FFI binding is Step-4 runtime work, not this module.
+
+/// An open database connection (opaque handle — never forge one).
+Db:
+    id: Int
+
+/// Open (creating if needed) the SQLite database at `path`.
+/// Use `":memory:"` for a private in-memory database.
+fn db_open(path: String) -> Result<Db, String>:
+    match db_open_builtin(path):
+        Ok(id):
+            Ok(Db { id: id })
+        Err(e):
+            Err(e)
+
+/// Run a DDL/DML statement; returns changed-row count.
+/// Parameters bind from a JSON array of scalars (`[]` for none) —
+/// never interpolate values into SQL text.
+fn db_exec(db: Db, sql: String, params: String) -> Result<Int, String>:
+    db_exec_builtin(db.id, sql, params)
+
+/// Run a query; returns one JSON-array string per row.
+fn db_query(db: Db, sql: String, params: String) -> Result<[String], String>:
+    db_query_builtin(db.id, sql, params)
+
+/// Close the connection (unknown/closed handles are errors, never
+/// silent no-ops).
+fn db_close(db: Db) -> Result<Unit, String>:
+    db_close_builtin(db.id)

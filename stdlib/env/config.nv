@@ -1,1 +1,29 @@
+//! env/config — simple UTF-8 key/value configuration files.
+//!
+//! Status: runnable M4 foundation. Files use `key=value` lines; blank
+//! lines and lines beginning with `#` are ignored.
 
+/// Read a configuration value from the process environment.
+fn config_env(name: String) -> Option<String>:
+    env_get(name)
+
+/// Read a configuration value from a `key=value` file.
+fn config_file(path: String, key: String) -> Result<String, String>:
+    config_get_builtin(path, key)
+
+/// Read a variable, falling back to `default` when unset (a missing
+/// variable with a default is not an error — see ERROR_HANDLING.md §5).
+fn config_or(name: String, default: String) -> String:
+    match env_get(name):
+        Some(value):
+            value
+        None:
+            default
+
+/// Read a required variable (missing names the variable in the error).
+fn config_require(name: String) -> Result<String, String>:
+    match env_get(name):
+        Some(value):
+            Ok(value)
+        None:
+            Err("required configuration {name} is not set")

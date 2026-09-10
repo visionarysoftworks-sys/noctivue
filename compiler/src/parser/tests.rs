@@ -398,4 +398,32 @@ fn parse_dashboard_nonui_fixture() {
     assert!(!prog.items.is_empty(), "expected items");
 }
 
+#[test]
+fn task_decl_top_level() {
+    // Explicit `task` form parses to Item::Task (never BareDecl).
+    let prog = parse_clean("task fetch(url: String):\n    sleep_builtin(50)\n");
+    assert_eq!(item_count(&prog), 1);
+    match &prog.items[0] {
+        Item::Task(t) => {
+            assert_eq!(t.name, "fetch");
+            assert_eq!(t.params.len(), 1);
+            assert_eq!(t.params[0].name, "url");
+            assert_eq!(t.body.stmts.len(), 1);
+        }
+        other => panic!("expected Task, got {:?}", other),
+    }
+}
+
+#[test]
+fn task_decl_no_parens_and_local() {
+    // Parens are optional; `task` also parses at statement level.
+    let prog = parse_clean("task w:\n    1\n");
+    match &prog.items[0] {
+        Item::Task(t) => assert!(t.params.is_empty()),
+        other => panic!("expected Task, got {:?}", other),
+    }
+    let prog = parse_clean("fn main():\n    task inner():\n        1\n    inner()\n");
+    assert_eq!(item_count(&prog), 1);
+}
+
 

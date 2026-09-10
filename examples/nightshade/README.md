@@ -24,5 +24,6 @@ importing file's directory or the package's `lib/` directory:
 cargo run -p noct-cli -- run lib/main.nv
 ```
 
-External package dependencies and module namespaces are not implemented
-yet; this first step supports local `.nv` modules.
+Local workspace package imports are supported. A package entrypoint may
+live at `lib/main.nv`, and imports resolve from the current package's
+`lib/`, checked-out sibling packages, `packages/`, and `.noct/packages/`.

@@ -15,6 +15,7 @@ official LSP, and **one** official lockfile format (ADR-010, Principle 9).
 ```text
 noct create     scaffold a new package
 noct add        add a dependency
+noct audit       show dependency trust rows (tiers + signers, no vuln DB yet)
 noct build      compile the current package
 noct run        build and execute
 noct test       run the test suite
@@ -41,8 +42,10 @@ cross-cutting concern rather than a single command.
   parser.
 - **Versioning:** semantic versioning (SemVer) for published packages.
 - **Resolution:** standard SemVer-range dependency resolution;
-  algorithm choice (e.g., PubGrub-style vs. simpler backtracking) is
-  Deferred to implementation.
+  implemented (Phase 4) as highest-satisfying-version over the
+  closure by fixpoint against a file-backed index (`registry.rs`;
+  the HTTP index API stays deferred, as does the algorithm-choice
+  review — see ADR-017's amendment).
 - **Integrity & signing:** package integrity hashes are required before
   any public registry launch; package **signing** is required before
   public registry launch (not merely "eventually") per the design
