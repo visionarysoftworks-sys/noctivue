@@ -1,35 +1,45 @@
-//! `noct fmt` — run the official Noctivue formatter (v1).
+//! `noct fmt` — run the official Noctivue formatter (v2 default).
 //!
-//! [Phase 4 / M3] Scope is P-004 v1: a trivia canonicalizer doing
-//! byte-level line ops only (strip trailing whitespace, collapse blank
-//! runs, exactly-one trailing newline, LF endings). String-aware:
-//! `"""…"""` spans are opaque, `//` comments and `"…"`/`'…'` literals
-//! (with escapes) are skipped correctly so comment text resembling a
-//! span opener never corrupts values.
+//! [Phase 4 / M3] Scope is P-004 v1 (trivia canonicalizer: byte-level
+//! line ops only — strip trailing whitespace, collapse blank runs,
+//! exactly-one trailing newline, LF endings; string-aware so `"""…"""`
+//! spans stay opaque and `//` comments plus `"…"`/`'…'` literals with
+//! escapes are skipped) plus P-004 v2 (AST printer: expanded canonical
+//! form, comment attachment, density heuristic, 100-col cap).
 //!
-//! Canonical decisions D1–D6 live in `stdlib/PROPOSALS.md` P-004. v1
-//! enforces D1 (tabs in leading whitespace are a loud error, never a
-//! guess) and D2 (blank/ending rules). D3–D5 (semicolons, expanded
-//! density, 100-col cap) need the v2 AST printer, gated on comment
-//! attachment — v1 never moves, adds, or removes code tokens, so it
-//! cannot violate them. D6 (concise/explicit equivalence) is untouched
-//! by construction.
+//! v2 is the DEFAULT. v1 remains reachable via explicit `--v1` fallback
+//! for inputs v2 cannot handle (v2 reasons about structure, so it
+//! requires parseable input; v1's byte-level trivia mode covers the
+//! rest). `--v2` is accepted as a no-op alias for compatibility.
 //!
-//! In-command safety (P-004): the output is re-pipelined through the
-//! formatter (idempotency — `fmt(fmt(x)) != fmt(x)` is a formatter bug,
-//! loud, never persisted) and through lex+parse (no-new-errors — the
-//! output must not contain MORE error diagnostics than the input).
-//! Violations refuse to write and exit 1.
+//! Canonical decisions D1–D6 live in `stdlib/PROPOSALS.md` P-004. Both
+//! modes enforce D1 (tabs in leading whitespace are a loud error, never
+//! a guess). v1 enforces D2 (blank/ending rules) and never moves, adds,
+//! or removes code tokens, so it cannot violate D3–D5. v2 enforces
+//! D1/D2/D4/D5/D6: 4-space indents, LF, exactly one `\n` at EOF, at most
+//! one blank line and only between top-level items; one statement per
+//! line with `;` emitted ONLY by the density heuristic (D3 — the parser
+//! already drops `;`, so removal is automatic; runs of tiny single-line
+//! statements join with `; ` while the joined line stays within the
+//! 100-column cap, everything else stays expanded); calls/lists/struct
+//! literals break past the cap; D6 (concise/explicit equivalence) is
+//! preserved by printing each spelling as written.
+//!
+//! In-command safety (P-004): file writes are guarded (v1 re-checks
+//! idempotency + no-new-errors here; v2 already ran its own stronger
+//! gates — AST-equivalence, idempotency, no-new-errors — inside
+//! `format_v2`). Violations refuse to write and exit 1.
 //!
 //! Usage:
 //!   noct fmt [file.nv ... | --check file.nv ...]
-//!   noct fmt --v2 [file.nv ... | --check file.nv ...]
+//!   noct fmt --v1 [file.nv ... | --check file.nv ...]
+//!   noct fmt --v2 [file.nv ... | --check file.nv ...]   (no-op alias)
 //!   noct fmt < stdin.nv            (no file args: filter stdin→stdout)
 //!
-//! `--v2` selects the AST printer (`fmt_v2`: expanded canonical form,
-//! comment attachment, density heuristic) instead of the default v1
-//! trivia canonicalizer. v2 carries its own gates (AST-equivalence,
-//! idempotency, no-new-errors) on top of the checks below.
+//! `--v1` selects the v1 trivia canonicalizer instead of the default v2
+//! AST printer (`fmt_v2`). `--v2` explicitly selects v2 (the default)
+//! and is accepted for compatibility with scripts written when v2 was
+//! opt-in.
 
 use std::fs;
 use std::path::Path;
@@ -41,13 +51,16 @@ struct FmtRefusal {
 
 pub fn run(args: &[String]) -> i32 {
     let mut check_mode = false;
-    let mut v2_mode = false;
+    let mut v1_mode = false;
     let mut files: Vec<&str> = Vec::new();
 
     for arg in args {
         match arg.as_str() {
             "--check" => check_mode = true,
-            "--v2" => v2_mode = true,
+            // v2 is the default; `--v2` is a no-op alias kept for
+            // compatibility with scripts written when v2 was opt-in.
+            "--v2" => {}
+            "--v1" => v1_mode = true,
             other => {
                 if other.starts_with('-') {
                     eprintln!("noct fmt: unknown flag `{other}`");
@@ -59,7 +72,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     if files.is_empty() {
-        return format_stdin(v2_mode);
+        return format_stdin(v1_mode);
     }
 
     let mut exit_code = 0;
@@ -74,7 +87,7 @@ pub fn run(args: &[String]) -> i32 {
             }
         };
 
-        let formatted = match format_any(&content, v2_mode) {
+        let formatted = match format_any(&content, v1_mode) {
             Ok(f) => f,
             Err(refusal) => {
                 eprintln!("noct fmt: {file}: {}", refusal.message);
@@ -98,7 +111,7 @@ pub fn run(args: &[String]) -> i32 {
         // Guards before any write: v1 re-checks here (idempotency +
         // no-new-errors); v2 already ran its own (stronger) gates
         // inside `format_v2`, so it skips the v1 re-check.
-        if !v2_mode {
+        if v1_mode {
             match guard_format(&content, &formatted) {
                 Ok(()) => {}
                 Err(refusal) => {
@@ -119,21 +132,21 @@ pub fn run(args: &[String]) -> i32 {
     exit_code
 }
 
-fn format_stdin(v2_mode: bool) -> i32 {
+fn format_stdin(v1_mode: bool) -> i32 {
     use std::io::{self, Read};
     let mut buffer = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut buffer) {
         eprintln!("noct fmt: cannot read stdin: {e}");
         return 1;
     }
-    let formatted = match format_any(&buffer, v2_mode) {
+    let formatted = match format_any(&buffer, v1_mode) {
         Ok(f) => f,
         Err(refusal) => {
             eprintln!("noct fmt: stdin: {}", refusal.message);
             return 1;
         }
     };
-    if !v2_mode {
+    if v1_mode {
         if let Err(refusal) = guard_format(&buffer, &formatted) {
             eprintln!("noct fmt: stdin: {}", refusal.message);
             return 1;
@@ -143,15 +156,15 @@ fn format_stdin(v2_mode: bool) -> i32 {
     0
 }
 
-/// Dispatch between the v1 trivia canonicalizer (default) and the
-/// v2 AST printer (`--v2`, which runs its own gates internally).
-fn format_any(source: &str, v2_mode: bool) -> Result<String, FmtRefusal> {
-    if v2_mode {
-        return crate::fmt_v2::format_v2(source).map_err(|e| FmtRefusal {
-            message: e.message,
-        });
+/// Dispatch between the v2 AST printer (default, which runs its own
+/// gates internally) and the v1 trivia canonicalizer (`--v1`).
+fn format_any(source: &str, v1_mode: bool) -> Result<String, FmtRefusal> {
+    if v1_mode {
+        return format_source(source);
     }
-    format_source(source)
+    crate::fmt_v2::format_v2(source).map_err(|e| FmtRefusal {
+        message: e.message,
+    })
 }
 fn guard_format(original: &str, formatted: &str) -> Result<(), FmtRefusal> {
     let twice = format_source(formatted).map_err(|refusal| FmtRefusal {

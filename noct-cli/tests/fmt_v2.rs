@@ -1,11 +1,13 @@
-//! CLI tests for `noct fmt --v2` (Phase 4, Slice E / P-004 v2).
+//! CLI tests for `noct fmt` v2 default (Phase 4, Slice E / P-004 v2).
 //!
-//! v2 is the AST printer: expanded canonical form, comment
-//! attachment, density heuristic, with blocking gates
-//! (AST-equivalence, idempotency, no-new-errors). Tests: an exact
-//! kitchen-sink golden, a corpus sweep (every repo `.nv` file must
-//! pass all three gates), refusal modes, `--check`, and the
-//! semicolon/density rules. Harness mirrors `fmt.rs`.
+//! v2 is the DEFAULT formatter (AST printer: expanded canonical form,
+//! comment attachment, density heuristic, with blocking gates
+//! AST-equivalence, idempotency, no-new-errors). `--v2` is accepted as
+//! a no-op alias for compatibility; `--v1` selects the trivia fallback.
+//! Tests: an exact kitchen-sink golden, a corpus sweep (every repo `.nv`
+//! file must pass all three gates), refusal modes, `--check`, the
+//! semicolon/density rules, and a default-mode idempotency property
+//! (`fmt(fmt(x)) == fmt(x)` over the corpus). Harness mirrors `fmt.rs`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -200,4 +202,106 @@ fn fmt_v2_check_and_semicolons() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), b"main():   \n    println(\"hi\")\n".to_vec());
     cleanup(&path);
+}
+
+#[test]
+fn fmt_default_is_idempotent_over_corpus() {
+    // Property: fmt(fmt(x)) == fmt(x) using the DEFAULT mode (bare
+    // `noct fmt`, no `--v1`/`--v2` flag — v2 is the default). Covers
+    // every `.nv` fixture under `tests/fixtures` plus the rest of the
+    // fmt corpus (`stdlib`, `examples`) — the same walk as
+    // `fmt_v2_corpus_passes_all_gates`. Semicolons are owned by the
+    // density heuristic only (DECISIONS.md Issue 5): no flags, just
+    // reformat-twice stability. Files v2 refuses for input reasons
+    // (parse errors, tab indent, inline block comments) are skipped;
+    // any other refusal or any second-pass drift fails.
+    let root = workspace_root();
+    let mut files = Vec::new();
+    for dir in ["tests/fixtures", "stdlib", "examples"] {
+        collect_nv(&root.join(dir), &mut files);
+    }
+    assert!(!files.is_empty(), "corpus walk found nothing");
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+    let mut skipped = 0usize;
+    for path in &files {
+        let short = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp =
+            std::env::temp_dir().join(format!("noctivue-fmtdef-{}-{id}", std::process::id()));
+        if std::fs::copy(path, &tmp).is_err() {
+            failures.push(format!("{short}: cannot stage temp copy"));
+            continue;
+        }
+        let s = tmp.to_string_lossy().to_string();
+        // First pass: DEFAULT mode (no flag).
+        let first = run_cli(&["fmt", &s]);
+        match first.status.code() {
+            Some(0) => {}
+            Some(1) => {
+                let stderr = String::from_utf8_lossy(&first.stderr).to_lowercase();
+                // Input-problem refusals are skipped (v2 requires
+                // parseable input; `--v1` covers the rest).
+                if stderr.contains("parse error")
+                    || stderr.contains("tab in leading whitespace")
+                    || stderr.contains("inline block comment")
+                {
+                    skipped += 1;
+                    let _ = std::fs::remove_file(&tmp);
+                    continue;
+                }
+                failures.push(format!(
+                    "{short}: default fmt refused: {}",
+                    String::from_utf8_lossy(&first.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                ));
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+            other => {
+                failures.push(format!("{short}: first fmt exit {other:?}"));
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+        }
+        let once = match std::fs::read(&tmp) {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{short}: cannot read first output: {e}"));
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+        };
+        // Second pass: formatting the formatted output must be a no-op.
+        let second = run_cli(&["fmt", &s]);
+        if second.status.code() != Some(0) {
+            failures.push(format!(
+                "{short}: second fmt exit {:?}: {}",
+                second.status.code(),
+                String::from_utf8_lossy(&second.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+            ));
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        let twice = std::fs::read(&tmp).unwrap_or_default();
+        if once != twice {
+            failures.push(format!("{short}: not idempotent (second pass drifted)"));
+        } else {
+            checked += 1;
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+    assert!(checked > 0, "idempotency sweep checked nothing (all skipped?)");
+    assert!(
+        failures.is_empty(),
+        "default-mode idempotency failures (checked {checked}, skipped {skipped}):\n{}",
+        failures.join("\n")
+    );
 }

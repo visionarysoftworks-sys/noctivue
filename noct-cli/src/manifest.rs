@@ -1418,6 +1418,24 @@ pub fn check_lock_current(manifest: &Manifest, lock: &Lockfile) -> Vec<String> {
     problems
 }
 
+/// Verify a lockfile satisfies `--frozen` build requirements.
+///
+/// Pure + unit-testable: returns `Ok(())` when the lock is current,
+/// `Err(problems)` with one human message per problem (each naming the
+/// offending package/requirement). Delegates to [`check_lock_current`]
+/// so frozen messages match every other drift report.
+///
+/// Missing-lockfile handling lives in the caller (`cmd_build`): this
+/// takes both sides as parsed values.
+pub fn verify_frozen(manifest: &Manifest, lock: &Lockfile) -> Result<(), Vec<String>> {
+    let problems = check_lock_current(manifest, lock);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
 fn req_string(req: VersionReq) -> String {
     match req {
         VersionReq::Caret(v) => v.to_string(),

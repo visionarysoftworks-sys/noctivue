@@ -13,8 +13,8 @@
 
 use std::fs;
 
-use compiler::analysis::{analyze_file, doc_comment_for};
-use compiler::ast::{type_expr_to_string, Item};
+use compiler::analysis::{analyze_file, doc_comment_for, AnalysisResult};
+use compiler::ast::{type_expr_to_string, FunctionDecl, Item};
 
 pub fn run(args: &[String]) -> i32 {
     let mut open_browser = false;
@@ -63,6 +63,9 @@ pub fn run(args: &[String]) -> i32 {
 
     let analysis = analyze_file(&input, &source);
 
+    // Location label mirrors hover's `Declared in` (basename, not full path).
+    let file_label = file_label_of(&input);
+
     let mut doc = String::new();
     doc.push_str("# Noctivue Documentation\n\n");
     if !analysis.diagnostics.is_empty() {
@@ -80,7 +83,14 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     for item in &analysis.resolved.items {
-        match item {
+        // `export` is visibility, not a separate item: the resolver
+        // passes it through, so unwrap it here — otherwise every
+        // public (exported) item would silently vanish from the docs.
+        let mut inner = item;
+        while let Item::Export(next) = inner {
+            inner = next;
+        }
+        match inner {
             Item::Function(f) => {
                 let docs = doc_comment_for(&source, f.span.start);
                 let params: Vec<String> = f
@@ -100,6 +110,8 @@ pub fn run(args: &[String]) -> i32 {
                     params.join(", "),
                     ret
                 ));
+                doc.push_str(&format!("Type: {}\n\n", fn_type_for(&analysis, f)));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d) = docs {
                     doc.push_str(&d);
                     doc.push_str("\n\n");
@@ -119,6 +131,7 @@ pub fn run(args: &[String]) -> i32 {
                     s.name,
                     fields.join("\n")
                 ));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d) = docs {
                     doc.push_str(&d);
                     doc.push_str("\n\n");
@@ -146,6 +159,7 @@ pub fn run(args: &[String]) -> i32 {
                     e.name,
                     variants.join(", ")
                 ));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d) = docs {
                     doc.push_str(&d);
                     doc.push_str("\n\n");
@@ -176,6 +190,7 @@ pub fn run(args: &[String]) -> i32 {
                     t.name,
                     methods.join("\n")
                 ));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d) = docs {
                     doc.push_str(&d);
                     doc.push_str("\n\n");
@@ -189,6 +204,7 @@ pub fn run(args: &[String]) -> i32 {
                     c.name,
                     type_expr_to_string(&c.ty)
                 ));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d) = docs {
                     doc.push_str(&d);
                     doc.push_str("\n\n");
@@ -199,6 +215,7 @@ pub fn run(args: &[String]) -> i32 {
                 doc.push_str(&format!("## Component: `{}`\n\n", d.name));
                 doc.push_str("```nv\n");
                 doc.push_str(&format!("{}:\n    ...\n```\n\n", d.name));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d_comment) = docs {
                     doc.push_str(&d_comment);
                     doc.push_str("\n\n");
@@ -217,6 +234,7 @@ pub fn run(args: &[String]) -> i32 {
                     t.name,
                     params.join(", ")
                 ));
+                doc.push_str(&format!("Declared in {file_label}.\n\n"));
                 if let Some(d_comment) = docs {
                     doc.push_str(&d_comment);
                     doc.push_str("\n\n");
@@ -254,6 +272,39 @@ pub fn run(args: &[String]) -> i32 {
             }
         },
     }
+}
+
+// ── Hover-card sections ──────────────────────────────────────────────────────
+
+/// Basename of the input path (both separators — hover's `Declared in`
+/// shows the file label, never the full path).
+fn file_label_of(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// `Type: ...` line for a function, mirroring hover's `fn_type_of`
+/// (`(params) -> ret` from the HIR). Falls back to the AST signature
+/// when the function never reached HIR (e.g. `export`-wrapped items,
+/// which typeck skips) so the line still renders.
+fn fn_type_for(analysis: &AnalysisResult, f: &FunctionDecl) -> String {
+    if let Some(hir) = analysis.typed.functions.iter().find(|h| h.name == f.name) {
+        let params: Vec<String> = hir.params.iter().map(|(_, ty)| ty.to_string()).collect();
+        return format!("({}) -> {}", params.join(", "), hir.return_ty);
+    }
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| type_expr_to_string(&p.ty))
+        .collect();
+    let ret = f
+        .return_ty
+        .as_ref()
+        .map(type_expr_to_string)
+        .unwrap_or_else(|| "()".to_string());
+    format!("({}) -> {}", params.join(", "), ret)
 }
 
 // ── Browser launch ───────────────────────────────────────────────────────────

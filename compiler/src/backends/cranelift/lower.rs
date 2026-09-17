@@ -79,6 +79,8 @@ pub struct RtRefs {
     pub checked_srem: FuncRef,
     pub checked_urem: FuncRef,
     pub frem: FuncRef,
+    pub dashboard_echo: FuncRef,
+    pub dashboard_arith: FuncRef,
 }
 
 /// Per-function lowering context: NIR ValueId -> Cranelift `Variable`,

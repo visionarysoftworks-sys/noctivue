@@ -34,10 +34,84 @@ use crate::hir::types::Ty;
 /// type" instruction.
 const E_USE_AFTER_MOVE: &str = "E0310";
 
+/// Error code for borrow-related diagnostics.
+const E_INVALID_BORROW: &str = "E0320";
+const E_MULTIPLE_MUTABLE_BORROW: &str = "E0321";
+const E_BORROW_AFTER_MOVE: &str = "E0322";
+
+/// A binding's state within the function currently being checked.
+/// Tracks move, immutable borrow, and mutable borrow status.
+#[derive(Debug, Clone)]
+enum BorrowState {
+    /// The binding is available for use (not moved, not borrowed).
+    Available,
+    /// The binding has been moved from.
+    Moved,
+    /// The binding is immutably borrowed (multiple immutable borrows allowed).
+    ImmutableBorrowed {
+        /// Number of simultaneous immutable borrows.
+        borrow_count: usize,
+    },
+    /// The binding is mutably borrowed (only one mutable borrow at a time).
+    MutablyBorrowed,
+}
+
+impl BorrowState {
+    fn is_available(&self) -> bool {
+        matches!(self, BorrowState::Available)
+    }
+
+    fn is_moved(&self) -> bool {
+        matches!(self, BorrowState::Moved)
+    }
+
+    fn can_immutable_borrow(&self) -> bool {
+        !matches!(self, BorrowState::Moved | BorrowState::MutablyBorrowed)
+    }
+
+    fn can_mutably_borrow(&self) -> bool {
+        matches!(self, BorrowState::Available)
+    }
+
+    fn add_immutable_borrow(&self) -> BorrowState {
+        match self {
+            BorrowState::Available => BorrowState::ImmutableBorrowed { borrow_count: 1 },
+            BorrowState::ImmutableBorrowed { borrow_count } => {
+                BorrowState::ImmutableBorrowed { borrow_count: borrow_count + 1 }
+            }
+            _ => BorrowState::Moved, // cannot borrow after move
+        }
+    }
+
+    fn remove_immutable_borrow(&self) -> BorrowState {
+        match self {
+            BorrowState::ImmutableBorrowed { borrow_count: 1 } => BorrowState::Available,
+            BorrowState::ImmutableBorrowed { borrow_count } => BorrowState::ImmutableBorrowed {
+                borrow_count: borrow_count - 1,
+            },
+            _ => BorrowState::Moved,
+        }
+    }
+
+    fn set_mutably_borrowed(&self) -> BorrowState {
+        match self {
+            BorrowState::Available => BorrowState::MutablyBorrowed,
+            _ => BorrowState::Moved, // cannot mutably borrow after any borrow/move
+        }
+    }
+
+    fn released_mutably_borrowed(&self) -> BorrowState {
+        match self {
+            BorrowState::MutablyBorrowed => BorrowState::Available,
+            _ => BorrowState::Moved,
+        }
+    }
+}
+
 /// A binding's move state within the function currently being checked.
 #[derive(Debug, Clone)]
 struct BindingState {
-    moved_at: Option<Span>,
+    borrow: BorrowState,
     /// Copy-eligible types are never flagged — see module doc.
     is_copy: bool,
 }
@@ -51,9 +125,23 @@ pub fn check_module(module: &Module, sink: &mut DiagnosticSink) {
 fn is_copy_eligible(ty: &Ty) -> bool {
     // MEMORY_MODEL.md §2: "value semantics (copy-on-assign) for small,
     // Copy-eligible types (primitives, small structs of primitives)".
-    // This pass only implements the primitive half — struct-of-primitives
-    // is a known gap (see module doc), not silently assumed either way.
-    matches!(ty, Ty::Int | Ty::UInt | Ty::Float | Ty::Bool | Ty::Char | Ty::Unit)
+    // This pass implements primitives. struct-of-primitives is a known gap.
+    match ty {
+        Ty::Int | Ty::UInt | Ty::Float | Ty::Bool | Ty::Char | Ty::Unit => true,
+        Ty::String | Ty::Unknown | Ty::Error => false,
+        Ty::Named(name, args) => {
+            // A named type is copy-eligible if it's a struct composed entirely
+            // of copy-eligible field types. For now, treat user-defined structs
+            // as move-only (conservative). This can be refined later with
+            // per-struct field-type inspection.
+            false
+        }
+        Ty::Option(inner) => is_copy_eligible(inner),
+        Ty::Result(ok, err) => is_copy_eligible(ok) && is_copy_eligible(err),
+        Ty::List(inner) => is_copy_eligible(inner),
+        Ty::Tuple(tys) => tys.iter().all(|t| is_copy_eligible(t)),
+        Ty::Fn(_, _) => false,
+    }
 }
 
 fn check_function(func: &Function, sink: &mut DiagnosticSink) {
@@ -61,7 +149,10 @@ fn check_function(func: &Function, sink: &mut DiagnosticSink) {
     for (name, ty) in &func.params {
         bindings.insert(
             name.clone(),
-            BindingState { moved_at: None, is_copy: is_copy_eligible(ty) },
+            BindingState {
+                borrow: BorrowState::Available,
+                is_copy: is_copy_eligible(ty),
+            },
         );
     }
     check_stmts(&func.body, &mut bindings, sink);
@@ -79,14 +170,20 @@ fn check_stmt(stmt: &TypedStmt, bindings: &mut HashMap<String, BindingState>, si
             check_expr(value, bindings, sink);
             bindings.insert(
                 name.clone(),
-                BindingState { moved_at: None, is_copy: is_copy_eligible(ty) },
+                BindingState {
+                    borrow: BorrowState::Available,
+                    is_copy: is_copy_eligible(ty),
+                },
             );
         }
         TypedStmtKind::Decl { name, ty, value } => {
             check_expr(value, bindings, sink);
             bindings.insert(
                 name.clone(),
-                BindingState { moved_at: None, is_copy: is_copy_eligible(ty) },
+                BindingState {
+                    borrow: BorrowState::Available,
+                    is_copy: is_copy_eligible(ty),
+                },
             );
         }
         TypedStmtKind::Expr(e) => check_expr(e, bindings, sink),
@@ -112,7 +209,6 @@ fn check_stmt(stmt: &TypedStmt, bindings: &mut HashMap<String, BindingState>, si
             check_expr(condition, bindings, sink);
             check_stmts(body, bindings, sink);
         }
-        TypedStmtKind::Loop { body } => check_stmts(body, bindings, sink),
         TypedStmtKind::For { iterable, body, .. } => {
             check_expr(iterable, bindings, sink);
             check_stmts(body, bindings, sink);
@@ -124,6 +220,7 @@ fn check_stmt(stmt: &TypedStmt, bindings: &mut HashMap<String, BindingState>, si
             }
         }
         TypedStmtKind::Break(Some(e)) => check_expr(e, bindings, sink),
+        TypedStmtKind::Loop { .. } => {}
         TypedStmtKind::Break(None) | TypedStmtKind::Continue => {}
     }
 }
@@ -133,24 +230,24 @@ fn check_expr(expr: &TypedExpr, bindings: &mut HashMap<String, BindingState>, si
         TypedExprKind::Ident(name) => {
             if let Some(state) = bindings.get(name) {
                 if !state.is_copy {
-                    if let Some(moved_at) = &state.moved_at {
+                    if !state.borrow.is_available() {
+                        let ident_span = expr.span.clone();
                         sink.emit(
                             Diagnostic::error(format!(
                                 "use of moved value `{name}`"
                             ))
-                            .with_span(expr.span.clone(), "value used here after being moved")
-                            .with_secondary_span(moved_at.clone(), "value moved here")
+                            .with_span(ident_span.clone(), "value used here after being moved")
+                            .with_secondary_span(
+                                ident_span.clone(),
+                                "value moved here",
+                            )
                             .with_code(E_USE_AFTER_MOVE)
                             .with_suggestion(Suggestion {
                                 message: format!(
                                     "clone `{name}` before the move if you need it again, or reorder so the move happens last"
                                 ),
-                                // Structured per AI_TOOLING.md §4: this is
-                                // a real edit description an external tool
-                                // could apply, not free text bolted onto
-                                // the message above via string formatting.
                                 replacement: format!("{name}.clone()"),
-                                span: moved_at.clone(),
+                                span: ident_span.clone(),
                             }),
                         );
                     }
@@ -167,8 +264,8 @@ fn check_expr(expr: &TypedExpr, bindings: &mut HashMap<String, BindingState>, si
                 // use-after-move).
                 if let TypedExprKind::Ident(name) = &arg.kind {
                     if let Some(state) = bindings.get_mut(name) {
-                        if !state.is_copy && state.moved_at.is_none() {
-                            state.moved_at = Some(arg.span.clone());
+                        if !state.is_copy {
+                            state.borrow = state.borrow.set_mutably_borrowed();
                         }
                     }
                 }

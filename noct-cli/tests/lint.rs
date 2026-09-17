@@ -226,3 +226,107 @@ fn lint_json_reports_machine_readable_warnings() {
     );
     cleanup(&path);
 }
+
+// ── L-003: missing docs on public items (default-off style rule) ─────────────
+
+const STYLE_PROBE: &[u8] = b"/// Documented helper.\nexport fn documented(x: Int) -> Int:\n    x\n\nexport fn bare(x: Int) -> Int:\n    x\n\nfn private_no_docs(x: Int) -> Int:\n    x\n";
+
+#[test]
+fn lint_l003_off_by_default() {
+    // Without --style, undocumented public items are silent.
+    let path = write_case("style_off", STYLE_PROBE);
+    let s = path.to_string_lossy().to_string();
+    let out = run_cli(&["lint", &s]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("L-003"),
+        "L-003 must be default-off, got:\n{stderr}"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn lint_l003_style_flags_undocumented_public_items() {
+    let path = write_case("style_on", STYLE_PROBE);
+    let s = path.to_string_lossy().to_string();
+    let out = run_cli(&["lint", "--style", &s]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning[L-003]: public function `bare` is missing documentation"),
+        "must fire on undocumented export, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("consecutive `///` doc comments"),
+        "must carry the note, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("add `/// ...` lines directly above"),
+        "must carry the help, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("`documented`"),
+        "documented items must be clean, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("`private_no_docs`"),
+        "private items must never be flagged, got:\n{stderr}"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn lint_l003_style_covers_struct_enum_trait_members() {
+    let src = b"/// Has docs.\nexport struct HasDocs:\n    /// Field docs.\n    id: Int\n    name: String\n\nexport enum Bare:\n    North\n    South\n\n/// Speaker docs.\nexport trait Speaker:\n    /// Speak docs.\n    fn speak(msg: String) -> String\n    fn silent_method(x: Int) -> Int\n";
+    let path = write_case("style_members", src);
+    let s = path.to_string_lossy().to_string();
+    // `--include-style` is the long alias for `--style`.
+    let out = run_cli(&["lint", "--include-style", &s]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in [
+        "public struct field `name` is missing documentation",
+        "public enum `Bare` is missing documentation",
+        "public enum variant `North` is missing documentation",
+        "public enum variant `South` is missing documentation",
+        "public trait method `silent_method` is missing documentation",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "must flag {needle}, got:\n{stderr}"
+        );
+    }
+    for clean in ["`HasDocs`", "`id`", "`Speaker`", "`speak`"] {
+        let needle = format!("{clean} is missing documentation");
+        assert!(
+            !stderr.contains(&needle),
+            "documented {clean} must be clean, got:\n{stderr}"
+        );
+    }
+    cleanup(&path);
+}
+
+#[test]
+fn lint_l003_json_shape_matches_existing_rules() {
+    let path = write_case("style_json", STYLE_PROBE);
+    let s = path.to_string_lossy().to_string();
+    let out = run_cli(&["lint", "--style", "--json", &s]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"rule\":\"L-003\""), "got:\n{stdout}");
+    assert!(stdout.contains("\"line\":"), "got:\n{stdout}");
+    assert!(stdout.contains("\"details\":"), "got:\n{stdout}");
+    assert!(stdout.contains("`bare` is missing documentation"), "got:\n{stdout}");
+    assert!(
+        !stdout.contains("private_no_docs"),
+        "private items must never be flagged, got:\n{stdout}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "stderr must stay clean for piping, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    cleanup(&path);
+}

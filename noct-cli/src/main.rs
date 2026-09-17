@@ -16,6 +16,9 @@
 //! | `noct audit`          | 4     | trust rows from lock |
 //! | `noct publish`        | 4     | --dry-run only (no registry) |
 //! | `noct doc`            | 4     | stdout per file |
+//! | `noct vendor`         | 4     | offline copy of the lock closure |
+//! | `noct outdated`       | 4     | index comparison, informational |
+//! | `noct completions`    | 4     | shell stub (commands + files) |
 
 mod cmd_ast;
 mod cmd_build;
@@ -26,7 +29,10 @@ mod cmd_fmt;
 mod cmd_lint;
 mod cmd_add;
 mod cmd_audit;
+mod cmd_completions;
+mod cmd_outdated;
 mod cmd_publish;
+mod cmd_vendor;
 mod cmd_run;
 mod cmd_run_vm;
 mod cmd_test;
@@ -52,6 +58,9 @@ fn main() {
         Some("audit")       => cmd_audit::run(&args[2..]),
         Some("publish")     => cmd_publish::run(&args[2..]),
         Some("doc")         => cmd_doc::run(&args[2..]),
+        Some("vendor")      => cmd_vendor::run(&args[2..]),
+        Some("outdated")    => cmd_outdated::run(&args[2..]),
+        Some("completions") => cmd_completions::run(&args[2..]),
         Some("run-vm")      => cmd_run_vm::run(&args[2..]),
         Some("--version") | Some("-V") => {
             println!("noct {}", env!("CARGO_PKG_VERSION"));
@@ -92,6 +101,9 @@ COMMANDS:
     audit        [Phase 4] Show dependency trust rows
     publish      [Phase 4] Publish to the package registry
     doc          [Phase 4] Generate documentation
+    vendor       [Phase 4] Copy the dependency closure into vendor/
+    outdated     [Phase 4] Show newer indexed versions (informational)
+    completions  [Phase 4] Print a shell completion stub
 
 OPTIONS:
     -h, --help     Print this help message

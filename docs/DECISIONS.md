@@ -562,7 +562,11 @@ Confirmed — that remains the highest-risk open question for Phase 1.
 - *Recommended solution:* (a) — the formatter treats semicolons as a
   formatting decision it owns, consistent with "formatting belongs to
   the formatter" (design brief §8).
-- *Status:* Proposed.
+- *Status:* Confirmed.
+- **Confirmation (2026-09-17):** Recommended solution (a) confirmed —
+  the formatter owns semicolon placement; semicolons are a formatting
+  decision, never persisted as author style. Original Proposed text
+  retained above per §1 (no silent rewrites).
 
 ---
 
@@ -599,7 +603,12 @@ Confirmed — that remains the highest-risk open question for Phase 1.
   helps) that `noct fmt`/`noct lint` can optionally enforce.
 - *Recommended solution:* (b) — ship a *default-off* lint rule so teams
   can opt in to consistency without the core language mandating it.
-- *Status:* Proposed. See STYLE_GUIDE.md §2.
+- *Status:* Confirmed. See STYLE_GUIDE.md §2.
+- **Confirmation (2026-09-17):** Recommended solution (b) confirmed —
+  the official house recommendation (concise by default, explicit only
+  when it aids disambiguation) is enforced ONLY via a default-off lint
+  rule, never by the core language or default tooling. Original
+  Proposed text retained above per §1 (no silent rewrites).
 
 ---
 

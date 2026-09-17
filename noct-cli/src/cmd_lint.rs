@@ -33,14 +33,25 @@
 //! member-field names). Shadowing errs toward silence (a missed
 //! warning, never a false positive).
 //!
+//! Rule L-003 (default-off, opt-in via `--style` / `--include-style`):
+//! a PUBLIC item (an `export`-wrapped function, struct, enum, or
+//! trait — the only visibility the AST exposes) missing consecutive
+//! `///` doc comments. Exported members (struct fields, enum
+//! variants, trait methods) carry no per-member visibility in the
+//! AST, so every member of an exported parent is treated as public.
+//! Presence uses the shared `analysis::doc_comment_for` rule (one
+//! rule, two consumers with hover/`noct doc`). Private (non-exported)
+//! items never warn.
+//!
 //! Usage:
-//!   noct lint [file.nv ...] [--json] [--fix]
+//!   noct lint [file.nv ...] [--json] [--fix] [--style|--include-style]
 //!   noct lint --help
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use compiler::analysis::doc_comment_for;
 use compiler::ast::{
     Block, Expr, FunctionBody, FunctionDecl, Item, MatchStmt, Pattern, Program, Stmt, TypeExpr,
 };
@@ -48,21 +59,25 @@ use compiler::ast::{
 pub fn run(args: &[String]) -> i32 {
     let mut fix_mode = false;
     let mut json_mode = false;
+    let mut style_mode = false;
     let mut files: Vec<String> = Vec::new();
 
     for arg in args {
         match arg.as_str() {
             "--fix" => fix_mode = true,
             "--json" => json_mode = true,
+            "--style" | "--include-style" => style_mode = true,
             "--help" | "-h" => {
                 println!("noct lint — run the official Noctivue linter");
                 println!();
                 println!("USAGE:");
-                println!("    noct lint [file.nv ...] [--json] [--fix]");
+                println!("    noct lint [file.nv ...] [--json] [--fix] [--style]");
                 println!();
                 println!("OPTIONS:");
                 println!("    --json  Output warnings as JSON to stdout");
                 println!("    --fix   Apply L-001 autofixes (bare-ident → Ident() in match arms)");
+                println!("    --style, --include-style");
+                println!("            Enable default-off style rules (L-003: public items need `///` docs)");
                 return 0;
             }
             other => {
@@ -105,7 +120,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        let warnings = lint_file(&source);
+        let warnings = lint_file(&source, style_mode);
         all.push((file.clone(), source, warnings));
     }
     let warnings: usize = all.iter().map(|(_, _, ws)| ws.len()).sum();
@@ -202,11 +217,12 @@ fn print_json(all: &[(String, String, Vec<Warning>)]) {
     println!("[{}]", items.join(","));
 }
 
-/// Parse `source` (lex+parse only — both rules run pre-typeck by
+/// Parse `source` (lex+parse only — all rules run pre-typeck by
 /// design) and return all warnings. Parse errors never block the
 /// rules (the parser returns a partial tree; reporting syntax is
-/// `diagnostics`' job, not lint's).
-fn lint_file(source: &str) -> Vec<Warning> {
+/// `diagnostics`' job, not lint's). L-003 runs only when
+/// `include_style` is set (default-off style rule).
+fn lint_file(source: &str, include_style: bool) -> Vec<Warning> {
     let mut sink = compiler::diagnostics::DiagnosticSink::new();
     let tokens = compiler::lexer::lex(source, &mut sink);
     let program = compiler::parser::parse(&tokens, &mut sink);
@@ -215,7 +231,10 @@ fn lint_file(source: &str) -> Vec<Warning> {
     let variants = collect_variant_names(&program);
     check_program(&program, &variants, source, &mut out);
     check_unused_imports(&program, source, &mut out);
-    // Stable order: by line, L-001 before L-002 on ties.
+    if include_style {
+        check_missing_docs(&program, source, &mut out);
+    }
+    // Stable order: by line, then rule id on ties.
     out.sort_by(|a, b| (a.line, a.rule).cmp(&(b.line, b.rule)));
     out
 }
@@ -262,6 +281,19 @@ fn warn_l002(name: &str, line: usize) -> Warning {
         details: vec![
             format!("  = note: `{name}` is never referenced in this file"),
             "  = help: remove the import or use it".to_string(),
+        ],
+        fix: None,
+    }
+}
+
+fn warn_l003(kind: &str, name: &str, line: usize) -> Warning {
+    Warning {
+        rule: "L-003",
+        line,
+        message: format!("warning[L-003]: public {kind} `{name}` is missing documentation"),
+        details: vec![
+            "  = note: public items should carry consecutive `///` doc comments".to_string(),
+            "  = help: add `/// ...` lines directly above the item".to_string(),
         ],
         fix: None,
     }
@@ -649,5 +681,62 @@ fn import_display(path: &[String], alias: &Option<String>) -> String {
     match alias {
         Some(a) => format!("{} as {a}", path.join("::")),
         None => path.join("::"),
+    }
+}
+
+// ── L-003: missing docs on public items (default-off style rule) ─────────────
+
+/// Warn on `export`-wrapped functions, structs, enums, and traits
+/// (plus their members) missing consecutive `///` doc comments.
+/// Presence uses the shared `analysis::doc_comment_for` — the same
+/// rule hover and `noct doc` render through — so lint never disagrees
+/// with the docs. Non-exported items are private and never warn.
+fn check_missing_docs(program: &Program, source: &str, out: &mut Vec<Warning>) {
+    for item in &program.items {
+        // Peel `export` wrappers (`export export …` nests by
+        // construction). Anything else is a private item and never
+        // warns.
+        let mut inner = item;
+        let mut public = false;
+        while let Item::Export(next) = inner {
+            public = true;
+            inner = next;
+        }
+        if !public {
+            continue;
+        }
+        match inner {
+            Item::Function(f) => {
+                check_doc(source, out, "function", &f.name, f.span.start);
+            }
+            Item::Struct(s) => {
+                check_doc(source, out, "struct", &s.name, s.span.start);
+                for field in &s.fields {
+                    check_doc(source, out, "struct field", &field.name, field.span.start);
+                }
+            }
+            Item::Enum(e) => {
+                check_doc(source, out, "enum", &e.name, e.span.start);
+                for variant in &e.variants {
+                    check_doc(source, out, "enum variant", &variant.name, variant.span.start);
+                }
+            }
+            Item::Trait(t) => {
+                check_doc(source, out, "trait", &t.name, t.span.start);
+                for member in &t.members {
+                    check_doc(source, out, "trait method", &member.name, member.span.start);
+                }
+            }
+            // Consts, tasks, mods, impls, derives, and bare decls are
+            // out of scope for L-003 (functions/structs/enums/traits
+            // plus members only).
+            _ => {}
+        }
+    }
+}
+
+fn check_doc(source: &str, out: &mut Vec<Warning>, kind: &str, name: &str, span_start: usize) {
+    if doc_comment_for(source, span_start).is_none() {
+        out.push(warn_l003(kind, name, line_of(source, span_start)));
     }
 }

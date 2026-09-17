@@ -60,7 +60,8 @@ use super::abi::{
     NOCTIVUE_RT_CHECKED_SDIV, NOCTIVUE_RT_CHECKED_SREM, NOCTIVUE_RT_CHECKED_UDIV,
     NOCTIVUE_RT_CHECKED_UREM, NOCTIVUE_RT_FREM, NOCTIVUE_RT_PANIC, NOCTIVUE_RT_PRINT,
     NOCTIVUE_RT_STR_CONCAT, NOCTIVUE_RT_STR_FROM_BOOL, NOCTIVUE_RT_STR_FROM_FLOAT,
-    NOCTIVUE_RT_STR_FROM_INT, NOCTIVUE_RT_STR_FROM_PARTS, RUNTIME_IMPORTS,
+    NOCTIVUE_RT_STR_FROM_INT, NOCTIVUE_RT_STR_FROM_PARTS, NOCTIVUE_DASHBOARD_ARITH,
+    NOCTIVUE_DASHBOARD_ECHO, RUNTIME_IMPORTS,
 };
 use super::lower::{clif_type_for, clif_type_for_opt, lower_instr, signature_for, FuncLowerCtx, RtRefs};
 
@@ -122,6 +123,8 @@ pub struct RtIds {
     pub checked_srem: ClifFuncId,
     pub checked_urem: ClifFuncId,
     pub frem: ClifFuncId,
+    pub dashboard_echo: ClifFuncId,
+    pub dashboard_arith: ClifFuncId,
 }
 
 /// Compile `module` to a native object file at `output_path`. Does not
@@ -249,6 +252,8 @@ fn declare_runtime_imports(
         checked_srem: get(NOCTIVUE_RT_CHECKED_SREM),
         checked_urem: get(NOCTIVUE_RT_CHECKED_UREM),
         frem: get(NOCTIVUE_RT_FREM),
+        dashboard_echo: get(NOCTIVUE_DASHBOARD_ECHO),
+        dashboard_arith: get(NOCTIVUE_DASHBOARD_ARITH),
     })
 }
 
@@ -597,6 +602,8 @@ fn compile_function(
         checked_srem: obj_module.declare_func_in_func(rt_ids.checked_srem, &mut ctx.func),
         checked_urem: obj_module.declare_func_in_func(rt_ids.checked_urem, &mut ctx.func),
         frem: obj_module.declare_func_in_func(rt_ids.frem, &mut ctx.func),
+        dashboard_echo: obj_module.declare_func_in_func(rt_ids.dashboard_echo, &mut ctx.func),
+        dashboard_arith: obj_module.declare_func_in_func(rt_ids.dashboard_arith, &mut ctx.func),
     };
 
     {

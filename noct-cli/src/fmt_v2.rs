@@ -1,4 +1,4 @@
-//! `noct fmt --v2` — AST printer (P-004 v2 scope).
+//! `noct fmt` — AST printer (P-004 v2 scope; the DEFAULT formatter).
 //!
 //! Prints the PARSED program (pre-resolve) in expanded canonical form.
 //! Pre-resolve is load-bearing for D6: concise (`User:`,
@@ -66,12 +66,12 @@ pub fn format_v2(source: &str) -> Result<String, Fmt2Error> {
     check_no_tab_indent(source)?;
     let (program, tokens, in_errors) = parse_keep_tokens(source);
     // v2 reasons about structure, so it requires parseable input
-    // (v1's byte-level trivia mode stays available for the rest —
+    // (the `--v1` byte-level trivia mode stays available for the rest —
     // refusing here reports an input problem, never a formatter bug).
     if in_errors > 0 {
         return Err(Fmt2Error {
             message: format!(
-                "cannot format: input has {in_errors} parse error(s); fix them or use v1 trivia mode"
+                "cannot format: input has {in_errors} parse error(s); fix them or use --v1 trivia mode"
             ),
         });
     }

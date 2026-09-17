@@ -1,6 +1,8 @@
-//! CLI tests for `noct fmt` v1 (stdlib/PROPOSALS.md P-004).
+//! CLI tests for `noct fmt --v1` (stdlib/PROPOSALS.md P-004 v1 fallback).
 //!
-//! Strategy mirrors `differential.rs`: write inline sources to unique
+//! v1 is the trivia canonicalizer, reachable via explicit `--v1`
+//! (v2 is the default `noct fmt` mode). Strategy mirrors
+//! `differential.rs`: write inline sources to unique
 //! temp files (best-effort cleanup, never repo fixtures), invoke the
 //! built `noct` binary, assert on exit codes and exact file bytes.
 //! Byte assertions use `\n` throughout (v1 canonicalizes endings).
@@ -61,11 +63,11 @@ fn read_bytes(path: &PathBuf) -> Vec<u8> {
     std::fs::read(path).expect("read back formatted file")
 }
 
-/// Run `fmt` on `source`, expect success, return the resulting bytes.
+/// Run `fmt --v1` on `source`, expect success, return the resulting bytes.
 fn fmt_ok(name: &str, source: &[u8]) -> Vec<u8> {
     let path = write_case(name, source);
     let s = path.to_string_lossy().to_string();
-    let out = run_cli(&["fmt", &s]);
+    let out = run_cli(&["fmt", "--v1", &s]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -131,7 +133,7 @@ fn fmt_check_reports_dirty_and_clean() {
     let ds = dirty.to_string_lossy().to_string();
     let cs = clean.to_string_lossy().to_string();
 
-    let out = run_cli(&["fmt", "--check", &ds, &cs]);
+    let out = run_cli(&["fmt", "--v1", "--check", &ds, &cs]);
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -149,7 +151,7 @@ fn fmt_check_reports_dirty_and_clean() {
         b"main():   \n    println(\"hi\")\n".to_vec()
     );
 
-    let out = run_cli(&["fmt", "--check", &cs]);
+    let out = run_cli(&["fmt", "--v1", "--check", &cs]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -170,7 +172,7 @@ fn fmt_is_idempotent_on_realistic_source() {
     // (the in-command guard asserts this too — this doubles it here).
     let path = write_case("idempotent2", &once);
     let s = path.to_string_lossy().to_string();
-    let out = run_cli(&["fmt", &s]);
+    let out = run_cli(&["fmt", "--v1", &s]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(read_bytes(&path), once);
     cleanup(&path);
@@ -183,7 +185,7 @@ fn fmt_rejects_tab_indent_loudly_and_writes_nothing() {
     let src = b"main():\n\tprintln(\"hi\")\n";
     let path = write_case("tab_indent", src);
     let s = path.to_string_lossy().to_string();
-    let out = run_cli(&["fmt", &s]);
+    let out = run_cli(&["fmt", "--v1", &s]);
     assert_eq!(
         out.status.code(),
         Some(1),

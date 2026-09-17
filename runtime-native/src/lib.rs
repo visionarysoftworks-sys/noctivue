@@ -308,6 +308,22 @@ pub unsafe extern "C" fn noctivue_rt_strlen(ptr: *const u8) -> i64 {
     len
 }
 
+/// `noctivue_dashboard_echo(str: I64) -> I64` — echo a string back
+/// through the FFI boundary. Used by the dashboard UI for round-trip
+/// string exposure.
+#[no_mangle]
+pub extern "C" fn noctivue_dashboard_echo(str: i64) -> i64 {
+    str
+}
+
+/// `noctivue_dashboard_arith(a: I64, b: I64) -> I64` — add two i64 values
+/// through the FFI boundary. Used by the dashboard UI for arithmetic
+/// exposure.
+#[no_mangle]
+pub extern "C" fn noctivue_dashboard_arith(a: i64, b: i64) -> i64 {
+    a.wrapping_add(b)
+}
+
 // ── Phase 5: net.http FFI stubs ──────────────────────────────────────────────
 //
 // These are identity/passthrough stubs that allow the .nv stdlib to call

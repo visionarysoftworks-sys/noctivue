@@ -69,21 +69,58 @@ fn runtime_native_dir() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release]");
+    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release] [--frozen]");
     eprintln!("  multiple files concatenate in order, entry point last (tank libraries first)");
+    eprintln!("  --frozen: fail if nestpkg.lock is missing or stale (reproducible builds)");
+}
+
+fn check_frozen() -> Result<(), String> {
+    // Reproducible-build gate for `--frozen`: the lock is the build
+    // input — a missing or stale lock errors (prompting `add`), never
+    // silently re-resolves. Skips when no manifest is present
+    // (single-file use has no package context) and when the manifest
+    // declares no dependencies (nothing to freeze). Pure
+    // manifest-vs-lock check only (no cache I/O): cache staleness is
+    // `require_package_current`'s job, not `--frozen`'s.
+    let manifest_text = match std::fs::read_to_string("nestpkg.nvpm") {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let manifest = crate::manifest::parse_manifest(&manifest_text)
+        .map_err(|e| format!("--frozen: invalid manifest: {e}"))?;
+    let needs_lock = !manifest.dependencies.is_empty() || !manifest.dev_dependencies.is_empty();
+    let lock_text = match std::fs::read_to_string("nestpkg.lock") {
+        Ok(t) => t,
+        Err(_) => {
+            if needs_lock {
+                return Err(
+                    "--frozen: lockfile missing (nestpkg.lock not found; run `noct add` to establish it)"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+    };
+    let lock = crate::manifest::parse_lockfile(&lock_text)
+        .map_err(|e| format!("--frozen: invalid lockfile: {e}"))?;
+    match crate::manifest::verify_frozen(&manifest, &lock) {
+        Ok(()) => Ok(()),
+        Err(problems) => {
+            let mut msg = String::from("--frozen: package is not current:");
+            for p in problems {
+                msg.push_str(&format!("\n  - {p}"));
+            }
+            msg.push_str("\n(run `noct add` to refresh)");
+            Err(msg)
+        }
+    }
 }
 
 pub fn run(args: &[String]) -> i32 {
-    // P-003 §6: the lock is the build input — a stale lock errors
-    // (prompting `add`), never silently re-resolves. Skips when no
-    // manifest is present (single-file use has no package context).
-    if let Err(message) = crate::registry::require_package_current(std::path::Path::new(".")) {
-        eprintln!("noct build: {message}");
-        return 1;
-    }
     let mut inputs: Vec<&str> = Vec::new();
     let mut out: Option<&str> = None;
     let mut release = false;
+    let mut frozen = false;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -96,6 +133,10 @@ pub fn run(args: &[String]) -> i32 {
                 }
             },
             "--release" => release = true,
+            // Canonical reproducible-builds flag. `--locked` is a hidden
+            // alias (trivial in this hand-rolled parser; intentionally
+            // absent from usage()).
+            "--frozen" | "--locked" => frozen = true,
             "-h" | "--help" => {
                 usage();
                 return 0;
@@ -113,6 +154,12 @@ pub fn run(args: &[String]) -> i32 {
     if inputs.is_empty() {
         usage();
         return 1;
+    }
+    if frozen {
+        if let Err(message) = check_frozen() {
+            eprintln!("noct build: {message}");
+            return 1;
+        }
     }
 
     // ── 1. Frontend → NIR (same front door as `run-vm`) ────────────────

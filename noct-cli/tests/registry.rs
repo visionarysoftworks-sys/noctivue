@@ -259,3 +259,201 @@ fn registry_add_conflicts_are_loud() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown package"));
     cleanup(&base);
 }
+
+// ── Phase 4 exit-criterion: fail-closed tamper proof ────────────────────────
+
+#[test]
+fn registry_cached_tarball_tamper_fails_closed_on_use() {
+    // Adversarial proof: flip ONE byte of the cached `.pkg` tarball and
+    // prove the install path (`noct run`, via
+    // `require_package_current` → `check_cache_current`) FAILS CLOSED —
+    // non-zero exit with an integrity error naming the package — rather
+    // than running/installing the tampered bytes.
+    //
+    // Verification already existed (`registry::check_cache_current`
+    // hash re-check on every build-touching-the-cache; no new
+    // production code was needed for this proof).
+    let (base, dir, keys) = scratch();
+    let root = build_index(&base, &[("leaf", "1.4.0", &[], &[("lib.nv", "hi")])]);
+    write_app(&dir);
+    std::fs::write(dir.join("main.nv"), "main():\n    println(\"hi\")\n").unwrap();
+    let idx = index_arg(&root);
+    let out = run_cli_in_keys(&dir, &keys, &["add", "leaf", "--index", &idx]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "setup add failed. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Sanity: the untampered project runs.
+    let out = run_cli_in_keys(&dir, &keys, &["run", "main.nv"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "untampered run must succeed. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Flip exactly one byte in the middle of the cached tarball.
+    let cache = dir.join(".noct/cache/leaf-1.4.0.pkg");
+    let mut bytes = std::fs::read(&cache).expect("read cached pkg");
+    assert!(!bytes.is_empty(), "cached pkg must be non-empty");
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&cache, &bytes).expect("write tampered pkg");
+
+    // The next use must fail closed, naming the package.
+    let out = run_cli_in_keys(&dir, &keys, &["run", "main.nv"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "tampered cache must fail closed (non-zero exit)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("leaf"),
+        "integrity error must name the package, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("hash mismatch") || stderr.contains("not current"),
+        "integrity error must cite the hash/integrity failure, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("panic"),
+        "must fail cleanly, never panic, got:\n{stderr}"
+    );
+    // Fail-closed means no healing and no run: stdout must not contain
+    // the program's output.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("hi\n") || out.status.code() != Some(0),
+        "tampered bytes must not execute"
+    );
+    cleanup(&base);
+}
+
+// ── Manifest parser robustness (adversarial inputs, never panics) ──────────
+//
+// NOTE: these live here — NOT in manifest.rs — per file ownership (another
+// agent owns manifest.rs). They exercise the parser through the
+// `publish --dry-run` CLI surface: every case must exit 1 with a clean
+// `invalid manifest: line …` error, never a panic (exit 101) or hang.
+
+fn run_publish_unsigned(dir: &Path, keys: &Path, manifest_text: &str) -> Output {
+    std::fs::write(dir.join("nestpkg.nvpm"), manifest_text).expect("write adversarial manifest");
+    // Drop any stale lock so the failure is attributable to the manifest.
+    let _ = std::fs::remove_file(dir.join("nestpkg.lock"));
+    run_cli_in_keys(dir, keys, &["publish", "--dry-run"])
+}
+
+fn assert_manifest_rejected(dir: &Path, keys: &Path, case: &str, text: &str, fragment: &str) {
+    let out = run_publish_unsigned(dir, keys, text);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "adversarial case `{case}` must exit 1, not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid manifest"),
+        "case `{case}` must report an invalid manifest, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(fragment),
+        "case `{case}` error must contain `{fragment}`, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("panic"),
+        "case `{case}` must not panic, got:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("ready to publish"),
+        "case `{case}` must not claim readiness"
+    );
+}
+
+#[test]
+fn manifest_parser_rejects_structural_adversaries() {
+    let (base, dir, keys) = scratch();
+    // Duplicate keys (same block, twice).
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "duplicate keys",
+        "package:\n    name: myapp\n    version: 0.1.0\n    name: other\n",
+        "duplicate key",
+    );
+    // Truncated file: section header with no body (cut off mid-file).
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "truncated section",
+        "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n",
+        "has no body",
+    );
+    // Truncated file: missing required value.
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "truncated manifest",
+        "package:\n    name: myapp\n",
+        "missing required",
+    );
+    // Bad semver (non-numeric patch).
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "bad semver",
+        "package:\n    name: myapp\n    version: 1.0.x\n",
+        "bad version",
+    );
+    // Unknown tier on a dependency block.
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "unknown tier",
+        "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n    leaf:\n        version: 1.0.0\n        tier: water\n",
+        "unknown tier",
+    );
+    cleanup(&base);
+}
+
+#[test]
+fn manifest_parser_rejects_hostile_bytes_without_panic() {
+    let (base, dir, keys) = scratch();
+    // Embedded NUL byte inside a scalar (must be a clean ManifestError,
+    // never a truncation/panic).
+    assert_manifest_rejected(
+        &dir,
+        &keys,
+        "null bytes",
+        "package:\n    name: myapp\0evil\n    version: 0.1.0\n",
+        "bad project name",
+    );
+    // 1MB single line: a hostile overlong name (length-capped at 64 by
+    // the name rule — must fail fast with a clean error, not hang/OOM).
+    let big = "a".repeat(1024 * 1024);
+    let text = format!("package:\n    name: {big}\n    version: 0.1.0\n");
+    let out = run_publish_unsigned(&dir, &keys, &text);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "1MB-line case must exit 1, not succeed or hang"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid manifest"),
+        "1MB-line case must report an invalid manifest, got (first 500 chars):\n{}",
+        stderr.chars().take(500).collect::<String>()
+    );
+    assert!(
+        stderr.contains("bad project name"),
+        "1MB-line case must cite the name rule, got (first 500 chars):\n{}",
+        stderr.chars().take(500).collect::<String>()
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("panic"),
+        "1MB-line case must not panic"
+    );
+    cleanup(&base);
+}

@@ -60,6 +60,10 @@ pub const NOCTIVUE_RT_HTTP_POST: &str = "noctivue_rt_http_post";
 pub const NOCTIVUE_RT_HTTP_SERVER_START: &str = "noctivue_rt_http_server_start";
 pub const NOCTIVUE_RT_HTTP_SERVER_SERVE: &str = "noctivue_rt_http_server_serve";
 
+// Dashboard FFI exposure (Phase 3, Step 4).
+pub const NOCTIVUE_DASHBOARD_ECHO: &str = "noctivue_dashboard_echo";
+pub const NOCTIVUE_DASHBOARD_ARITH: &str = "noctivue_dashboard_arith";
+
 use cranelift_codegen::ir::types as clif_types;
 use cranelift_codegen::ir::Type as ClifType;
 
@@ -145,5 +149,16 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
         NOCTIVUE_RT_HTTP_SERVER_SERVE,
         &[clif_types::I64],
         &[],
+    ),
+    // Phase 3, Step 4: dashboard FFI exposure.
+    (
+        NOCTIVUE_DASHBOARD_ECHO,
+        &[clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_DASHBOARD_ARITH,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
     ),
 ];

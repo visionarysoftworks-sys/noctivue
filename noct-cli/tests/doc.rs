@@ -117,3 +117,90 @@ fn doc_requires_input() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ── Hover-card sections (TOOLCHAIN.md §6.1) ──────────────────────────────────
+
+const CARD_SRC: &[u8] = b"/// Adds two numbers.\nfn add(a: Int, b: Int) -> Int:\n    a + b\n\n/// A 2D point.\nstruct Point:\n    x: Float\n    y: Float\n\n/// A direction.\nenum Direction:\n    North\n    East(Int)\n\n/// The app name.\nconst APP_NAME: String = \"demo\"\n";
+
+#[test]
+fn doc_renders_signature_type_location_and_docs() {
+    // Every item card carries the hover section order: signature,
+    // Type (functions only), Declared-in, documentation.
+    let path = write_case("doc_card", CARD_SRC);
+    let s = path.to_string_lossy().to_string();
+    let out = run_cli(&["doc", &s]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let file_label = path.file_name().unwrap().to_string_lossy().to_string();
+    // Signatures mirror hover.
+    for sig in [
+        "fn add(a: Int, b: Int) -> Int",
+        "struct Point:",
+        "enum Direction:",
+        "const APP_NAME: String",
+    ] {
+        assert!(stdout.contains(sig), "missing signature {sig:?}, got:\n{stdout}");
+    }
+    // Type line: functions only.
+    assert!(
+        stdout.contains("Type: (Int, Int) -> Int"),
+        "function card must carry its Type line, got:\n{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("Type:").count(),
+        1,
+        "only the function card carries a Type line, got:\n{stdout}"
+    );
+    // Declared-in: one per item (fn + struct + enum + const).
+    assert_eq!(
+        stdout.matches(&format!("Declared in {file_label}.")).count(),
+        4,
+        "every card must carry its location, got:\n{stdout}"
+    );
+    // Documentation text.
+    for docs in [
+        "Adds two numbers.",
+        "A 2D point.",
+        "A direction.",
+        "The app name.",
+    ] {
+        assert!(stdout.contains(docs), "missing docs {docs:?}, got:\n{stdout}");
+    }
+    cleanup(&path);
+}
+
+#[test]
+fn doc_renders_exported_items() {
+    // `export` is visibility, not a separate item: exported entries
+    // must render like their plain counterparts (regression: they
+    // used to vanish because the resolver passes `Item::Export`
+    // through and `doc` skipped it).
+    let src = b"/// Public helper.\nexport fn pub_helper(x: Int) -> Int:\n    x\n\n/// Exported point.\nexport struct Exported:\n    field: Int\n";
+    let path = write_case("doc_export", src);
+    let s = path.to_string_lossy().to_string();
+    let out = run_cli(&["doc", &s]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("## Function: `pub_helper`"), "got:\n{stdout}");
+    assert!(stdout.contains("fn pub_helper(x: Int) -> Int"), "got:\n{stdout}");
+    assert!(stdout.contains("Public helper."), "got:\n{stdout}");
+    assert!(stdout.contains("## Struct: `Exported`"), "got:\n{stdout}");
+    assert!(stdout.contains("Exported point."), "got:\n{stdout}");
+    let file_label = path.file_name().unwrap().to_string_lossy().to_string();
+    assert_eq!(
+        stdout.matches(&format!("Declared in {file_label}.")).count(),
+        2,
+        "got:\n{stdout}"
+    );
+    cleanup(&path);
+}
