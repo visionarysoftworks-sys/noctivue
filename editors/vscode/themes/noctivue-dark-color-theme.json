@@ -9,6 +9,23 @@
     "editorCursor.foreground": "#66fcf1",
     "editorWhitespace.foreground": "#1f2833"
   },
+  "semanticHighlighting": true,
+  "semanticTokenColors": {
+    "keyword": "#c586c0",
+    "variable": "#9cdcfe",
+    "parameter": "#9cdcfe",
+    "function": "#dcdcaa",
+    "method": "#dcdcaa",
+    "type": "#4ec9b0",
+    "class": "#4ec9b0",
+    "struct": "#4ec9b0",
+    "enum": "#4ec9b0",
+    "interface": "#4ec9b0",
+    "namespace": "#4ec9b0",
+    "number": "#b5cea8",
+    "string": "#ce9178",
+    "comment": "#6a9955"
+  },
   "tokenColors": [
     {
       "scope": [

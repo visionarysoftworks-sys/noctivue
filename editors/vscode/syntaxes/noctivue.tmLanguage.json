@@ -148,6 +148,10 @@
     },
     {
       "name": "keyword.other.noctivue",
+      "match": "\\bderive\\b"
+    },
+    {
+      "name": "keyword.other.noctivue",
       "match": "\\benum\\b"
     },
     {

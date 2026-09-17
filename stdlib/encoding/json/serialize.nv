@@ -1,0 +1,14 @@
+//! encoding/json/serialize — marker traits for derived serialization.
+//!
+//! Status: runnable M4 surface (ADR-018). These traits have no
+//! members: they exist so `derive Serialize for T:` /
+//! `derive Deserialize for T:` name something real, and so the
+//! resolver's marker `impl` blocks verify against a declared trait.
+//! The actual `to_json_<T>` / `from_json_<T>` functions are
+//! synthesized by the resolver expansion, not written by hand.
+
+/// Marker: `T` converts to JSON text via `to_json_<T>`.
+trait Serialize:
+
+/// Marker: `T` decodes from a `JsonDoc` via `from_json_<T>`.
+trait Deserialize:

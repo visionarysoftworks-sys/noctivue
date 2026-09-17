@@ -68,12 +68,46 @@ names follow the suffix convention. snake_case fns, PascalCase types.
 ## 5. What remains (pick in order)
 
 1. Missing twins marked `[+Float]`/`[+String]`/`[+Bool]` in SPEC §5.
+   Twin conventions: the suffix `[+T]` on a free fn signature means the
+   function ships with a native variant for type `T` (e.g. `[+Float]` adds
+   a `Float` overload, `[+String]` adds a `String` overload). Shipped files
+   use the base name without suffix; the suffix is purely a SIGNFIER in the
+   source. Per SPEC §5.3 `int_eq` carries `[+Float, String, Bool, Char]`,
+   `int_lt` carries `[+Float]` only, `option_is_some` carries `[+String,
+   +Bool]`, and `list_len` carries `[+String, +Bool]`. New twins must be
+   added via SPEC amendment, not silently.
+
 2. Native-status tags (S3: `Native: yes`/`loop`/`needs-builtin`/`spec-only`)
-   on any fn missing one.
-3. More smoke asserts for thin spots (compare against SPEC §5 line by line).
-4. Reserved promotions ONLY with a SPEC amendment + gate updates in
+   on any fn missing one. Updated conventions for Phase 3 Step 2:
+   - `Native: yes` — straight-line, no control flow, safe for `noct build`.
+   - `Native: loop` — contains `while`/`for`/`break`/`continue`; runs
+     natively via `run` but `noct build` emits `unresolved callee` until
+     the VM/lowering lands (P-001 discipline).
+   - `needs-builtin: X` — requires a builtin that Phase 3 Step 2+ may
+     provide (e.g. `needs-builtin: list-push`, `needs-builtin: string-push`).
+   - `spec-only: <reason + phase>` — reserved for a future phase beyond
+     M3. Every public fn must carry exactly one S3 tag; missing tags trigger
+     a lint warning (L-002 family).
+
+3. Aggregate slot model (Phase 3 Step 2). The native backend now supports
+   a slot-based representation for aggregate values (`[T]` lists and `String`).
+   Key points:
+   - Lists `[T]` are lowered to a sequence of slot instructions; `.length`,
+     index `[i]`, and iteration are RUNNABLE natively.
+   - Strings are treated as `[Char]` slots; `string_len`, `string_char_at`,
+     and `==`/`+`/`interpolation` are all native.
+   - `needs-builtin: list-push` and `needs-builtin: string-push` are the
+     only Phase 3 Step 2+ additions that require runtime support; until those
+     builtins land, `noct build` over them fails loudly (same discipline as
+     `FuncId::UNRESOLVED`).
+   - Aggregate slots follow the `NvStr` one-pointer header model:
+     `list_push`, `string_push` lower to `ListPush {dst, list, elem, elem_ty}`
+     and `StringPush {dst, string, ch}` respectively.
+
+4. More smoke asserts for thin spots (compare against SPEC §5 line by line).
+5. Reserved promotions ONLY with a SPEC amendment + gate updates in
    `stdlib_test.rs` (FOUNDATION/RESERVED lists) — never silently.
-5. Differential coverage: SPEC §10 records VM-differential as blocked;
+6. Differential coverage: SPEC §10 records VM-differential as blocked;
    NATIVE differential is newly possible for straight-line + control-flow
    subsets (the backend learned branches recently) — high-value, discuss
    before building (shared target-dir rules apply — read

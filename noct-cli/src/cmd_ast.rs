@@ -149,6 +149,13 @@ fn item_to_json(item: &Item) -> String {
                 t.body.stmts.len()
             )
         }
+        Item::Derive(d) => {
+            format!(
+                "    {{\"kind\": \"Derive\", \"trait\": {}, \"target\": {}}}",
+                json_string(&d.trait_name),
+                json_string(&d.target)
+            )
+        }
         Item::Struct(s) => {
             let fields: Vec<String> = s
                 .fields

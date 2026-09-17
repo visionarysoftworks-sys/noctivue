@@ -168,6 +168,14 @@ pub fn collect_definitions(resolved: &Program) -> Vec<Definition> {
                 span: f.span.clone(),
                 detail: format!("fn {}(...)", f.name),
             }),
+            // Pre-expansion only (the resolver consumes derives);
+            // reachable via parse-only tooling.
+            Item::Derive(d) => defs.push(Definition {
+                name: d.target.clone(),
+                kind: DefinitionKind::Function,
+                span: d.span.clone(),
+                detail: format!("derive {} for {}", d.trait_name, d.target),
+            }),
             Item::Task(t) => defs.push(Definition {
                 name: t.name.clone(),
                 kind: DefinitionKind::Function,
@@ -371,7 +379,7 @@ pub fn get_completions(
     for kw in &[
         "fn", "struct", "enum", "const", "let", "var", "if", "else", "match", "while", "for",
         "loop", "return", "break", "continue", "import", "export", "mod", "use", "as", "trait",
-        "impl", "unsafe", "async", "await",
+        "impl", "unsafe", "async", "await", "task", "derive",
     ] {
         items.push(lsp_types::CompletionItem {
             label: (*kw).to_string(),
@@ -538,6 +546,8 @@ fn keyword_hover(name: &str) -> Option<HoverInfo> {
             "Declares a type alias: a new name for an existing type."),
         "const" => ("const NAME: Type = value",
             "Declares an immutable compile-time constant. Names use SCREAMING_CASE by convention."),
+        "derive" => ("derive Serialize|Deserialize for Type:",
+            "Derives JSON serialization for a struct (ADR-018). Expands at resolve time to `to_json_<Type>` / `from_json_<Type>` plus a marker impl; only `Serialize` and `Deserialize` for structs."),
         "mod" => ("mod name:",
             "Declares a module. Items are module-private unless marked `export`."),
         "export" => ("export ...",

@@ -80,8 +80,8 @@ developer extension with:
 cd editors/vscode
 npm install
 npm run compile
-npx vsce package --no-dependencies --out noctivue-0.0.5.vsix
-code --install-extension noctivue-0.0.5.vsix --force
+npx vsce package --no-dependencies --out noctivue-0.0.7.vsix
+code --install-extension noctivue-0.0.7.vsix --force
 ```
 
 Set `noctivue.lsp.serverPath` when the server is not in the extension's

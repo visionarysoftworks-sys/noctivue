@@ -421,6 +421,61 @@ fn sleep(ms: Int) -> Unit: sleep_builtin(ms)
 negative inputs panic. A non-blocking timer arrives with the async
 executor — this is the cooperative M4 floor, see CONCURRENCY.md §7.)
 
+### 5.13 `net/http/{request,response,client,server}.nv` — RUNNABLE (Phase 5/M4)
+
+Plaintext-HTTP client + handler-based server over `http_send_builtin`
+/ `http_server_*` (interpreter backend; `https://` is refused loudly
+— no TLS stack yet). Notable shape decisions forced by v1 language
+limits, all documented in the modules:
+
+```nv
+fn http_get(url: String) -> Result<String, String>
+fn http_post(url: String, body: String) -> Result<String, String>
+fn http_server_start(port: Int) -> Result<Int, String>
+fn http_server_serve(server: Int)   // blocks: run in a `task`
+```
+
+- Header pairs are `[[String]]` (2-lists), not tuples: tuple VALUES
+  are unimplemented (the parser keeps only the first element), so the
+  typeck signature and every surface spell pairs as 2-lists.
+- `http_send` cannot merge a caller Content-Type (no list-append
+  yet): the builtin supplies `text/plain` for bodies lacking one.
+- Handlers take the request BODY only; client calls return the
+  response body with no status visibility (M4 limits, documented).
+- `headers: [[String]]` struct fields parse via the nested-`[` gate
+  in `is_field_decl_ahead` (known-type-name must follow the inner
+  `[`, so `matrix: [[1, 2]]` values still parse as `Decl`).
+- `net/{address,socket,tcp,udp}.nv` stay `reserved` (raw sockets
+  need an ownership story first).
+
+### 5.14 `encoding/json/{serialize,document}.nv` + `derive` — RUNNABLE (Phase 5/M4, ADR-018)
+
+`derive Serialize for T:` / `derive Deserialize for T:` expand in
+the resolver to `to_json_<T>` / `from_json_<T>` plus a marker impl
+(the only macro-like facility: fixed expansion, closed trait set,
+never user-extensible in M4). Supporting surface, all runnable:
+
+```nv
+trait Serialize:            // encoding/json/serialize.nv (markers, no members)
+trait Deserialize:
+fn doc_get_char(doc: JsonDoc, key: String) -> Result<Char, String>
+fn doc_get_index(doc: JsonDoc, index: Int) -> Result<String, String>
+```
+
+- `doc_get_index` returns the element as TEXT (strings unquoted,
+  everything else rendered) so one accessor serves every element
+  type without bare-scalar getters.
+- `list_append_builtin` is the only list-growth primitive (P-001
+  tracks the general `push` decision); `string_concat` exists in
+  `strings/string.nv` as ADR-018 names it.
+- Requires `JsonDoc` + marker traits in scope (E0328 names the
+  file); `run-vm`/`build` fail loud (no `doc_*` lowering yet —
+  same pre-existing gap as the rest of the Phase-5 surface).
+- `value.nv` / `parser.nv` / `writer.nv` (validation, field
+  access, quoting) were already runnable and are covered by the
+  same §7 gates; `serializer.nv` (`json_serialize_builtin`
+  surface) stays as-is.
+
 ## 6. File states (normative)
 
 Every file under `stdlib/` MUST be in exactly one state:
@@ -487,8 +542,9 @@ Every file under `stdlib/` MUST be in exactly one state:
 naming; `list`/`iterator` lean on `option` (`list_get` returns
 `Option`); `strings` lean on `option` (`string_char_at`); `assertions`
 lean on both wrappers; `concurrency/task` leans on nothing (the
-`sleep_builtin` wrapper typechecks standalone). Reversing any edge is
-a spec amendment.
+`sleep_builtin` wrapper typechecks standalone); `net/http` leans on
+`strings`/`testing` only for its tests, otherwise on builtins.
+Reversing any edge is a spec amendment.
 
 ## 9. Reserved files (exact list — no other placeholders may exist)
 
@@ -502,7 +558,9 @@ reserved (M4+): collections/{map,set,stack,queue}.nv  [map/set: needs Map/Set va
               · core/{types,prelude}.nv [needs `type` aliases / real imports]
 reserved (M4/M5, untouched by this spec): concurrency/{atomic,channel,mutex,sync}.nv
                (`task.nv` promoted RUNNABLE by §5.12 — the rest need M5
-               sync primitives), fs/*, io/*,
+               sync primitives), net/{address,socket,tcp,udp}.nv
+               (`http/*` promoted RUNNABLE by §5.13 — raw sockets need
+               an ownership story first), fs/*, io/*,
               net/* (+http/*), env/*, process/*, time/*, numbers/*,
               encoding/*, result/result.nv extras beyond §5.5
 ```
@@ -781,3 +839,8 @@ phase lands, never pre-scaffolded.
   Recorded gaps (not fixed): nominal-generic field types,
   `()` value term, `use` statements; async pool multiplexing
   waits on the async runtime.
+
+## 10. Amendment log (future-proof)
+
+- FUTURE: any rename of a stdlib module or public API must be recorded in this log per ADR-017, with a summary of the change, the rationale, and the effective version. This log is the authoritative source for rename tracking; no rename is valid without an amendment entry.
+- FUTURE: placeholder entry above — to be filled when a rename occurs.

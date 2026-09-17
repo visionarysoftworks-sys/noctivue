@@ -433,6 +433,9 @@ fn collect_item_refs(item: &Item, refs: &mut HashSet<String>) {
             }
             collect_block_refs(&t.body, refs);
         }
+        // Derive decls name a trait + type only — no references to
+        // collect (expansion happens in the resolver, past lint).
+        Item::Derive(_) => {}
         Item::BareDecl(b) => collect_block_refs(&b.body, refs),
         Item::Struct(s) => {
             for _ in &s.generic_params {}

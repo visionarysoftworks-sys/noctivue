@@ -2,7 +2,7 @@
   "name": "noctivue",
   "displayName": "Noctivue",
   "description": "Language support for Noctivue (.nv files) - syntax highlighting, LSP, Outline",
-  "version": "0.0.5",
+  "version": "0.0.7",
   "publisher": "noctivue",
   "engines": {
     "vscode": "^1.80.0"

@@ -48,7 +48,7 @@ pub enum Token {
     Use, Var, While,
 
     // ── Type/system keywords (§7.2) ─────────────────────────────────────────
-    Enum, Fn, Impl, Struct, Trait, Type, Unsafe,
+    Derive, Enum, Fn, Impl, Struct, Trait, Type, Unsafe,
 
     // ── Memory/concurrency keywords (§7.3) ──────────────────────────────────
     Owned, Borrow, Managed, Weak, Unowned, Task,

@@ -70,6 +70,10 @@ pub enum Item {
     Trait(TraitDecl),
     /// Impl block (`impl …`). Always explicit.
     Impl(ImplBlock),
+    /// Derive declaration (`derive Serialize|Deserialize for Type:` —
+    /// Phase 5/M4, ADR-018). Always explicit; consumed by the resolver,
+    /// which expands it to synthesized functions plus a marker impl.
+    Derive(DeriveDecl),
     /// Constant declaration (`const …`). Always explicit.
     Const(ConstDecl),
     /// Module declaration (`mod …`).
@@ -128,6 +132,18 @@ pub struct TaskDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub body: Block,
+    pub span: Span,
+}
+
+/// A derive declaration (`derive Serialize for User:` — Phase 5/M4,
+/// ADR-018). Explicit form only: `trait_name` must be `Serialize` or
+/// `Deserialize`, `target` must name a struct. The trailing block is
+/// required by the form but must be empty (it reserves room for
+/// future per-derive settings without changing the shape).
+#[derive(Debug, Clone)]
+pub struct DeriveDecl {
+    pub trait_name: String,
+    pub target: String,
     pub span: Span,
 }
 

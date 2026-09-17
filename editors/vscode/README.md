@@ -62,6 +62,18 @@ setup.
 The detailed extension changelog is in
 [`CHANGELOG.md`](./CHANGELOG.md).
 
+### 0.0.7
+
+- Semantic tokens now come from the compiler lexer (exact
+  keyword/function/type/variable/string/number/comment spans) and the
+  Noctivue Dark theme defines `semanticTokenColors` for them.
+
+### 0.0.6
+
+- Fixed the server's missing `textDocument/semanticTokens/range`
+  handler (previously surfaced as `Method not found` in the LSP log)
+  and added `shutdown`/`exit` lifecycle handling.
+
 ### 0.0.5
 
 - Updated the LSP client/server contract for Phase 5/6 tooling:

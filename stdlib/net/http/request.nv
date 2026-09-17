@@ -1,16 +1,20 @@
 //! net/http — HTTP protocol primitives.
 //!
-//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5). This module
-//! defines the type-level vocabulary for HTTP requests and responses.
-//! The transport layer (net.http.client) provides send/receive; this
+//! Status: runnable M4 surface (SPEC.md §5.13). This module defines
+//! the type-level vocabulary for HTTP requests and responses. The
+//! transport layer (net.http.client) provides send/receive; this
 //! file is the shared vocabulary both sides depend on.
 //!
 //! No native builtins required — pure enum/struct definitions with
 //! accessor functions (C1: free functions only, no method-call syntax).
+//!
+//! Header pairs are `[[String]]` (lists of 2-lists): tuple VALUES are
+//! unimplemented (the parser keeps only the first element), so pairs
+//! are spelled as 2-lists everywhere, matching `http_send_builtin`.
 
 /// HTTP request methods (RFC 7231).
 /// Stringify via `http_method_string`.
-HttpMethod:
+enum HttpMethod:
     Get
     Post
     Put
@@ -20,15 +24,17 @@ HttpMethod:
     Options
 
 /// Render an HTTP method as its canonical string.
+/// Arms use the `Variant():` form — bare `Get:` would parse as a
+/// binding swallowing every method (the L-001 trap).
 fn http_method_string(m: HttpMethod) -> String:
     match m:
-        HttpMethod.Get(): "GET"
-        HttpMethod.Post(): "POST"
-        HttpMethod.Put(): "PUT"
-        HttpMethod.Delete(): "DELETE"
-        HttpMethod.Patch(): "PATCH"
-        HttpMethod.Head(): "HEAD"
-        HttpMethod.Options(): "OPTIONS"
+        Get(): "GET"
+        Post(): "POST"
+        Put(): "PUT"
+        Delete(): "DELETE"
+        Patch(): "PATCH"
+        Head(): "HEAD"
+        Options(): "OPTIONS"
 
 /// Parse a method string; returns None for unknown methods.
 fn http_method_from_string(s: String) -> Option<String>:
@@ -44,14 +50,14 @@ fn http_method_from_string(s: String) -> Option<String>:
 
 /// An HTTP request: method, URL, optional headers, optional body.
 HttpRequest:
-    method: String    // canonical method string ("GET", "POST", ...)
+    method: String
     url: String
-    headers: [(String, String)]
+    headers: [[String]]
     body: Option<String>
 
 /// An HTTP response: status code, reason phrase, headers, body.
 HttpResponse:
     status: Int
     reason: String
-    headers: [(String, String)]
+    headers: [[String]]
     body: String

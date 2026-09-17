@@ -300,9 +300,11 @@ vulnerability database (M5).
 
 ### ADR-018 — Narrowly-Scoped Derive for Serialization (Phase 5/M4)
 
-**Status:** Proposed (required by IMPLEMENTATION_PLAN.md Phase 5
-before serialization work: the derive scoping decision is recorded
-here, not in a general macro reopening).
+**Status:** Confirmed (implemented: `derive` keyword, resolver
+expansion to `to_json_<T>` / `from_json_<T>` + marker impl,
+`doc_get_char` / `doc_get_index` / `list_append_builtin`,
+E0320–E0328 diagnostics; `enum` targets and user-defined derives
+still deferred per the non-goals).
 
 **The constraint.** ROADMAP keeps general macros deferred, and the
 language has no attribute syntax, no method-call syntax, no Map

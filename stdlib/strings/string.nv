@@ -23,7 +23,7 @@ fn string_char_at(s: String, i: Int) -> Option<Char>:
         else:
             None
 
-/// String equality.
+/// String equality. [+String] Native: yes.
 fn string_eq(a: String, b: String) -> Bool:
     a == b
 

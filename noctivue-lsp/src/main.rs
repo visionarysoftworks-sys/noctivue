@@ -18,7 +18,7 @@ use compiler::analysis::{
 
 /// Bump on every behavior-changing server release so the `window/logMessage`
 /// beacon in the client's Output panel identifies the running binary.
-const SERVER_VERSION: &str = "0.0.5-phase6";
+const SERVER_VERSION: &str = "0.0.7-phase6";
 
 struct ServerState {
     connection: Connection,
@@ -148,6 +148,8 @@ impl ServerState {
             "workspace/symbol" => self.handle_workspace_symbols(req),
             "textDocument/formatting" => self.handle_formatting(req),
             "textDocument/semanticTokens/full" => self.handle_semantic_tokens(req),
+            "textDocument/semanticTokens/range" => self.handle_semantic_tokens_range(req),
+            "shutdown" => self.handle_shutdown(req),
             "textDocument/signatureHelp" => self.handle_signature_help(req),
             "textDocument/codeAction" => self.handle_code_action(req),
             _ => {
@@ -166,6 +168,7 @@ impl ServerState {
             "textDocument/didOpen" => self.handle_did_open(notif),
             "textDocument/didChange" => self.handle_did_change(notif),
             "textDocument/didClose" => self.handle_did_close(notif),
+            "exit" => std::process::exit(0),
             _ => {}
         }
         Ok(())
@@ -411,6 +414,25 @@ impl ServerState {
         let _ = self.connection.sender.send(Message::Response(Response::new_ok(req.id, serde_json::to_value(result).unwrap())));
     }
 
+    fn handle_semantic_tokens_range(&mut self, req: Request) {
+        let params: SemanticTokensRangeParams = match serde_json::from_value(req.params) {
+            Ok(p) => p,
+            Err(e) => { self.send_error(req.id, format!("Invalid semantic token range params: {e}")); return; }
+        };
+        let uri = params.text_document.uri;
+        let range = params.range;
+        let data = self.text_at(&uri).map(|text| semantic_tokens_in_range(text, range)).unwrap_or_default();
+        let result = SemanticTokensRangeResult::Tokens(SemanticTokens { result_id: None, data });
+        let _ = self.connection.sender.send(Message::Response(Response::new_ok(req.id, serde_json::to_value(result).unwrap())));
+    }
+
+    fn handle_shutdown(&mut self, req: Request) {
+        let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+            req.id,
+            serde_json::Value::Null,
+        )));
+    }
+
     fn handle_signature_help(&mut self, req: Request) {
         let params: SignatureHelpParams = match serde_json::from_value(req.params) {
             Ok(p) => p,
@@ -500,29 +522,167 @@ fn document_symbols(text: &str) -> Vec<DocumentSymbol> {
     }).collect()
 }
 
-fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
-    let keywords = ["fn", "struct", "enum", "trait", "impl", "let", "var", "if", "else", "for", "in", "match", "return", "import", "export", "async", "await"];
-    let mut tokens = Vec::new();
-    let mut previous_line = 0u32;
-    let mut previous_start = 0u32;
-    for (line_no, line) in text.lines().enumerate() {
-        for (offset, word) in line.split_whitespace().scan(0usize, |state, part| {
-            let start = line[*state..].find(part).unwrap_or(0) + *state;
-            *state = start + part.len();
-            Some((start, part))
-        }) {
-            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-            let token_type = if keywords.contains(&clean) { 4 } else if clean.chars().all(|c| c.is_ascii_digit()) { 6 } else { 3 };
-            let current_line = line_no as u32;
-            let current_start = offset as u32;
-            let delta_line = current_line - previous_line;
-            let delta_start = if delta_line == 0 { current_start - previous_start } else { current_start };
-            tokens.push(SemanticToken { delta_line, delta_start, length: clean.len() as u32, token_type, token_modifiers_bitset: 0 });
-            previous_line = current_line;
-            previous_start = current_start;
+struct AbsoluteToken {
+    line: u32,
+    start: u32,
+    length: u32,
+    token_type: u32,
+}
+
+fn absolute_tokens(text: &str) -> Vec<AbsoluteToken> {
+    use compiler::lexer::Token;
+
+    // Lex with the real compiler frontend so token boundaries and kinds are
+    // exact. Anything the lexer cannot classify (operators, punctuation) is
+    // deliberately left without a semantic token so the TextMate grammar
+    // keeps painting it.
+    let mut sink = compiler::diagnostics::DiagnosticSink::new();
+    let spanned = compiler::lexer::lex(text, &mut sink);
+
+    // Byte offset of the start of every line.
+    let mut line_starts = vec![0usize];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
         }
     }
+
+    let mut tokens = Vec::new();
+    for st in &spanned {
+        let token_type = match &st.node {
+            Token::Indent | Token::Dedent | Token::Newline | Token::Eof => continue,
+            // Core (§7.1), type/system (§7.2), memory (§7.3) and reserved (§7.4)
+            // keywords all render as `keyword` (legend index 4).
+            Token::As | Token::Async | Token::Await | Token::Break | Token::Const
+            | Token::Continue | Token::Else | Token::Export | Token::For | Token::If
+            | Token::Import | Token::In | Token::Let | Token::Loop | Token::Match
+            | Token::Mod | Token::Return | Token::Use | Token::Var | Token::While
+            | Token::Derive | Token::Enum | Token::Fn | Token::Impl | Token::Struct
+            | Token::Trait | Token::Type | Token::Unsafe | Token::Owned
+            | Token::Borrow | Token::Managed | Token::Weak | Token::Unowned
+            | Token::Task | Token::Actor | Token::Defer | Token::Extern
+            | Token::Macro | Token::Native | Token::Operator | Token::Protocol
+            | Token::Reflect | Token::Spawn | Token::Static | Token::Where
+            | Token::Yield | Token::True | Token::False | Token::BoolLit(_) => 4,
+            Token::Ident(name) => {
+                let is_type = name.chars().next().is_some_and(|c| c.is_uppercase());
+                // Function when the identifier is applied: the next non-blank
+                // character on the same line is `(`. Covers both definitions
+                // (`fn add(`) and calls (`println(`/ `obj.method(`).
+                let mut is_call = false;
+                if !is_type {
+                    if let Some(rest) = text.get(st.span.end.min(text.len())..) {
+                        let mut chars = rest.chars();
+                        while matches!(chars.clone().next(), Some(' ' | '\t')) {
+                            chars.next();
+                        }
+                        is_call = matches!(chars.next(), Some('('));
+                    }
+                }
+                if is_call {
+                    2
+                } else if is_type {
+                    1
+                } else {
+                    3
+                }
+            }
+            Token::IntLit(_) | Token::FloatLit(_) => 6,
+            Token::CharLit(_)
+            | Token::StringLit(_)
+            | Token::InterpStart(_)
+            | Token::InterpMiddle(_)
+            | Token::InterpEnd(_) => 5,
+            Token::LineComment(_)
+            | Token::BlockComment(_)
+            | Token::DocComment(_)
+            | Token::ModDocComment(_) => 7,
+            // Operators & punctuation: no semantic token (TextMate paints them).
+            _ => continue,
+        };
+        push_span_fragments(text, &line_starts, st.span.start, st.span.end, token_type, &mut tokens);
+    }
     tokens
+}
+
+/// Emit one [`AbsoluteToken`] per line covered by the byte range
+/// `[start, end)`. Semantic tokens must not span lines, so block comments
+/// and multi-line strings are split into per-line fragments.
+fn push_span_fragments(
+    text: &str,
+    line_starts: &[usize],
+    start: usize,
+    end: usize,
+    token_type: u32,
+    out: &mut Vec<AbsoluteToken>,
+) {
+    let start = start.min(text.len());
+    let end = end.min(text.len()).max(start);
+    if end == start {
+        return;
+    }
+    let mut line = line_starts.partition_point(|&s| s <= start) - 1;
+    while line < line_starts.len() && line_starts[line] < end {
+        let line_end = if line + 1 < line_starts.len() {
+            line_starts[line + 1] - 1 // exclude the '\n'
+        } else {
+            text.len()
+        };
+        let seg_start = start.max(line_starts[line]);
+        let seg_end = end.min(line_end);
+        if seg_end > seg_start {
+            out.push(AbsoluteToken {
+                line: line as u32,
+                start: (seg_start - line_starts[line]) as u32,
+                length: (seg_end - seg_start) as u32,
+                token_type,
+            });
+        }
+        line += 1;
+    }
+}
+
+fn encode_tokens(absolute: &[AbsoluteToken]) -> Vec<SemanticToken> {
+    let mut tokens = Vec::with_capacity(absolute.len());
+    let mut previous_line = 0u32;
+    let mut previous_start = 0u32;
+    for (i, tok) in absolute.iter().enumerate() {
+        let (delta_line, delta_start) = if i == 0 {
+            (tok.line, tok.start)
+        } else {
+            let dl = tok.line - previous_line;
+            let ds = if dl == 0 { tok.start - previous_start } else { tok.start };
+            (dl, ds)
+        };
+        tokens.push(SemanticToken { delta_line, delta_start, length: tok.length, token_type: tok.token_type, token_modifiers_bitset: 0 });
+        previous_line = tok.line;
+        previous_start = tok.start;
+    }
+    tokens
+}
+
+fn semantic_tokens(text: &str) -> Vec<SemanticToken> {
+    encode_tokens(&absolute_tokens(text))
+}
+
+fn semantic_tokens_in_range(text: &str, range: Range) -> Vec<SemanticToken> {
+    let all = absolute_tokens(text);
+    let filtered: Vec<AbsoluteToken> = all
+        .into_iter()
+        .filter(|tok| {
+            if tok.line < range.start.line || tok.line > range.end.line {
+                return false;
+            }
+            if tok.line == range.start.line && tok.start + tok.length <= range.start.character {
+                return false;
+            }
+            if tok.line == range.end.line && tok.start >= range.end.character {
+                return false;
+            }
+            true
+        })
+        .collect();
+    encode_tokens(&filtered)
 }
 
 fn main() -> Result<()> {

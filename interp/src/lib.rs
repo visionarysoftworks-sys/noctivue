@@ -646,6 +646,7 @@ impl Interpreter {
                 | "to_float"
                 | "panic"
                 | "assert"
+                | "list_append_builtin"
                 | "sleep_builtin"
                 | "run"
                 | "fs_read_text"
@@ -674,6 +675,8 @@ impl Interpreter {
                 | "doc_get_int_builtin"
                 | "doc_get_float_builtin"
                 | "doc_get_bool_builtin"
+                | "doc_get_char_builtin"
+                | "doc_get_index_builtin"
                 | "doc_has_builtin"
                 | "doc_get_doc_builtin"
                 | "doc_len_builtin"
@@ -1044,6 +1047,59 @@ impl Interpreter {
                     "doc_get_bool_builtin: expected handle Int and key String".to_string(),
                 )))))),
             },
+            // Phase 5/M4 (ADR-018): JSON has no char type — a
+            // one-character string decodes; anything else is a
+            // mistyped value like the rest of the `doc_field` family.
+            "doc_get_char_builtin" => match (args.first(), args.get(1)) {
+                (Some(Value::Int(id)), Some(Value::String(key))) => Some(Ok(Value::Result(
+                    self.doc_field(&Value::Int(*id), key, "a char", |dom| match dom {
+                        JsonDom::Str(s) if s.chars().count() == 1 => {
+                            s.chars().next().map(Value::Char)
+                        }
+                        _ => None,
+                    }),
+                ))),
+                _ => Some(Ok(Value::Result(Err(Box::new(Value::String(
+                    "doc_get_char_builtin: expected handle Int and key String".to_string(),
+                )))))),
+            },
+            // Phase 5/M4 (ADR-018): array element access for derived
+            // `List<T>` decoding. Returns the element as TEXT (strings
+            // unquoted, everything else rendered) so one accessor
+            // serves every element type without bare-scalar getters.
+            "doc_get_index_builtin" => match (args.first(), args.get(1)) {
+                (Some(Value::Int(id)), Some(Value::Int(index))) => {
+                    let result = (|| -> std::result::Result<Box<Value>, Box<Value>> {
+                        let registry = self.json_docs.borrow();
+                        let dom = registry.docs.get(&(*id as u64)).ok_or_else(|| {
+                            Box::new(Value::String("unknown document handle".to_string()))
+                        })?;
+                        let items = match dom {
+                            JsonDom::Arr(items) => items,
+                            _ => {
+                                return Err(Box::new(Value::String(
+                                    "document is not an array (has no elements)".to_string(),
+                                )))
+                            }
+                        };
+                        if *index < 0 || (*index as usize) >= items.len() {
+                            return Err(Box::new(Value::String(format!(
+                                "array index {index} out of bounds (length {})",
+                                items.len()
+                            ))));
+                        }
+                        let text = match &items[*index as usize] {
+                            JsonDom::Str(s) => s.clone(),
+                            other => render_json_dom(other),
+                        };
+                        Ok(Box::new(Value::String(text)))
+                    })();
+                    Some(Ok(Value::Result(result)))
+                }
+                _ => Some(Ok(Value::Result(Err(Box::new(Value::String(
+                    "doc_get_index_builtin: expected handle Int and index Int".to_string(),
+                )))))),
+            },
             "doc_has_builtin" => match (args.first(), args.get(1)) {
                 (Some(Value::Int(id)), Some(Value::String(key))) => {
                     let present = self
@@ -1271,31 +1327,42 @@ impl Interpreter {
                         let (host, port, path) = parse_http_url(url).ok_or_else(|| {
                             format!("unsupported URL scheme (expected http://): {url}")
                         })?;
-                        let mut req = format!(
-                            "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n",
-                            method, path, host, port
-                        );
+                        // Collect header pairs first: the `.nv` surface
+                        // spells pairs as 2-lists (tuple values are
+                        // unimplemented — see the `http_send_builtin`
+                        // typeck signature note).
+                        let mut pairs: Vec<(String, String)> = Vec::new();
                         for header in headers {
                             if let Value::List(pair) = header {
                                 if pair.len() == 2 {
                                     if let (Value::String(k), Value::String(v)) =
                                         (&pair[0], &pair[1])
                                     {
-                                        req.push_str(&format!("{k}: {v}\r\n"));
+                                        pairs.push((k.clone(), v.clone()));
                                     }
                                 }
                             }
                         }
-                        req.push_str("\r\n");
-                        if !body.is_empty() {
-                            req.push_str(&format!(
-                                "Content-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            ));
-                        } else {
-                            req.push_str("\r\n");
+                        // Default Content-Type for bodies: the language
+                        // has no list-append yet, so callers cannot merge
+                        // one in — the builtin supplies it when absent.
+                        if !body.is_empty()
+                            && !pairs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                        {
+                            pairs.push(("Content-Type".to_string(), "text/plain".to_string()));
                         }
+                        let mut req = format!(
+                            "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n",
+                            method, path, host, port
+                        );
+                        for (k, v) in &pairs {
+                            req.push_str(&format!("{k}: {v}\r\n"));
+                        }
+                        if !body.is_empty() {
+                            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                        }
+                        req.push_str("\r\n");
+                        req.push_str(body);
                         let mut conn = std::net::TcpStream::connect((host.as_str(), port))
                             .map_err(|e| format!("connection failed: {e}"))?;
                         std::io::Write::write_all(&mut conn, req.as_bytes())
@@ -1420,10 +1487,13 @@ impl Interpreter {
                                         drop(registry);
                                         let resp = match matched_handler {
                                             Some(handler_name) => {
-                                                // Look up the handler function and invoke it
-                                                // with the request body, using the return value
-                                                // as the response body.
-                                                let body_str = String::from_utf8_lossy(&buf[..n]).to_string();
+                                                // Handlers take the request BODY
+                                                // (see `http_server_route` docs),
+                                                // not the raw request text.
+                                                let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                                                let body_str = split_http_body(raw.as_bytes())
+                                                    .unwrap_or_default()
+                                                    .to_string();
                                                 let handler_args = [Value::String(body_str)];
                                                 let handler_result = self.eval_function(
                                                     &handler_name,
@@ -1488,6 +1558,21 @@ impl Interpreter {
                 Some(Value::Float(f)) => Some(Ok(Value::Float(*f))),
                 Some(Value::Int(n)) => Some(Ok(Value::Float(*n as f64))),
                 _ => Some(Ok(Value::Option(None))),
+            },
+            // Phase 5/M4 (ADR-018): the only list-growth primitive.
+            // The language has no `push` syntax and `+` panics on
+            // lists (P-001 tracks the general decision); derived
+            // `List<T>` decoding needs exactly this shape, so it ships
+            // narrowly as a builtin. Pure: returns a NEW list.
+            "list_append_builtin" => match (args.first(), args.get(1)) {
+                (Some(Value::List(items)), Some(value)) => {
+                    let mut out = items.clone();
+                    out.push(value.clone());
+                    Some(Ok(Value::List(out)))
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "list_append_builtin: expected list and value".to_string(),
+                ))),
             },
             // Phase 5/M4: cooperative blocking sleep for tasks and
             // `main`. Real wall-clock block (this is the M4 floor —
@@ -2970,16 +3055,15 @@ fn parse_json_value(text: &str) -> Result<((), &str), String> {
 }
 
 fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
+    // Plain HTTP only: there is no TLS stack, so `https://` is
+    // refused (None) rather than failing opaquely mid-handshake.
+    if url.strip_prefix("https://").is_some() {
+        return None;
+    }
     if let Some(rest) = url.strip_prefix("http://") {
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         let path = format!("/{}", path);
         let (host, port_str) = authority.split_once(':').unwrap_or((authority, "80"));
-        let port: u16 = port_str.parse().ok()?;
-        Some((host.to_string(), port, path))
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let path = format!("/{}", path);
-        let (host, port_str) = authority.split_once(':').unwrap_or((authority, "443"));
         let port: u16 = port_str.parse().ok()?;
         Some((host.to_string(), port, path))
     } else {

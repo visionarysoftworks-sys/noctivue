@@ -966,6 +966,7 @@ fn keyword_or_ident(s: &str) -> Token {
         "while"    => Token::While,
 
         // §7.2 Type/system keywords
+        "derive" => Token::Derive,
         "enum"   => Token::Enum,
         "fn"     => Token::Fn,
         "impl"   => Token::Impl,

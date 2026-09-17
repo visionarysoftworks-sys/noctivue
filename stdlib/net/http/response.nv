@@ -1,6 +1,6 @@
 //! net/http/response — HTTP response helpers.
 //!
-//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5).
+//! Status: runnable M4 surface (SPEC.md §5.13).
 //! Parses and builds HTTP response strings. Depends on the
 //! `HttpResponse` struct from `net/http/request.nv`.
 

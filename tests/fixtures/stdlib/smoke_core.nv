@@ -39,7 +39,32 @@ main():
     assert_true(float_lt(1.5, 2.5), "float lt")
     assert_true(int_lt(2, 1) == false, "int lt false")
 
-    // option
+    // [+Float] float ordering edge cases
+    assert_true(float_eq(0.0, 0.0), "float zero eq")
+    assert_true(float_lt(-1.5, 1.5), "float lt negative")
+    assert_true(float_lt(1.5, -1.5) == false, "float lt false negative")
+    assert_true(float_eq(-3.14, -3.14), "float negative eq")
+    assert_true(float_lt(-5.0, -1.0), "float lt both negative")
+    assert_true(float_lt(-1.0, -5.0) == false, "float lt false both negative")
+
+// [+String] string conversion: test option_is_some_string with valid strings
+    assert_true(option_is_some_string(Some("0")), "string \"0\"")
+    assert_true(option_is_some_string(Some("-42")), "string \"-42\"")
+    assert_true(option_is_some_string(Some("0.0")), "string \"0.0\"")
+    assert_true(option_is_some_string(Some("-1.5")), "string \"-1.5\"")
+    assert_true(option_is_some_string(Some(".5")), "string \".5\"")
+    assert_true(option_is_some_string(Some("+42")), "string \"+42\"")
+
+    // validate float strings via string_to_float match (returns Option<Float>)
+    // interpreter accepts "inf" and "nan" as float strings
+    match string_to_float("inf"):
+        Some(_): assert(true, "")
+        None: assert(false, "inf should parse as float")
+    match string_to_float("nan"):
+        Some(_): assert(true, "")
+        None: assert(false, "nan should parse as float")
+
+    // option [+String, +Bool] twins (Option<Int>)
     assert_true(option_is_some(Some(3)), "some int")
     assert_true(option_is_some(None) == false, "none int")
     assert_true(option_is_some_string(Some("hi")), "some string")
@@ -50,7 +75,7 @@ main():
     assert_int_eq(option_expect(option_map_int(smoke_double, Some(21)), m), 42)
     assert_true(option_is_some(option_map_int(smoke_double, None)) == false, "map none")
 
-    // result
+    // result [+String-ok] twins
     assert_true(result_is_ok(Ok(1)), "ok is ok")
     assert_true(result_is_ok(Err("bad")) == false, "err not ok")
     assert_true(result_is_ok_string(Ok("hi")), "string ok")
@@ -109,6 +134,46 @@ main():
     assert_int_eq(lcm(12, 18), 36)
     assert_int_eq(lcm(0, 5), 0)
     assert_int_eq(lcm(7, 0), 0)
+
+    // [+Float] float compare negative/zero boundary (direct Float comparisons)
+    assert_true(float_eq(-0.0, -0.0), "float -0 eq")
+    assert_true(int_lt(-5, -3), "int lt negative")
+    assert_true(int_lt(-3, -5) == false, "int lt false negative")
+    assert_true(float_lt(-5.0, -3.0), "float lt negative")
+
+    // [+String] string containment and prefix/suffix edge cases
+    assert_true(string_contains("abc", "b"), "mid char")
+    assert_true(string_contains("abc", "a"), "start char")
+    assert_true(string_contains("abc", "c"), "end char")
+    assert_true(string_contains("abc", "d") == false, "missing char")
+    assert_true(string_starts_with("abc", "ab"), "prefix full")
+    assert_true(string_starts_with("abc", "a"), "prefix one")
+    assert_true(string_starts_with("abc", "") == true, "empty prefix")
+    assert_true(string_starts_with("abc", "b") == false, "prefix wrong")
+    assert_true(string_ends_with("abc", "bc"), "suffix full")
+    assert_true(string_ends_with("abc", "c"), "suffix one")
+    assert_true(string_ends_with("abc", "") == true, "empty suffix")
+
+    // [+String] string index and char at
+    assert_int_eq(option_expect(string_index_of("hello", "ell"), m), 1)
+    assert_int_eq(option_expect(string_index_of("hello", ""), m), 0)
+    assert_true(option_is_some(string_index_of("hello", "x")) == false, "index missing")
+    match string_char_at("hello", 1):
+        Some(c): assert_true(char_eq(c, 'e'), "char at 1")
+        None: assert(false, "char_at oob surprise")
+    match string_char_at("hello", 10):
+        Some(_): assert(false, "char_at oob gave Some")
+        None: assert(true, "")
+
+    // [+String] string length
+    assert_int_eq(string_len("hello"), 5)
+    assert_int_eq(string_len(""), 0)
+    assert_int_eq(string_len("a"), 1)
+
+    // [+Float] float compare with pi/tau/e boundaries (direct Float)
+    assert_true(float_lt(pi(), 4.0), "pi < 4")
+    assert_true(float_lt(tau(), 7.0), "tau < 7")
+    assert_true(float_lt(e_const(), 3.0), "e < 3")
 
     println("core: {int_to_string(gcd(12, 18))}")
     println("core: {int_to_string(pow_int(2, 10))}")

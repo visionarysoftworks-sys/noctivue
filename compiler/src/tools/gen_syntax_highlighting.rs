@@ -14,7 +14,7 @@ fn main() {
     ];
 
     let type_keywords = [
-        "enum", "fn", "impl", "struct", "trait", "type", "unsafe",
+        "derive", "enum", "fn", "impl", "struct", "trait", "type", "unsafe",
     ];
 
     let memory_keywords = [

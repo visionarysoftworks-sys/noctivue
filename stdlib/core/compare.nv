@@ -28,3 +28,7 @@ fn int_lt(a: Int, b: Int) -> Bool:
 /// Float less-than.
 fn float_lt(a: Float, b: Float) -> Bool:
     a < b
+
+/// Float less-than-or-equal. [+Float] Native: yes.
+fn float_le(a: Float, b: Float) -> Bool:
+    a <= b

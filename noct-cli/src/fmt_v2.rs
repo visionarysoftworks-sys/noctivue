@@ -528,6 +528,13 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx, suffix: &str) -> Vec<Strin
         }
         Item::Function(f) => print_function_decl(f, level, cx, true, ""),
         Item::Task(t) => print_task_decl(t, level, cx),
+        // Derive decls print in the exact ADR-018 source form (empty
+        // block is load-bearing: the parser rejects a non-empty one).
+        Item::Derive(d) => vec![indent_lines(
+            &format!("derive {} for {}:", d.trait_name, d.target),
+            level,
+        )],
+        Item::Task(t) => print_task_decl(t, level, cx),
         Item::Struct(s) => {
             let mut v = vec![indent_lines(
                 &format!("struct {}{}:", s.name, print_generics(&s.generic_params)),
@@ -638,6 +645,7 @@ fn item_span(item: &Item) -> compiler::diagnostics::Span {
         Item::BareDecl(b) => b.span.clone(),
         Item::Function(f) => f.span.clone(),
         Item::Task(t) => t.span.clone(),
+        Item::Derive(d) => d.span.clone(),
         Item::Struct(s) => s.span.clone(),
         Item::Enum(e) => e.span.clone(),
         Item::Trait(t) => t.span.clone(),
@@ -1440,6 +1448,12 @@ fn ast_eq_item(a: &Item, b: &Item) -> bool {
                 && ast_eq_block(&x.body, &y.body)
         }
         (Item::Function(x), Item::Function(y)) => ast_eq_function(x, y),
+        (Item::Task(x), Item::Task(y)) => {
+            x.name == y.name && ast_eq_params(&x.params, &y.params) && ast_eq_block(&x.body, &y.body)
+        }
+        (Item::Derive(x), Item::Derive(y)) => {
+            x.trait_name == y.trait_name && x.target == y.target
+        }
         (Item::Task(x), Item::Task(y)) => {
             x.name == y.name
                 && ast_eq_params(&x.params, &y.params)

@@ -78,6 +78,13 @@ impl<'a> Parser<'a> {
             .unwrap_or(&Token::Eof)
     }
 
+    fn peek5(&self) -> &Token {
+        self.tokens
+            .get(self.pos + 4)
+            .map(|s| &s.node)
+            .unwrap_or(&Token::Eof)
+    }
+
     fn current_span(&self) -> Span {
         self.peek_spanned().span.clone()
     }
@@ -243,6 +250,7 @@ impl<'a> Parser<'a> {
             }
             Token::Fn => Some(Item::Function(self.parse_fn_decl()?)),
             Token::Task => Some(Item::Task(self.parse_task_decl()?)),
+            Token::Derive => Some(Item::Derive(self.parse_derive_decl()?)),
             Token::Struct => Some(Item::Struct(self.parse_struct_decl()?)),
             Token::Enum => Some(Item::Enum(self.parse_enum_decl()?)),
             Token::Trait => Some(Item::Trait(self.parse_trait_decl()?)),
@@ -1029,6 +1037,19 @@ impl<'a> Parser<'a> {
             Token::Match => self.parse_match_stmt().map(Stmt::Match),
             Token::Fn => self.parse_fn_decl().map(|f| Stmt::Function(f)),
             Token::Task => self.parse_task_decl().map(|t| Stmt::Task(t)),
+            // ADR-018 allows exactly one derive form (top level only):
+            // a `derive` inside a block is a loud error, not an expr.
+            Token::Derive => {
+                let span = self.current_span();
+                self.sink.emit(
+                    Diagnostic::error(
+                        "`derive` is only allowed at the top level of a file",
+                    )
+                    .with_span(span, "here")
+                    .with_code("E0100"),
+                );
+                None
+            }
             Token::Struct => self.parse_struct_decl().map(|s| Stmt::Struct(s)),
             Token::DocComment(_) | Token::LineComment(_) | Token::BlockComment(_) => {
                 self.advance();
@@ -1129,7 +1150,19 @@ impl<'a> Parser<'a> {
         match self.peek3() {
             Token::Ident(ref name) => self.known_types.contains(name.as_str()),
             Token::LParen => true,
-            Token::LBracket => matches!(self.peek4(), Token::Ident(_) | Token::LParen),
+            Token::LBracket => match self.peek4() {
+                Token::Ident(_) | Token::LParen => true,
+                // Nested collection type (`headers: [[String]]`): only
+                // when a known type name follows the inner `[`, so a
+                // `matrix: [[1, 2]]` list VALUE still parses as a Decl
+                // statement instead of a mistyped field.
+                Token::LBracket => match self.peek5() {
+                    Token::Ident(ref name) => self.known_types.contains(name.as_str()),
+                    Token::LParen => true,
+                    _ => false,
+                },
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -1212,6 +1245,36 @@ impl<'a> Parser<'a> {
             name,
             params,
             body,
+            span: Span { start, end },
+        })
+    }
+
+    /// Parse a derive declaration `derive Serialize for User:` into a
+    /// `DeriveDecl` (Phase 5/M4, ADR-018). The trailing block is part
+    /// of the form but must be empty — anything inside is a loud
+    /// error, not silently ignored settings.
+    fn parse_derive_decl(&mut self) -> Option<DeriveDecl> {
+        let start = self.current_span().start;
+        self.expect(&Token::Derive)?;
+        let trait_name = self.parse_ident()?;
+        self.expect(&Token::For)?;
+        let target = self.parse_ident()?;
+        let body = self.parse_colon_block()?;
+        let end = body.span.end;
+        if !body.stmts.is_empty() {
+            let span = body.span.clone();
+            self.sink.emit(
+                Diagnostic::error(
+                    "`derive` blocks take no body: write `derive Serialize for Type:` with an empty block",
+                )
+                .with_span(span, "here")
+                .with_code("E0100"),
+            );
+            return None;
+        }
+        Some(DeriveDecl {
+            trait_name,
+            target,
             span: Span { start, end },
         })
     }

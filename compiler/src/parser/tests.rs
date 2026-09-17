@@ -426,4 +426,17 @@ fn task_decl_no_parens_and_local() {
     assert_eq!(item_count(&prog), 1);
 }
 
+#[test]
+fn nested_list_field_vs_list_value() {
+    // `headers: [[String]]` is a struct field (known type behind the
+    // inner `[`); `matrix: [[1, 2]]` is a Decl with a list value.
+    let prog = parse_clean("S:\n    headers: [[String]]\n");
+    match &prog.items[0] {
+        Item::BareDecl(b) => assert_eq!(b.body.stmts.len(), 1),
+        other => panic!("expected BareDecl, got {:?}", other),
+    }
+    let prog = parse_clean("fn main():\n    matrix: [[1, 2]]\n");
+    assert_eq!(item_count(&prog), 1);
+}
+
 

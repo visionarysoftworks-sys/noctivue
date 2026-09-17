@@ -102,6 +102,16 @@ impl<'s> TypeChecker<'s> {
         // Phase 5/M4: cooperative blocking sleep (milliseconds).
         tc.fn_sigs
             .insert("sleep_builtin".to_string(), (vec![Ty::Int], Ty::Unit));
+        // Phase 5/M4 (ADR-018): list growth for derived decoding.
+        // `Unknown` is compatible with every element type, so one
+        // signature serves all `T` without generics.
+        tc.fn_sigs.insert(
+            "list_append_builtin".to_string(),
+            (
+                vec![Ty::List(Box::new(Ty::Unknown)), Ty::Unknown],
+                Ty::List(Box::new(Ty::Unknown)),
+            ),
+        );
         tc.fn_sigs
             .insert("run".to_string(), (vec![Ty::Unknown], Ty::Unit));
         tc.fn_sigs
@@ -185,7 +195,13 @@ impl<'s> TypeChecker<'s> {
                 vec![
                     Ty::String,
                     Ty::String,
-                    Ty::List(Box::new(Ty::Tuple(vec![Ty::String, Ty::String]))),
+                    // Header pairs are lists-of-2-lists (`[[String]]`):
+                    // tuple VALUES are unimplemented (the parser keeps
+                    // only the first element), so the `.nv` surface
+                    // spells pairs as 2-lists, matching what the
+                    // builtin matches on at runtime.
+                    Ty::List(Box::new(Ty::List(Box::new(Ty::String)))),
+                    Ty::String,
                 ],
                 Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
@@ -295,6 +311,22 @@ impl<'s> TypeChecker<'s> {
             (
                 vec![Ty::Int, Ty::String],
                 Ty::Result(Box::new(Ty::Bool), Box::new(Ty::String)),
+            ),
+        );
+        // Phase 5/M4 (ADR-018): char field decode + array element
+        // text for derived `List<T>` decoding.
+        tc.fn_sigs.insert(
+            "doc_get_char_builtin".to_string(),
+            (
+                vec![Ty::Int, Ty::String],
+                Ty::Result(Box::new(Ty::Char), Box::new(Ty::String)),
+            ),
+        );
+        tc.fn_sigs.insert(
+            "doc_get_index_builtin".to_string(),
+            (
+                vec![Ty::Int, Ty::Int],
+                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
         );
         tc.fn_sigs.insert(

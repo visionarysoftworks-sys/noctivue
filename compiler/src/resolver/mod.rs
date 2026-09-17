@@ -11,6 +11,7 @@
 //! - Trait resolution: collect trait declarations and verify impl blocks.
 
 pub mod classify;
+pub mod derive;
 
 #[cfg(test)]
 mod tests;
@@ -119,8 +120,12 @@ pub fn resolve(program: Program, sink: &mut DiagnosticSink) -> Program {
         })
         .collect();
 
-    Program {
+    // ── Step 4: expand `derive` declarations (ADR-018) ───────────────────
+    // Runs on the classified program so targets resolve to structs;
+    // consumes `Item::Derive` and appends ordinary items.
+    let classified = Program {
         imports: program.imports,
         items: new_items,
-    }
+    };
+    derive::expand_derives(classified, sink)
 }

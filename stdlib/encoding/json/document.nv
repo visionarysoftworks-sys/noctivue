@@ -1,4 +1,3 @@
-
 //! encoding/json/document — parsed JSON documents as first-class values.
 //!
 //! Status: runnable M4 surface. A `JsonDoc` is an opaque handle over a
@@ -44,6 +43,17 @@ fn doc_get_float(doc: JsonDoc, key: String) -> Result<Float, String>:
 /// Read a boolean field.
 fn doc_get_bool(doc: JsonDoc, key: String) -> Result<Bool, String>:
     doc_get_bool_builtin(doc.id, key)
+
+/// Read a char field (JSON has no char type: a one-character
+/// string decodes; anything else is a mistyped value).
+fn doc_get_char(doc: JsonDoc, key: String) -> Result<Char, String>:
+    doc_get_char_builtin(doc.id, key)
+
+/// Read one array element as text (strings unquoted, everything
+/// else rendered). Out-of-bounds and non-arrays are errors.
+/// The text channel behind derived `List<T>` decoding (ADR-018).
+fn doc_get_index(doc: JsonDoc, index: Int) -> Result<String, String>:
+    doc_get_index_builtin(doc.id, index)
 
 /// True when an object has `key` (false for unknown handles too —
 /// presence probes must not fail).

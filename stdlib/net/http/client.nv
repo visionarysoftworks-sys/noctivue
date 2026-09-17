@@ -1,18 +1,22 @@
 //! net/http/client — HTTP client operations.
 //!
-//! Status: M4 (stdlib/SPEC.md §9 reserves net/* for M4/M5). These
-//! functions call into platform FFI for socket operations.
+//! Status: runnable M4 surface (SPEC.md §5.13). These functions call
+//! `http_send_builtin` (blocking TCP over plaintext HTTP; `https://`
+//! is refused loudly — there is no TLS stack yet).
 //!
-//! Native: yes (all functions, via noctivue_rt_http_* FFI).
-//! The interpreter (noct run) treats unknown FFI functions as no-ops
-//! (returning Unit) per M0 spec.
+//! Header pairs are `[[String]]` (lists of 2-lists): tuple VALUES are
+//! unimplemented (the parser keeps only the first element), so pairs
+//! are spelled as 2-lists everywhere, matching the builtin.
 
 /// Perform an HTTP GET request. Returns Err on connection failure.
+/// Returns the response BODY text only: status codes and response
+/// headers are not visible in M4 (unmatched routes answer 404 with a
+/// "Not Found" body, still `Ok`). A status-aware client is M5 work.
 fn http_get(url: String) -> Result<String, String>:
     http_get_with_headers(url, [])
 
 /// Perform an HTTP GET request with custom headers.
-fn http_get_with_headers(url: String, headers: [(String, String)]) -> Result<String, String>:
+fn http_get_with_headers(url: String, headers: [[String]]) -> Result<String, String>:
     http_request("GET", url, headers, "")
 
 /// Perform an HTTP POST request with a body.
@@ -20,7 +24,7 @@ fn http_post(url: String, body: String) -> Result<String, String>:
     http_post_with_headers(url, [], body)
 
 /// Perform an HTTP POST request with custom headers and a body.
-fn http_post_with_headers(url: String, headers: [(String, String)], body: String) -> Result<String, String>:
+fn http_post_with_headers(url: String, headers: [[String]], body: String) -> Result<String, String>:
     http_request("POST", url, headers, body)
 
 /// Perform an HTTP PUT request.
@@ -32,16 +36,14 @@ fn http_delete(url: String) -> Result<String, String>:
     http_request("DELETE", url, [], "")
 
 /// Low-level request builder used by all higher-level helpers.
-/// Method is the canonical string ("GET", "POST", ...).
-fn http_request(method: String, url: String, headers: [(String, String)], body: String) -> Result<String, String>:
+/// Method is the canonical string ("GET", "POST", ...). Headers pass
+/// straight through; when the body is non-empty and no Content-Type
+/// is present, the builtin supplies `text/plain` (the language has
+/// no list-append yet, so callers cannot merge one in).
+fn http_request(method: String, url: String, headers: [[String]], body: String) -> Result<String, String>:
     http_send_builtin(method, url, headers, body)
 
-/// Send an HTTP request with automatic header construction.
-/// Builds a Content-Type header when the body is non-empty, then
-/// delegates to `http_send_builtin`. Pass an empty body for
-/// bodyless methods.
-fn http_send(method: String, url: String, headers: [(String, String)], body: String) -> Result<String, String>:
-    let mut all_headers = headers
-    if body.length > 0:
-        all_headers.push((("Content-Type", "text/plain")))
-    http_send_builtin(method, url, all_headers, body)
+/// Send an HTTP request. Thin alias over `http_request` kept for the
+/// older surface: same passthrough, same builtin Content-Type rule.
+fn http_send(method: String, url: String, headers: [[String]], body: String) -> Result<String, String>:
+    http_request(method, url, headers, body)
