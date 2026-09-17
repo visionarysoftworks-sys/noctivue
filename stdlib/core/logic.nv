@@ -1,0 +1,5 @@
+//! core/logic — integer comparison.
+//!
+ //! Status: runnable (M3 foundation, stdlib/SPEC.md §5.x).
+ /// Not-equal comparison. Native: yes (straight-line).
+ fn int_ne(a: Int, b: Int) -> Bool: a != b          // [+Bool]

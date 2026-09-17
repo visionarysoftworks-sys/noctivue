@@ -126,13 +126,75 @@ Plus manual, for any behavior change:
 byte-identical stdout expected where the VM supports the constructs
 (see §10 for known VM gaps: `to_int`/`to_float`, fn-refs-as-values).
 
+## 5. Phase 4 – stdlib extensions & FFI dashboard
+
+1. **New `[+Int]` / `[+Bool]` twin functions.** The suffix `[+T]` on a free
+   fn signature means the function ships with a native variant for type `T`
+   (e.g. `[+Float]` adds a `Float` overload, `[+String]` adds a `String`
+   overload). Shipped files use the base name without suffix; the suffix is
+   purely a signifier in the source. Per SPEC §5.3 conventions carried forward
+   into Phase 4:
+   - `int_eq(a: Int, b: Int) -> Bool` — carries `[+Float, String, Bool, Char]`
+     twins; `Native: yes` for the base operation, `needs-builtin: none`.
+   - `int_lt(a: Int, b: Int) -> Bool` — carries `[+Float]` only; ordering
+     fns are `Int`/`Float` specific; `Native: yes` for Int, `Native: loop`
+     for any control-flow-dependent paths.
+   - `option_is_some(o: Option<Int>) -> Bool` — carries `[+String, +Bool]`
+     twins; `Native: yes` for both.
+   - `list_len(xs: [Int]) -> Int` — carries `[+String, +Bool]` twins;
+     `Native: yes` for the base `.length` accessor, `needs-builtin: none`.
+   Every public fn must carry exactly one S3 tag (`Native: yes`/ `loop`/
+   `needs-builtin: X`/ `spec-only`); missing tags trigger lint warning L-002.
+
+2. **FFI dashboard symbols.** The runtime-native backend exports two FFI
+   symbols for dashboard UI integration, defined in
+   `runtime-native/src/lib.rs` and declared in
+   `compiler/src/backends/cranelift/abi.rs`:
+   - `noctivue_dashboard_echo(str: i64) -> i64` — echo a string header
+     pointer back through the FFI boundary. Used by the dashboard UI for
+     round‑trip string exposure. Signature: `extern "C" fn noctivue_dashboard_echo(str: i64) -> i64`.
+   - `noctivue_dashboard_arith(a: i64, b: i64) -> i64` — add two `i64`
+     values through the FFI boundary. Used by the dashboard UI for arithmetic
+     exposure. Signature: `extern "C" fn noctivue_dashboard_arith(a: i64, b: i64) -> i64`.
+   
+   The dashboard UI can invoke these symbols via FFI calls. Example patterns:
+   - Echo: `noctivue_dashboard_echo(pointer_of(some_string))` returns the
+     same pointer value, enabling the dashboard to render or forward the
+     string header.
+   - Arith: `noctivue_dashboard_arith(a_value, b_value)` returns the sum,
+     enabling the dashboard to display computed arithmetic results.
+   
+   Both symbols are `#[no_mangle]` `extern "C"` functions accepting and
+   returning `i64` per the ABI contract. They are intended for dashboard-only
+   use and are not part of the stdlib API for user programs.
+
+3. **New conventions / rename decisions for Phase 4.**
+   - Twin-function signifier convention carried forward: `[+T]` suffixes
+     remain purely documentary; no runtime name mangling occurs.
+   - All public functions in stdlib files must carry an S3 native-status tag.
+     The S3 tag set (`Native: yes`/ `loop`/ `needs-builtin: X`/ `spec-only`)
+     is now enforced by lint L-002; functions missing a tag emit a warning.
+   - FFI dashboard symbols use `i64` (pointer-sized) arguments and return
+     values per the Cranelift ABI convention established in `abi.rs`. No
+     variadic or `String`‑by‑value FFI is permitted at this phase — all
+     dashboard FFI is `i64`-based.
+   - No new bare-name promotions (`min`/`max` → generic) are attempted in
+     Phase 4; those remain reserved for a future SPEC amendment (see
+     `stdlib/dev.md` rename ground rules). The `_int` suffix convention
+     documented in SPEC §3/S-note remains the active promotion path.
+   - Aggregate slot model (Phase 3 Step 2) continues to be the representation
+     strategy for `[T]` lists and `String` values. No slot‑model changes for
+     Phase 4; any new functions that operate on aggregates must respect the
+     existing `NvStr` one-pointer header model and the `list_push` /
+     `string_push` lowering rules.
+
 ## 7. Scope and coordination (binding)
 
 - YOUR files: `stdlib/**`, `tests/fixtures/stdlib/**`,
   `tests/golden/stdlib/**`, `tests/stdlib_test.rs`, `stdlib/*.md`
   (via amendment proposals, not rewrites).
 - READ-ONLY for you: `noct-cli/**`, `compiler/**`, `interp/**`,
-  `docs/**` (except proposing SPEC/DECISIONS amendments in chat).
+  `docs/` (except proposing SPEC/DECISIONS amendments in chat).
   Another agent owns the toolchain + backend. If a stdlib need requires
   toolchain work (new builtin, diagnostic change), write the proposal
   (exact CLI behavior + example + which phase owns it) and STOP — do not
@@ -143,3 +205,4 @@ byte-identical stdout expected where the VM supports the constructs
   the tree once made this suite fail transiently with zero code cause;
   if a green suite goes red with no related change, re-run twice before
   investigating, and capture the failing test NAME + message immediately.
+

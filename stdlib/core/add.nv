@@ -1,0 +1,5 @@
+//! core/add — integer addition.
+//!
+ //! Status: runnable (M3 foundation, stdlib/SPEC.md §5.x).
+ /// Integer addition. Native: yes (straight-line).
+ fn int_add(a: Int, b: Int) -> Int: a + b          // [+Int]
