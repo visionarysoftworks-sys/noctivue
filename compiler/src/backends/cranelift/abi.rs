@@ -36,6 +36,36 @@ pub const NOCTIVUE_RT_STR_FROM_BOOL: &str = "noctivue_rt_str_from_bool";
 /// `noctivue_rt_str_concat(a: I64, b: I64) -> I64`.
 pub const NOCTIVUE_RT_STR_CONCAT: &str = "noctivue_rt_str_concat";
 
+/// `noctivue_rt_sleep_ms(ms: I64)` — Phase 5/M4: block the calling
+/// thread for `ms` milliseconds. Traps loudly on negative input
+/// (mirrors the interpreter's `sleep_builtin` panic); the message is
+/// owned by the runtime, like the checked-division traps below.
+pub const NOCTIVUE_RT_SLEEP_MS: &str = "noctivue_rt_sleep_ms";
+
+/// `noctivue_rt_fs_exists(path: I64) -> I8` (`0` = false).
+pub const NOCTIVUE_RT_FS_EXISTS: &str = "noctivue_rt_fs_exists";
+
+/// `noctivue_rt_io_write(str: I64)` — stdout, no newline.
+pub const NOCTIVUE_RT_IO_WRITE: &str = "noctivue_rt_io_write";
+
+/// `noctivue_rt_io_writeln(str: I64)` — stdout plus a newline.
+pub const NOCTIVUE_RT_IO_WRITELN: &str = "noctivue_rt_io_writeln";
+
+/// `noctivue_rt_env_set(name: I64, value: I64)` — process environment.
+pub const NOCTIVUE_RT_ENV_SET: &str = "noctivue_rt_env_set";
+
+/// `noctivue_rt_log_emit(level: I64, message: I64)` — one
+/// `[LEVEL] message` line to stderr (level uppercased in the runtime).
+pub const NOCTIVUE_RT_LOG_EMIT: &str = "noctivue_rt_log_emit";
+
+/// `noctivue_rt_http_server_register(server: I64, method: I64, path: I64,
+/// handler: I64)` — register a route; unknown servers are ignored
+/// (mirrors the interpreter, which never fails here).
+pub const NOCTIVUE_RT_HTTP_SERVER_REGISTER: &str = "noctivue_rt_http_server_register";
+
+/// `noctivue_rt_http_server_shutdown(server: I64)` — stop the server.
+pub const NOCTIVUE_RT_HTTP_SERVER_SHUTDOWN: &str = "noctivue_rt_http_server_shutdown";
+
 /// `noctivue_rt_checked_sdiv(a: I64, b: I64) -> I64` — traps loudly on
 /// zero instead of emitting a bare `sdiv` (see `lower.rs`'s Div arm).
 pub const NOCTIVUE_RT_CHECKED_SDIV: &str = "noctivue_rt_checked_sdiv";
@@ -63,6 +93,12 @@ pub const NOCTIVUE_RT_HTTP_SERVER_SERVE: &str = "noctivue_rt_http_server_serve";
 // Dashboard FFI exposure (Phase 3, Step 4).
 pub const NOCTIVUE_DASHBOARD_ECHO: &str = "noctivue_dashboard_echo";
 pub const NOCTIVUE_DASHBOARD_ARITH: &str = "noctivue_dashboard_arith";
+
+// Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+pub const NOCTIVUE_RT_STRING_EQ: &str = "noctivue_rt_string_eq";
+pub const NOCTIVUE_RT_FLOAT_LE: &str = "noctivue_rt_float_le";
+pub const NOCTIVUE_RT_CHAR_EQ: &str = "noctivue_rt_char_eq";
+pub const NOCTIVUE_RT_CHAR_LT: &str = "noctivue_rt_char_lt";
 
 use cranelift_codegen::ir::types as clif_types;
 use cranelift_codegen::ir::Type as ClifType;
@@ -104,6 +140,36 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
         &[clif_types::I64, clif_types::I64],
         &[clif_types::I64],
     ),
+    // Phase 5/M4 host-IO scalar subset (one row per `lower.rs` arm).
+    (NOCTIVUE_RT_SLEEP_MS, &[clif_types::I64], &[]),
+    (
+        NOCTIVUE_RT_FS_EXISTS,
+        &[clif_types::I64],
+        &[clif_types::I8],
+    ),
+    (NOCTIVUE_RT_IO_WRITE, &[clif_types::I64], &[]),
+    (NOCTIVUE_RT_IO_WRITELN, &[clif_types::I64], &[]),
+    (
+        NOCTIVUE_RT_ENV_SET,
+        &[clif_types::I64, clif_types::I64],
+        &[],
+    ),
+    (
+        NOCTIVUE_RT_LOG_EMIT,
+        &[clif_types::I64, clif_types::I64],
+        &[],
+    ),
+    (
+        NOCTIVUE_RT_HTTP_SERVER_REGISTER,
+        &[
+            clif_types::I64,
+            clif_types::I64,
+            clif_types::I64,
+            clif_types::I64,
+        ],
+        &[],
+    ),
+    (NOCTIVUE_RT_HTTP_SERVER_SHUTDOWN, &[clif_types::I64], &[]),
     (
         NOCTIVUE_RT_CHECKED_SDIV,
         &[clif_types::I64, clif_types::I64],
@@ -158,6 +224,27 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
     ),
     (
         NOCTIVUE_DASHBOARD_ARITH,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
+    ),
+    // Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+    (
+        NOCTIVUE_RT_STRING_EQ,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_FLOAT_LE,
+        &[clif_types::F64, clif_types::F64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_CHAR_EQ,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_CHAR_LT,
         &[clif_types::I64, clif_types::I64],
         &[clif_types::I64],
     ),

@@ -308,6 +308,177 @@ pub unsafe extern "C" fn noctivue_rt_strlen(ptr: *const u8) -> i64 {
     len
 }
 
+// ── Phase 5/M4 host-IO scalar builtins ─────────────────────────────────────
+// One `extern "C"` entry per scalar-shaped interpreter builtin (see
+// `compiler/src/nir/instr.rs`'s Host I/O section): blocking sleep,
+// file existence, stdout writes, process-environment mutation,
+// stderr log lines, and the Unit-shaped http-server route table ops.
+// Each mirrors `interp/src/lib.rs`'s `eval_builtin` arm exactly
+// (messages, byte counts, blocking behavior); the interpreter is the
+// oracle. Result/Option/List-returning builtins (db_*, fs_read/write,
+// env_get, http_send, http_server_listen, …) have no native value
+// representation yet (Step 3 boundary) and stay loud `UnsupportedInstr`
+// failures in the Cranelift backend — never stubs here.
+
+/// `noctivue_rt_sleep_ms(ms: I64)` — block the calling thread for `ms`
+/// milliseconds. Traps loudly on negative input with the interpreter's
+/// exact message (the zero-check + message live here, like the checked
+/// division helpers own theirs).
+#[no_mangle]
+pub extern "C" fn noctivue_rt_sleep_ms(ms: i64) {
+    if ms < 0 {
+        unsafe {
+            let msg = alloc_str(
+                "sleep_builtin requires a non-negative Int (milliseconds)".as_bytes(),
+            );
+            noctivue_rt_panic(msg, NOCTIVUE_TRAP_EXIT_CODE);
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+}
+
+/// `noctivue_rt_fs_exists(path: I64) -> I8` (`0` = false) — mirrors
+/// the interpreter's `fs_exists` (nonexistent paths are `false`, never
+/// an error).
+///
+/// # Safety
+/// `path` must be a header pointer produced by this module's constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_fs_exists(path: *const u8) -> u8 {
+    let p = read_str(path);
+    u8::from(std::path::Path::new(p).exists())
+}
+
+/// `noctivue_rt_io_write(str: I64)` — stdout, no trailing newline
+/// (matches the interpreter's `print!`-without-newline).
+///
+/// # Safety
+/// `str` must be a header pointer produced by this module's constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_io_write(str_header: *const u8) {
+    let s = read_str(str_header);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(s.as_bytes());
+    let _ = lock.flush();
+}
+
+/// `noctivue_rt_io_writeln(str: I64)` — stdout plus a newline (matches
+/// the interpreter's `println!`).
+///
+/// # Safety
+/// `str` must be a header pointer produced by this module's constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_io_writeln(str_header: *const u8) {
+    let s = read_str(str_header);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(s.as_bytes());
+    let _ = lock.write_all(b"\n");
+    let _ = lock.flush();
+}
+
+/// `noctivue_rt_env_set(name: I64, value: I64)` — set a process
+/// environment variable (mirrors the interpreter's `env_set_builtin`).
+///
+/// # Safety
+/// Both pointers must be header pointers produced by this module's
+/// constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_env_set(name: *const u8, value: *const u8) {
+    let n = read_str(name).to_owned();
+    let v = read_str(value).to_owned();
+    unsafe { std::env::set_var(n, v) };
+}
+
+/// `noctivue_rt_log_emit(level: I64, message: I64)` — one
+/// `[LEVEL] message` line to stderr, no timestamp (deterministic
+/// output — mirrors the interpreter's `log_emit_builtin` exactly; the
+/// level gate lives in `log/log.nv`, this pipe stays dumb).
+///
+/// # Safety
+/// Both pointers must be header pointers produced by this module's
+/// constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_log_emit(level: *const u8, message: *const u8) {
+    let l = read_str(level).to_owned();
+    let m = read_str(message).to_owned();
+    eprintln!("[{}] {}", l.to_ascii_uppercase(), m);
+}
+
+// Native http-server route table. `http_server_listen` is VM-only
+// (its `Result` return has no native representation yet), so no
+// listener can exist in this process — but `register`/`shutdown` are
+// unconditionally `Unit` on every path (unknown handles are ignored,
+// never errors), and this table keeps that behavior structural
+// instead of stubbed: entries would serve nothing today (serving
+// needs callbacks into compiled program code, which is why
+// `serve_loop` stays a loud `UnsupportedInstr`), yet the observable
+// contract — register-then-shutdown is silent `Unit` — holds exactly.
+// Stored routes are never read today (serving needs program-code
+// callbacks, which is why `serve_loop` stays a loud `UnsupportedInstr`)
+// — the shape is kept so `register` stays structural, not stubbed.
+#[allow(dead_code)]
+struct NativeRoute {
+    method: String,
+    path_pattern: String,
+    handler: String,
+}
+
+struct NativeServerState {
+    routes: Vec<NativeRoute>,
+    shutdown: bool,
+}
+
+static NATIVE_SERVERS: std::sync::Mutex<Option<std::collections::HashMap<i64, NativeServerState>>> =
+    std::sync::Mutex::new(None);
+
+fn native_servers(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i64, NativeServerState>>> {
+    NATIVE_SERVERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `noctivue_rt_http_server_register(server: I64, method: I64,
+/// path: I64, handler: I64)` — record a route on a known server;
+/// unknown servers are ignored (mirrors the interpreter exactly).
+///
+/// # Safety
+/// The three string pointers must be header pointers produced by this
+/// module's constructors.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_http_server_register(
+    server: i64,
+    method: *const u8,
+    path: *const u8,
+    handler: *const u8,
+) {
+    let m = read_str(method).to_owned();
+    let p = read_str(path).to_owned();
+    let h = read_str(handler).to_owned();
+    if let Some(table) = native_servers().as_mut() {
+        if let Some(state) = table.get_mut(&server) {
+            state.routes.push(NativeRoute {
+                method: m,
+                path_pattern: p,
+                handler: h,
+            });
+        }
+    }
+}
+
+/// `noctivue_rt_http_server_shutdown(server: I64)` — flag the server
+/// stopped and drop it from the table (unknown servers are a silent
+/// no-op, mirroring the interpreter exactly).
+#[no_mangle]
+pub extern "C" fn noctivue_rt_http_server_shutdown(server: i64) {
+    if let Some(table) = native_servers().as_mut() {
+        if let Some(state) = table.get_mut(&server) {
+            state.shutdown = true;
+        }
+        table.remove(&server);
+    }
+}
+
 /// `noctivue_dashboard_echo(str: I64) -> I64` — echo a string back
 /// through the FFI boundary. Used by the dashboard UI for round-trip
 /// string exposure.
@@ -322,6 +493,31 @@ pub extern "C" fn noctivue_dashboard_echo(str: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn noctivue_dashboard_arith(a: i64, b: i64) -> i64 {
     a.wrapping_add(b)
+}
+
+/// Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+///
+/// Each returns `1` when the relation holds, `0` otherwise; the Cranelift
+/// backend lowers the corresponding NIR instruction to a call of the
+/// matching symbol.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_string_eq(a: i64, b: i64) -> i64 {
+    if a == b { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn noctivue_rt_float_le(a: f64, b: f64) -> i64 {
+    if a <= b { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn noctivue_rt_char_eq(a: i64, b: i64) -> i64 {
+    if a == b { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn noctivue_rt_char_lt(a: i64, b: i64) -> i64 {
+    if a < b { 1 } else { 0 }
 }
 
 // ── Phase 5: net.http FFI stubs ──────────────────────────────────────────────

@@ -12,6 +12,6 @@ fn format_bool(b: Bool) -> String:
     else:
         "false"
 
-/// Render a Char as a one-char String.
+/// Render a Char as a one-char String. [+Char] Native: yes (S3).
 fn format_char(c: Char) -> String:
     "{c}"
