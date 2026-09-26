@@ -226,15 +226,20 @@ stages; neither stage changes the §4 instruction set.
 
 ### 7.1 Stage 1 — IR dumps (`noct build --emit-nir`)
 
-A dump is the existing canonical textual form (`Instr`'s `Display`,
-the §4 inventory's single source of truth) under a module header:
+**Shipped.** `noct build --emit-nir` (STAGE 1 IMPLEMENTED). A dump is
+the existing canonical textual form (`Instr`'s `Display`, the §4
+inventory's single source of truth) under a module header:
 
 ```text
 nvir_version: 1
-package: <name> <version>
-imports: <resolved module paths, in order>
-types: <struct/enum definitions, in order>
-functions: <signature (params, return type, mode tag) then blocks>
+package: <name> <version>          (or `-` with no manifest)
+imports: <the joined source set, in order>
+types: <struct/enum definitions, sorted by name>
+functions:
+    @func0 add(Int (native), Int (native)) -> Int (native):
+        block0(%0: Int (native), %1: Int (native)):
+            %2 = add %0, %1 : Int (native)
+            return %2
 ```
 
 Text because dumps are debugged and diffed (backend and
@@ -243,6 +248,18 @@ only on measured need — never by accident. Dumping a program that
 uses not-yet-lowerable builtins (§6: everything beyond `print`)
 fails loudly at lowering time, same discipline as the VM's
 `UNRESOLVED` errors; a partial dump is never silently emitted.
+
+Two properties are load-bearing and covered by tests: type
+definitions are emitted **sorted by name** (`type_defs` is a
+HashMap, so unsorted output would make every diff noise), and an
+**unterminated block fails the dump** instead of rendering (§4.1
+rule 1 — an unterminated block is a lowering bug, and printing one
+as if it were fine would hide exactly that).
+
+`imports:` currently carries the joined source set in order, which is
+the module's real input list under today's concatenation model;
+resolved cross-package module paths arrive with the cross-package
+import story, not before.
 
 ### 7.2 Stage 2 — compiled module interface
 

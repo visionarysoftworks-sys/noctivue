@@ -179,9 +179,14 @@ fn scaffold(name: &str, root: &std::path::Path) -> Result<usize, String> {
 
 /// Minimal valid entry point: runs under `run`/`build`/`test` today
 /// (plain `println`, no stdlib imports needed — the prelude covers it).
+///
+/// The blank line after the `//!` doc comment is load-bearing: `noct fmt`
+/// is normative for canonical style (TOOLCHAIN.md §4) and inserts one, so
+/// a template without it makes every freshly created project fail
+/// `noct fmt --check` on the very first gate of the second-developer loop.
 fn main_source(name: &str) -> String {
     format!(
-        "//! {name} — created by `noct create`.\nmain():\n    println(\"Hello from {name}!\")\n"
+        "//! {name} — created by `noct create`.\n\nmain():\n    println(\"Hello from {name}!\")\n"
     )
 }
 
@@ -189,9 +194,16 @@ fn main_source(name: &str) -> String {
 /// `noct run tests/main_test.nv`; project-aware `test` discovery
 /// (running a project's own `tests/` dir) does not exist yet, so the
 /// file documents its own invocation instead of pretending otherwise.
+///
+/// Two canonical rules are load-bearing here, both because a template
+/// that fails `noct fmt --check` breaks the second-developer loop on
+/// its first gate: the blank line after the `//!` doc comment, and the
+/// `;`-joined body — `noct fmt` owns semicolon placement
+/// (DECISIONS.md Issue 5) and renders two sibling statements in a body
+/// as one line.
 fn test_source(name: &str) -> String {
     format!(
-        "//! Smoke test for {name} (run: noct run tests/main_test.nv).\nfn double(x: Int) -> Int:\n    x * 2\n\nmain():\n    assert(double(21) == 42, \"double works\")\n    println(\"tests ok\")\n"
+        "//! Smoke test for {name} (run: noct run tests/main_test.nv).\n\nfn double(x: Int) -> Int:\n    x * 2\n\nmain():\n    assert(double(21) == 42, \"double works\"); println(\"tests ok\")\n"
     )
 }
 

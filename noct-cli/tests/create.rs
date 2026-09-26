@@ -74,11 +74,11 @@ fn create_generates_canonical_tree_byte_exact() {
     );
     assert_eq!(
         read(&dir, "hello_world/lib/main.nv"),
-        "//! hello_world — created by `noct create`.\nmain():\n    println(\"Hello from hello_world!\")\n"
+        "//! hello_world — created by `noct create`.\n\nmain():\n    println(\"Hello from hello_world!\")\n"
     );
     assert_eq!(
         read(&dir, "hello_world/tests/main_test.nv"),
-        "//! Smoke test for hello_world (run: noct run tests/main_test.nv).\nfn double(x: Int) -> Int:\n    x * 2\n\nmain():\n    assert(double(21) == 42, \"double works\")\n    println(\"tests ok\")\n"
+        "//! Smoke test for hello_world (run: noct run tests/main_test.nv).\n\nfn double(x: Int) -> Int:\n    x * 2\n\nmain():\n    assert(double(21) == 42, \"double works\"); println(\"tests ok\")\n"
     );
     assert_eq!(
         read(&dir, "hello_world/docs/overview.md"),
@@ -126,6 +126,36 @@ fn create_output_runs_and_tests_pass() {
     // Generated manifest parses under the package rules.
     let out = run_cli_in(&dir, &["diagnostics", "demo_app/lib/main.nv"]);
     assert_eq!(out.status.code(), Some(0));
+    cleanup(&dir);
+}
+
+/// The scaffolded tree must already be in `noct fmt`'s canonical form.
+///
+/// This is the invariant that broke once already: the templates shipped
+/// without the blank line after the `//!` doc comment, and with a
+/// line-broken body where the formatter renders sibling statements
+/// `;`-joined (DECISIONS.md Issue 5 gives the formatter ownership of
+/// semicolon placement). Every new project then failed `noct fmt
+/// --check` — the FIRST gate of the second-developer loop
+/// (`e2e.rs::second_developer_loop_…`). Asserting it here catches
+/// template/formatter drift at the source instead of one suite away.
+#[test]
+fn scaffolded_tree_is_already_fmt_clean() {
+    let dir = scratch_dir();
+    assert_eq!(
+        run_cli_in(&dir, &["create", "demo_app"]).status.code(),
+        Some(0)
+    );
+    let out = run_cli_in(
+        &dir,
+        &["fmt", "--check", "demo_app/lib/main.nv", "demo_app/tests/main_test.nv"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a freshly scaffolded project must be fmt-clean:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     cleanup(&dir);
 }
 

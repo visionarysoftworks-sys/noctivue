@@ -1,7 +1,20 @@
 //! `noct build` — compile a .nv program to a native binary (Phase 3).
 //!
 //! Usage:
-//!   noct build <file.nv> [-o <out.exe>] [--release]
+//!   noct build <file.nv> [-o <out.exe>] [--release] [--frozen]
+//!   noct build <file.nv> --emit-nir[=<path>]
+//!
+//! ## `--emit-nir`: the IR dump leaf
+//!
+//! `noct build --emit-nir` writes the canonical `.nvir` text dump
+//! (NIR.md §7.1) and stops. Emission happens right after lowering, so
+//! inspecting IR never pays for — or depends on — a native toolchain:
+//! no staging dir, no codegen, no cargo. The bare flag writes
+//! `<entry-stem>.nvir` beside the entry file; `=<path>` writes exactly
+//! there. There is deliberately no stdout form: a dump that scrolls past
+//! is not diffable, and being able to `git diff` a dump is the point.
+//! A program that does not compile writes nothing (NIR.md §7.1 — a
+//! partial dump that looks plausible is worse than no file).
 //!
 //! ## Strategy: cargo piggyback (NOT raw link.exe)
 //!
@@ -69,9 +82,41 @@ fn runtime_native_dir() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release] [--frozen]");
+    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release] [--frozen] [--emit-nir[=<path>]]");
     eprintln!("  multiple files concatenate in order, entry point last (tank libraries first)");
     eprintln!("  --frozen: fail if nestpkg.lock is missing or stale (reproducible builds)");
+    eprintln!("  --emit-nir[=<path>]: write the NIR text dump (.nvir) and stop (no codegen/link)");
+}
+
+/// Default dump location for a bare `--emit-nir`: the entry file's stem
+/// **beside the entry file**, not in the CWD — `noct build --emit-nir
+/// lib/main.nv` must not scatter `main.nvir` into wherever the user
+/// happened to run from. `files` is what the module graph actually read
+/// (path + line offset); we prefer it over argv order because an argv
+/// path that resolved through a directory module has no useful stem.
+fn default_nir_path(files: &[(String, usize)]) -> PathBuf {
+    let last = files.last().map(|(p, _)| p.as_str()).unwrap_or("module.nv");
+    let path = Path::new(last);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "module".to_string());
+    let mut out = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    out.push(format!("{stem}.nvir"));
+    out
+}
+
+/// `(name, version)` from the manifest, for the dump header. A missing or
+/// invalid manifest yields `None` (rendered as `-`): a dump is a debugging
+/// artifact, so a broken manifest must not block emitting one — the build
+/// gates that already run before this point.
+fn manifest_package() -> Option<(String, String)> {
+    let text = std::fs::read_to_string("nestpkg.nvpm").ok()?;
+    let manifest = crate::manifest::parse_manifest(&text).ok()?;
+    Some((manifest.package.name, manifest.package.version.to_string()))
 }
 
 fn check_frozen() -> Result<(), String> {
@@ -121,6 +166,8 @@ pub fn run(args: &[String]) -> i32 {
     let mut out: Option<&str> = None;
     let mut release = false;
     let mut frozen = false;
+    // `Some(None)` = bare `--emit-nir`; `Some(Some(path))` = explicit path.
+    let mut emit_nir: Option<Option<String>> = None;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -133,6 +180,16 @@ pub fn run(args: &[String]) -> i32 {
                 }
             },
             "--release" => release = true,
+            // `--emit-nir` writes the canonical text dump (NIR.md §7.1) and
+            // stops: no staging, no codegen, no link. Bare = derive the name
+            // from the entry file's stem; `=path` writes exactly there.
+            // `--emit-nir=-` is deliberately NOT stdout: a dump that scrolls
+            // past is not diffable, and the whole point is a file you can
+            // `git diff`.
+            "--emit-nir" => emit_nir = Some(None),
+            other if other.starts_with("--emit-nir=") => {
+                emit_nir = Some(Some(other["--emit-nir=".len()..].to_string()))
+            }
             // Canonical reproducible-builds flag. `--locked` is a hidden
             // alias (trivial in this hand-rolled parser; intentionally
             // absent from usage()).
@@ -194,6 +251,37 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
     let nir_module = compiler::nir::lowering::lower(module);
+
+    // ── 1b. `--emit-nir`: stop after lowering and write the `.nvir` dump ──
+    // Emission is a leaf: it happens before any staging, codegen, or link,
+    // so inspecting IR never pays for (or depends on) a native toolchain.
+    // A failed dump is a failed command — no partial file, per NIR.md §7.1.
+    if let Some(target) = emit_nir {
+        let out_path = match target {
+            Some(explicit) => PathBuf::from(explicit),
+            None => default_nir_path(&files),
+        };
+        let meta = compiler::nir::NirText {
+            package: manifest_package(),
+            imports: files.iter().map(|(path, _)| path.clone()).collect(),
+        };
+        match compiler::nir::to_nir_text(&nir_module, &meta) {
+            Ok(text) => match std::fs::write(&out_path, text.as_bytes()) {
+                Ok(()) => {
+                    println!("wrote {}", out_path.display());
+                    return 0;
+                }
+                Err(e) => {
+                    eprintln!("noct build: cannot write `{}`: {e}", out_path.display());
+                    return 1;
+                }
+            },
+            Err(e) => {
+                eprintln!("noct build: cannot emit NIR: {e}");
+                return 1;
+            }
+        }
+    }
 
     // ── 2. Staging dir + object emission ───────────────────────────────
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
