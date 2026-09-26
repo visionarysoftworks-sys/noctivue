@@ -2,12 +2,18 @@
 // rule in one or more VS Code theme files (prefix-segment matching with
 // "include"-chain resolution, as VS Code resolves it).
 //
-// Usage: node audit-theme.js <theme.json> [<theme.json> ...]
+// Usage: node audit-theme.js [--grammar <path>] <theme.json> [<theme.json> ...]
 // See TOOLCHAIN.md §6.3 for the scope-naming convention this verifies.
 const fs = require('fs');
 const path = require('path');
 
-const grammar = JSON.parse(fs.readFileSync('./syntaxes/noctivue.tmLanguage.json', 'utf8'));
+const argv = process.argv.slice(2);
+let grammarPath = './syntaxes/noctivue.tmLanguage.json';
+if (argv[0] === '--grammar') {
+  grammarPath = argv[1];
+  argv.splice(0, 2);
+}
+const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf8'));
 const scopes = new Set();
 const walk = (p) => { if (p.name) scopes.add(p.name); (p.patterns || []).forEach(walk); };
 grammar.patterns.forEach(walk);
@@ -40,7 +46,7 @@ function matches(ruleScope, tokenScope) {
 }
 
 let failed = false;
-for (const themePath of process.argv.slice(2)) {
+for (const themePath of argv) {
   console.log('=== ' + themePath.split(/[\\/]/).pop() + ' ===');
   const rules = themeRules(themePath);
   let uncovered = 0;

@@ -1,8 +1,8 @@
 {
   "name": "noctivue",
   "displayName": "Noctivue",
-  "description": "Language support for Noctivue (.nv files) - syntax highlighting, LSP, Outline",
-  "version": "0.0.7",
+  "description": "Language support for Noctivue (.nv files) + nestpkg manifests (nestpkg.nvpm / nestpkg.lock) - syntax highlighting, LSP, Outline",
+  "version": "0.0.11",
   "publisher": "noctivue",
   "engines": {
     "vscode": "^1.80.0"
@@ -24,7 +24,8 @@
     "url": "https://github.com/noctivue/noctivue"
   },
   "activationEvents": [
-    "onLanguage:noctivue"
+    "onLanguage:noctivue",
+    "onLanguage:nestpkg"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -43,6 +44,25 @@
           "dark": "./icons/noctivue-file-128.png",
           "light": "./icons/noctivue-file-128.png"
         }
+      },
+      {
+        "id": "nestpkg",
+        "aliases": [
+          "Nestpkg",
+          "nestpkg.nvpm"
+        ],
+        "extensions": [
+          ".nvpm"
+        ],
+        "filenames": [
+          "nestpkg.nvpm",
+          "nestpkg.lock"
+        ],
+        "configuration": "./nestpkg-language-configuration.json",
+        "icon": {
+          "dark": "./icons/noctivue-file-128.png",
+          "light": "./icons/noctivue-file-128.png"
+        }
       }
     ],
     "grammars": [
@@ -50,6 +70,11 @@
         "language": "noctivue",
         "scopeName": "source.noctivue",
         "path": "./syntaxes/noctivue.tmLanguage.json"
+      },
+      {
+        "language": "nestpkg",
+        "scopeName": "source.nestpkg",
+        "path": "./syntaxes/nestpkg.tmLanguage.json"
       }
     ],
     "themes": [

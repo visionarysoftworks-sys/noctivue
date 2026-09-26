@@ -16,9 +16,11 @@ use compiler::analysis::{
     analyze_file, diagnostic_to_lsp, find_definition_at, get_completions, get_hover, span_to_range,
 };
 
+mod nestpkg;
+
 /// Bump on every behavior-changing server release so the `window/logMessage`
 /// beacon in the client's Output panel identifies the running binary.
-const SERVER_VERSION: &str = "0.0.7-phase6";
+const SERVER_VERSION: &str = "0.0.10-nestpkg1";
 
 struct ServerState {
     connection: Connection,
@@ -221,6 +223,10 @@ impl ServerState {
     }
 
     fn analyze_and_publish(&self, uri: &Uri, text: &str) {
+        if nestpkg::is_nestpkg_uri(uri) {
+            self.publish_diagnostics(uri, nestpkg::diagnostics_for_uri(uri, text));
+            return;
+        }
         let result = analyze_file(uri.to_string(), text);
         let diagnostics: Vec<Diagnostic> = result
             .diagnostics
@@ -254,6 +260,10 @@ impl ServerState {
         let position = params.text_document_position_params.position;
 
         let result = self.documents.get(&uri).map(|text| {
+            if nestpkg::is_nestpkg_uri(&uri) {
+                let is_lock = nestpkg::is_lock_uri(&uri);
+                return nestpkg::get_hover(text, position, is_lock);
+            }
             let analysis = analyze_file(uri.to_string(), text);
             let label = uri.as_str().rsplit('/').next().unwrap_or("untitled.nv").to_string();
             get_hover(&analysis.resolved, &analysis.typed, &analysis.source, position, &label)
@@ -273,7 +283,16 @@ impl ServerState {
                 return;
             }
         };
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        // nestpkg files have no cross-file definitions: return null
+        // instead of running the `.nv` resolver on manifest text.
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+                req.id,
+                serde_json::Value::Null,
+            )));
+            return;
+        }
         let position = params.text_document_position_params.position;
 
         let result = self.documents.get(&uri).and_then(|text| {
@@ -304,6 +323,9 @@ impl ServerState {
         let position = params.text_document_position.position;
 
         let result = self.documents.get(&uri).map(|text| {
+            if nestpkg::is_nestpkg_uri(&uri) {
+                return nestpkg::get_completions(&uri, text, position);
+            }
             let analysis = analyze_file(uri.to_string(), text);
             get_completions(&analysis.resolved, &analysis.source, position)
         }).unwrap_or_default();
@@ -362,7 +384,12 @@ impl ServerState {
             Err(e) => { self.send_error(req.id, format!("Invalid document symbols params: {e}")); return; }
         };
         let uri = params.text_document.uri;
-        let result = self.text_at(&uri).map(document_symbols).unwrap_or_default();
+        let result = self.text_at(&uri).map(|text| {
+            if nestpkg::is_nestpkg_uri(&uri) {
+                return nestpkg::document_symbols(text, nestpkg::is_lock_uri(&uri));
+            }
+            document_symbols(text)
+        }).unwrap_or_default();
         let _ = self.connection.sender.send(Message::Response(Response::new_ok(req.id, serde_json::to_value(result).unwrap())));
     }
 
@@ -397,6 +424,9 @@ impl ServerState {
         };
         let uri = params.text_document.uri;
         let result = self.text_at(&uri).map(|text| {
+            if nestpkg::is_nestpkg_uri(&uri) {
+                return nestpkg::formatting(&uri, text);
+            }
             let formatted = text.lines().map(|line| line.trim_end()).collect::<Vec<_>>().join("\n") + "\n";
             vec![TextEdit { range: full_range(text), new_text: formatted }]
         }).unwrap_or_default();
@@ -409,7 +439,14 @@ impl ServerState {
             Err(e) => { self.send_error(req.id, format!("Invalid semantic token params: {e}")); return; }
         };
         let uri = params.text_document.uri;
-        let data = self.text_at(&uri).map(semantic_tokens).unwrap_or_default();
+        // nestpkg coloring comes from the TextMate grammar; the `.nv`
+        // lexer would mis-tokenize manifest text, so return empty.
+        let data = self.text_at(&uri).map(|text| {
+            if nestpkg::is_nestpkg_uri(&uri) {
+                return Vec::new();
+            }
+            semantic_tokens(text)
+        }).unwrap_or_default();
         let result = SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data });
         let _ = self.connection.sender.send(Message::Response(Response::new_ok(req.id, serde_json::to_value(result).unwrap())));
     }
@@ -420,6 +457,11 @@ impl ServerState {
             Err(e) => { self.send_error(req.id, format!("Invalid semantic token range params: {e}")); return; }
         };
         let uri = params.text_document.uri;
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let result = SemanticTokensRangeResult::Tokens(SemanticTokens { result_id: None, data: Vec::new() });
+            let _ = self.connection.sender.send(Message::Response(Response::new_ok(req.id, serde_json::to_value(result).unwrap())));
+            return;
+        }
         let range = params.range;
         let data = self.text_at(&uri).map(|text| semantic_tokens_in_range(text, range)).unwrap_or_default();
         let result = SemanticTokensRangeResult::Tokens(SemanticTokens { result_id: None, data });

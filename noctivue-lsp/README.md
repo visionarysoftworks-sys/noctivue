@@ -23,20 +23,29 @@ debugging, it can also be launched directly over stdio by an LSP client.
 
 ## Supported editor features
 
-The current server advertises and handles:
+The current server advertises and handles (`.nv` unless noted):
 
 - Full-document synchronization
-- Diagnostics on open and change
-- Hover information
-- Go to definition
-- Completion
+- Diagnostics on open and change (`.nv` via the compiler; `*.nvpm` /
+  `nestpkg.lock` via the shared `nestpkg` parser)
+- Hover information (`.nv` §6.1 cards; nestpkg key/tier/version cards)
+- Go to definition (`.nv` only — nestpkg returns null)
+- Completion (`.nv` items; nestpkg sections/keys/tiers)
 - References
 - Rename
-- Document and workspace symbols
-- Document formatting
-- Semantic tokens
+- Document and workspace symbols (nestpkg outlines sections + deps)
+- Document formatting (`.nv` whitespace normalization; nestpkg
+  canonical `serialize_*` when the file parses, safe normalization
+  otherwise)
+- Semantic tokens (`.nv` only — nestpkg coloring comes from its
+  TextMate grammar)
 - Signature help
 - Code-action requests
+
+One binary serves both languages: URIs ending in `.nvpm` route to the
+manifest schema, `nestpkg.lock` to the lockfile schema, everything
+else to the `.nv` pipeline. The VS Code extension ships both language
+IDs in the same VSIX (no second extension, no second server).
 
 The server version beacon is emitted through `window/logMessage` when
 the client finishes initialization. This makes it possible to confirm
@@ -44,7 +53,7 @@ which binary VS Code is actually running.
 
 ## Compiler integration
 
-Analysis currently reuses the public compiler analysis API:
+Analysis currently reuses the public compiler analysis API for `.nv`:
 
 ```text
 source -> lexer -> parser -> resolver -> type checker -> analysis queries
@@ -53,6 +62,11 @@ source -> lexer -> parser -> resolver -> type checker -> analysis queries
 The LSP should not maintain a second parser or type system. New language
 features should first be represented in the compiler AST/HIR and then
 exposed through `compiler::analysis`.
+
+Manifests are the exception that proves the rule: `nestpkg.nvpm` /
+`nestpkg.lock` are parsed by the shared `nestpkg` crate (the same
+parser `noct` uses — ADR-017 deliberately bypasses the full compiler
+frontend here), so CLI and LSP can never drift.
 
 ## Phase coverage
 

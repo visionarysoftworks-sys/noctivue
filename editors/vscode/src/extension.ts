@@ -63,14 +63,25 @@ export function activate(context: vscode.ExtensionContext) {
     debug: { command: serverExecutable, transport: TransportKind.stdio }
   };
 
-  // Client options
+  // Client options: one client, one server binary, two languages.
+  // Both `.nv` and `nestpkg` (nestpkg.nvpm / nestpkg.lock) are served
+  // by the same noctivue-lsp process, which routes by URI filename.
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: 'file', language: 'noctivue' },
-      { scheme: 'untitled', language: 'noctivue' }
+      { scheme: 'untitled', language: 'noctivue' },
+      { scheme: 'file', language: 'nestpkg' },
+      { scheme: 'untitled', language: 'nestpkg' }
     ],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.nv')
+      // One watcher per family: `*.lock` is deliberately NOT watched —
+      // only the fixed `nestpkg.lock` basename is claimed (Cargo.lock
+      // must never route to this server).
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher('**/*.nv'),
+        vscode.workspace.createFileSystemWatcher('**/*.nvpm'),
+        vscode.workspace.createFileSystemWatcher('**/nestpkg.lock')
+      ]
     },
     initializationOptions: {}
   };

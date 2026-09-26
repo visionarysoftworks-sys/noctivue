@@ -1,0 +1,64 @@
+{
+  "scopeName": "source.nestpkg",
+  "name": "Nestpkg",
+  "fileTypes": [
+    "nvpm"
+  ],
+  "patterns": [
+    {
+      "name": "keyword.control.section.nestpkg",
+      "match": "^\\s*(package|dependencies|dev_dependencies|packages)\\s*:"
+    },
+    {
+      "name": "keyword.control.lock.nestpkg",
+      "match": "^\\s*lock_version\\s*:"
+    },
+    {
+      "name": "punctuation.separator.sequence.nestpkg",
+      "match": "^\\s*-\\s"
+    },
+    {
+      "name": "string.quoted.double.nestpkg",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.nestpkg",
+          "match": "\\\\[\"\\\\n]"
+        }
+      ]
+    },
+    {
+      "name": "string.unquoted.hash.nestpkg",
+      "match": "\\bsha256:[0-9a-fA-F]+\\b"
+    },
+    {
+      "name": "constant.numeric.version.nestpkg",
+      "match": "=\\d+\\.\\d+\\.\\d+|\\b\\d+\\.\\d+\\.\\d+\\b"
+    },
+    {
+      "name": "constant.language.boolean.nestpkg",
+      "match": "\\b(true|false)\\b"
+    },
+    {
+      "name": "entity.name.type.tier.nestpkg",
+      "match": "\\b(native|c-shim|cxx-shim|wasm-component|foreign-runtime)\\b"
+    },
+    {
+      "name": "entity.name.tag.nestpkg",
+      "match": "^\\s*[a-z][a-z0-9_]*(?=\\s*:)"
+    },
+    {
+      "name": "constant.numeric.integer.nestpkg",
+      "match": "\\b\\d+\\b"
+    },
+    {
+      "name": "string.unquoted.value.nestpkg",
+      "match": "[A-Za-z0-9_#./~+-][A-Za-z0-9_#./:~+=-]*"
+    },
+    {
+      "name": "punctuation.separator.key-value.nestpkg",
+      "match": ":"
+    }
+  ]
+}

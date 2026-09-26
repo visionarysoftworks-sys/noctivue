@@ -104,3 +104,74 @@ fn hover_over_stdio_returns_section_ordered_card() {
     }
     let _ = child.kill();
 }
+
+const NESTPKG_SRC: &str = "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n    py_model:\n        version: 1.0.0\n        tier: foreign-runtime\n        opt_in: true\n";
+const NESTPKG_URI: &str = "file:///c%3A/tmp/nestpkg.nvpm";
+
+fn spawn_server() -> (std::process::Child, Conn) {
+    let mut child = Command::new(lsp_bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn noctivue-lsp");
+    let conn = Conn {
+        stdin: child.stdin.take().expect("stdin"),
+        reader: BufReader::new(child.stdout.take().expect("stdout")),
+    };
+    (child, conn)
+}
+
+#[test]
+fn nestpkg_hover_over_stdio_explains_tier() {
+    let (mut child, mut conn) = spawn_server();
+    conn.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{}}}"#);
+    let init = conn.recv_response(1);
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+
+    conn.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":NESTPKG_URI,"languageId":"nestpkg","version":1,"text":NESTPKG_SRC}}})
+            .to_string(),
+    );
+    // Hover over `foreign-runtime` (line 6, inside the tier value).
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":NESTPKG_URI},"position":{"line":6,"character":16}}})
+            .to_string(),
+    );
+    let hover = conn.recv_response(2);
+    let text = serde_json::to_string(hover.get("result").unwrap_or(&serde_json::Value::Null))
+        .expect("serialize result");
+    assert!(
+        text.contains("foreign-runtime"),
+        "nestpkg hover missing tier explanation: {text}"
+    );
+    let _ = child.kill();
+}
+
+#[test]
+fn nestpkg_completion_over_stdio_suggests_tiers() {
+    let (mut child, mut conn) = spawn_server();
+    conn.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{}}}"#);
+    let init = conn.recv_response(1);
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+
+    conn.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    let src = "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n    a:\n        version: 1.0.0\n        tier: \n";
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":NESTPKG_URI,"languageId":"nestpkg","version":1,"text":src}}})
+            .to_string(),
+    );
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":NESTPKG_URI},"position":{"line":6,"character":14}}})
+            .to_string(),
+    );
+    let completion = conn.recv_response(2);
+    let text = serde_json::to_string(completion.get("result").unwrap_or(&serde_json::Value::Null))
+        .expect("serialize result");
+    assert!(
+        text.contains("foreign-runtime"),
+        "nestpkg completion missing tier values: {text}"
+    );
+    let _ = child.kill();
+}

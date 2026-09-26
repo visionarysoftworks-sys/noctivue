@@ -43,7 +43,9 @@
         "keyword.control.noctivue",
         "keyword.other.noctivue",
         "keyword.other.memory.noctivue",
-        "keyword.other.reserved.noctivue"
+        "keyword.other.reserved.noctivue",
+        "keyword.control.section.nestpkg",
+        "keyword.control.lock.nestpkg"
       ],
       "settings": {
         "foreground": "#c586c0"
@@ -51,7 +53,8 @@
     },
     {
       "scope": [
-        "entity.name.type.noctivue"
+        "entity.name.type.noctivue",
+        "entity.name.type.tier.nestpkg"
       ],
       "settings": {
         "foreground": "#4ec9b0"
@@ -68,7 +71,8 @@
     {
       "scope": [
         "variable.other.noctivue",
-        "variable.parameter.noctivue"
+        "variable.parameter.noctivue",
+        "entity.name.tag.nestpkg"
       ],
       "settings": {
         "foreground": "#9cdcfe"
@@ -78,7 +82,10 @@
       "scope": [
         "constant.numeric.integer.noctivue",
         "constant.numeric.float.noctivue",
-        "constant.language.noctivue"
+        "constant.language.noctivue",
+        "constant.numeric.version.nestpkg",
+        "constant.numeric.integer.nestpkg",
+        "constant.language.boolean.nestpkg"
       ],
       "settings": {
         "foreground": "#b5cea8"
@@ -87,7 +94,10 @@
     {
       "scope": [
         "string.quoted.double.noctivue",
-        "string.quoted.single.noctivue"
+        "string.quoted.single.noctivue",
+        "string.quoted.double.nestpkg",
+        "string.unquoted.hash.nestpkg",
+        "string.unquoted.value.nestpkg"
       ],
       "settings": {
         "foreground": "#ce9178"
@@ -96,7 +106,8 @@
     {
       "scope": [
         "constant.character.escape.noctivue",
-        "punctuation.definition.interpolation.begin.noctivue"
+        "punctuation.definition.interpolation.begin.noctivue",
+        "constant.character.escape.nestpkg"
       ],
       "settings": {
         "foreground": "#d7ba7d"
@@ -109,7 +120,9 @@
         "keyword.operator.range.noctivue",
         "keyword.operator.optional.noctivue",
         "keyword.operator.arrow.noctivue",
-        "punctuation.separator.noctivue"
+        "punctuation.separator.noctivue",
+        "punctuation.separator.sequence.nestpkg",
+        "punctuation.separator.key-value.nestpkg"
       ],
       "settings": {
         "foreground": "#d4d4d4"

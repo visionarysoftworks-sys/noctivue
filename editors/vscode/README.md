@@ -1,8 +1,9 @@
 # Noctivue for VS Code
 
-Language support for [Noctivue](https://github.com/noctivue/noctivue) (`.nv` files):
+Language support for [Noctivue](https://github.com/noctivue/noctivue) (`.nv` files)
+plus `nestpkg` manifests (`nestpkg.nvpm`, `*.nvpm`, `nestpkg.lock`):
 syntax highlighting, a matching dark theme, snippets, file icons, and a
-Language Server Protocol (LSP) integration.
+Language Server Protocol (LSP) integration — all in this one extension.
 
 ## Features
 
@@ -14,7 +15,8 @@ Language Server Protocol (LSP) integration.
 - **Noctivue Dark theme** — a dark color theme tuned for the grammar
   (`Ctrl+K Ctrl+T`, pick *Noctivue Dark*).
 - **LSP-powered editing** (requires the server, see below):
-  - Diagnostics (errors and warnings as you type)
+  - Diagnostics (errors and warnings as you type, import-aware via
+    the compiler module graph)
   - Hover cards — signature, inferred `Type:`, `Declared in`, and
     `///` documentation for definitions, locals, built-ins, keywords,
     and prelude items
@@ -23,6 +25,10 @@ Language Server Protocol (LSP) integration.
     formatting, signature help, and code-action support
 - **Snippets** — `fn`, `struct`, `enum`, `main` starters.
 - **File icons** — `.nv` files get the Noctivue owl mark in the Explorer.
+- **nestpkg manifests** — `nestpkg.nvpm` / `nestpkg.lock` get their own
+  language ID in the same extension: grammar highlighting, LSP
+  diagnostics (same parser as `noct`), hover cards for keys/tiers /
+  version forms, completions, outline symbols, and canonical formatting.
 
 ## Requirements
 
@@ -61,6 +67,21 @@ setup.
 
 The detailed extension changelog is in
 [`CHANGELOG.md`](./CHANGELOG.md).
+
+### 0.0.9
+
+- Import aliases (`v.foo()`, `m.foo()`) no longer show false
+  `unknown identifier` errors — diagnostics follow the module
+  graph, matching `noct run`. Requires a server binary built from
+  this release or later.
+
+### 0.0.8
+
+- Diagnostics are now import-aware: the server reads the open file's
+  module graph, so uses of linked modules no longer show false
+  `unknown identifier` errors and real import problems arrive with
+  their compiler codes. Requires a server binary built from this
+  release or later.
 
 ### 0.0.7
 

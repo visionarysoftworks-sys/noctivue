@@ -1,0 +1,9 @@
+[package]
+name = "nestpkg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "nestpkg.nvpm / nestpkg.lock manifest + lockfile parser (shared by noct CLI and noctivue-lsp)"
+
+[dependencies]

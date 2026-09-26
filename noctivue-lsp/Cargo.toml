@@ -8,6 +8,7 @@ description = "Noctivue Language Server Protocol implementation"
 
 [dependencies]
 compiler = { path = "../compiler" }
+nestpkg = { path = "../nestpkg" }
 lsp-server = "0.9.0"
 lsp-types = "0.97"
 serde = { version = "1.0", features = ["derive"] }

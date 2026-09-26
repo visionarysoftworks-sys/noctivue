@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "compiler",
     "interp",
+    "nestpkg",
     "noct-cli",
     "noctivue-lsp",
     "runtime-native",
