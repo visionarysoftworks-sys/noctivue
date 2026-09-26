@@ -93,7 +93,7 @@ COMMANDS:
     test         [Phase 1] Run the test suite
     ast          [Phase 1] Dump the AST as JSON (noct ast --json)
     diagnostics  [Phase 1] Dump compiler diagnostics as JSON
-    build        [Phase 3] Compile to a native binary
+    build        [Phase 3] Compile to a native binary (--emit-nir: write the .nvir IR dump)
     create       [Phase 4] Scaffold a new project
     fmt          [Phase 4] Run the official formatter
     lint         [Phase 4] Run the official linter
@@ -108,6 +108,9 @@ COMMANDS:
 OPTIONS:
     -h, --help     Print this help message
     -V, --version  Print the toolchain version
+
+    Run `noct build --help` for build-specific flags (--release, --frozen,
+    --emit-nir[=<path>]).
 ",
         version = env!("CARGO_PKG_VERSION")
     );

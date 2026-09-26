@@ -358,6 +358,142 @@ derive Deserialize for User:
 user-defined derives, derive for enums, `impl`-block method
 synthesis beyond the marker, reflection of any kind.
 
+### ADR-025 — `.nvir` / `.nvc` Artifact Extensions
+
+**Status:** Proposed. Stage 1 (`.nvir` dumps) is **implemented**;
+Stage 2 (compiled interface) and the `.nvc` producer are specified, not
+built. This entry exists so the rationale has a home in the log, not
+only in prose: as of this writing the two extensions appeared in
+`STYLE_GUIDE.md` §6.7, `NIR.md` §7, and `DEPLOYMENT.md` §8 with no ADR
+behind them, which is exactly the drift §1's "Confirmed requires an
+ADR, never a silent rewrite" rule exists to prevent.
+
+**Decides what was Open:** STYLE_GUIDE.md §6.7 named `.nvir` and
+`.nvc` as reserved extensions and said what they must *not* do (not
+compete visually with `.nv`, no editing affordances), but never said
+what they *are*. `.gitignore` listed both under "compiler artifacts
+(future)". Nothing owned them.
+
+**Decision:**
+
+- **`.nvc` — linkable compiled-package artifact.** The unit a
+  dependency ships when its `.nv` stays private. Executables remain
+  the only runnable product: `noct build` keeps emitting the platform
+  binary, and `.nvc` is linked into it, never substituted for it. The
+  working parallel is Flutter's `app.so` — one compiled module per
+  target, found in build outputs, consumed at package/run time rather
+  than compiled from source at use time. Proposed location
+  `.noct/build/<target-triple>/<name>.nvc`, which is toolchain-owned,
+  gitignored, and structurally unable to leak into a published source
+  tarball (`noct publish` collects `*.nv` plus the manifest).
+- **`.nvir` — portable interface + IR, text first.** Stage 1 is the
+  human-inspectable dump and build cache; `--emit-nir` ships it. Stage
+  2 is the public-API-only compiled interface (signatures, exported
+  types, mode tags, docs), hash-bound to the `.nvc` it was extracted
+  with. Stage 2 is not optional garnish: consumers cannot compile
+  against a closed package they cannot see into, so the interface half
+  is what makes the artifact half usable — the `.cmi`/`.swiftmodule`/
+  `.d.ts` role.
+- **Both ride the `noctivue` language outright** (same grammar, same
+  file identity, `.nv` analysis path) with exactly one server-side
+  tweak: **no diagnostics**, because running `.nv` analysis over
+  generated text yields false positives. This is how §6.7's "MUST NOT
+  visually compete with `.nv`" is satisfied — by posture, not by a
+  separate brand.
+- **Emission is a leaf:** `--emit-nir` writes the dump and stops before
+  staging, codegen, and linking, so IR inspection never depends on a
+  native toolchain.
+
+**Security posture, stated honestly.** Shipping compiled output instead
+of source raises the bar against casual copying and gives integrity
+hashes and signatures something to attach to. It is **deterrence, not
+immunity**: native code disassembles and bytecode decompiles. No
+document may promise reverse-engineering-proof output, and obfuscation
+is explicitly out of scope for v1. A security-relevant claim that
+cannot survive contact with a determined reverse engineer is worse than
+no claim, because it is relied upon.
+
+**Explicit non-conflation.** VM bytecode encoding is not NIR
+serialization; a compact bytecode form is a separate format decision
+with its own extension, never a second meaning loaded onto `.nvir`.
+`.nvir` is never the distribution artifact.
+
+**Cross-references:** STYLE_GUIDE.md §6.7 (roles + editor identity),
+NIR.md §7 (the format and its two stages), DEPLOYMENT.md §8
+(container sketch, producer, non-goals), TOOLCHAIN.md §3 (the store
+this rides in), IMPLEMENTATION_PLAN.md Phase 7/M6 (the per-target
+output matrix that governs `.nvc`).
+
+**Milestones:** Stage 1 shipped with `noct build --emit-nir`. The
+`.nvc` producer rides the direct Cranelift backend (M5 at the earliest,
+DEPLOYMENT.md §8); the interface half rides with it, because shipping
+one without the other delivers a package nobody can consume. No roadmap
+surgery — both are naming/format decisions inside already-scheduled
+backend work.
+
+### ADR-026 — Dependency Content Store: Derived In-Project, Fetched Global
+
+**Status:** Proposed. The end-state is decided; the move is scheduled
+work, not a rewrite of the present layout.
+
+**Decides what was Open:** TOOLCHAIN.md §3 fixed the manifest, lockfile,
+and tiers, and ADR-017 fixed the *names*, but nothing said where
+fetched dependency content lives. The implemented answer is
+per-project: `.noct/cache/<name>-<version>.pkg` (raw archive bytes,
+kept for hash re-verification) plus `.noct/packages/<name>-<version>/`
+(the unpacked tree the compiler reads). So every dependency is stored
+twice per project, and again in every other project that uses it.
+
+**Decision — one sentence to settle every future "where does X go":**
+*derived lives with the project, fetched lives global, and the lock is
+the mapping between them.*
+
+- **In-tree, permanently:** `nestpkg.nvpm` + `nestpkg.lock` (the
+  mapping — the role `.dart_tool/package_config.json` plays in Flutter,
+  except human-readable and checked in), `.noct/build/` outputs
+  (including `.nvc`), and any resolution metadata.
+- **Global, content-addressed:** `~/.noctivue/store/sha256/<ab>/<cdef…>/`
+  for archive bytes and a parallel `extracted/` tree, keyed by the
+  `content: sha256:…` hashes the lockfile already records. Identical
+  bytes are stored once across projects *and* across versions. XDG-aware
+  on Linux, per-OS homes elsewhere, with a `NOCT_STORE` env override
+  following the existing `NOCT_KEYS` precedent.
+- **Both halves are kept, shared rather than collapsed.** The archive is
+  the unit of verification and transfer (one streaming hash pass); the
+  extracted tree is the unit of compilation and human inspection.
+  Every mature ecosystem keeps the pair (Cargo `.crate` + `src/`, Go
+  zips + extracted trees, pub archives + extracted dirs). The waste was
+  never archive-plus-extracted — it was per-project. Collapsing to one
+  half would save a fraction of that while destroying either cheap
+  verification or direct readability.
+- **Cadence:** hash the archive once at fetch; extract atomically
+  (temp, verify, move into place — pub's discipline) and mark
+  read-only (Go's `-modcacherw` exists precisely because read-only is
+  the default there, and it is what makes silent drift from the lock
+  impossible). An immutable store has no repair path by design:
+  corruption is answered by re-fetching loudly, not by patching bytes.
+  `--frozen` and the manifest gate stay metadata-only (lock-vs-mapping),
+  never a per-build re-hash.
+- **`vendor/` remains** the committed, offline, air-gapped escape hatch
+  and bypasses the store entirely. A missing store entry with no network
+  fails loudly naming the package.
+- **No reference counting, no auto-GC.** A manual `noct clean` first;
+  LRU pruning later if measured. Cargo only recently grew cache GC after
+  a decade without it.
+
+**Milestones:** M5 (same window as signing/audit enforcement returns —
+TOOLCHAIN.md §3, and an M5 exit criterion in IMPLEMENTATION_PLAN.md).
+The move is deliberately gated on scale, not principle: while the
+registry is young the duplication is unnoticeable and hermetic
+per-project trees are genuinely easier to debug. Two cheap integrity
+wins that require no relocation may land earlier — read-only unpack,
+and editor excludes so the LSP does not index fetched trees.
+
+**Cross-references:** TOOLCHAIN.md §3 (the end-state bullet), STYLE_GUIDE.md
+§6.7 (why `.nvc` outputs stay in-tree while fetched bytes do not),
+DEPLOYMENT.md §§1–2 (reproducible builds; the runtime image carries no
+`.noct/`), IMPLEMENTATION_PLAN.md Phase 6/M5 (exit criterion).
+
 ## 3. Technical Consistency Review
 
 This section is a deliberately critical pass over the design as
