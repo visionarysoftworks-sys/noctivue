@@ -14,15 +14,33 @@
 //!   not here).
 //!
 //! Usage:
-//!   noct audit
+//!   noct audit [--advisories <file>]
 
 use std::fs;
 use std::path::Path;
 
 pub fn run(args: &[String]) -> i32 {
-    for arg in args {
-        eprintln!("noct audit: unknown flag `{arg}` (usage: noct audit)");
-        return 1;
+    let mut advisories_path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--advisories" {
+            match it.next() {
+                Some(value) => advisories_path = Some(value.clone()),
+                None => {
+                    eprintln!("noct audit: --advisories requires a file path");
+                    return 1;
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--advisories=") {
+            if value.is_empty() {
+                eprintln!("noct audit: --advisories requires a file path");
+                return 1;
+            }
+            advisories_path = Some(value.to_string());
+        } else {
+            eprintln!("noct audit: unknown flag `{arg}` (usage: noct audit [--advisories <file>])");
+            return 1;
+        }
     }
 
     let lock_path = Path::new("nestpkg.lock");
@@ -41,25 +59,75 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    println!("{:<20} {:<10} {:<16} {:<12} {}", "name", "version", "tier", "signed_by", "audit");
-    for pkg in &lock.packages {
-        let tier = pkg.tier.as_str();
-        let tier = if pkg.experimental {
-            format!("{tier} (experimental)")
-        } else {
-            tier.to_string()
-        };
-        let (signed_by, status) = match &pkg.source {
-            crate::manifest::Source::Path(_) => ("-".to_string(), "local"),
-            _ => (
-                pkg.signed_by.clone().unwrap_or_else(|| "-".to_string()),
-                "signed",
-            ),
-        };
-        println!(
-            "{:<20} {:<10} {:<16} {:<12} {} (no vuln database)",
-            pkg.name, pkg.version, tier, signed_by, status
-        );
+    let db = match advisories_path {
+        None => None,
+        Some(path) => match crate::advisory::load_database(Path::new(&path)) {
+            Ok(db) => Some(db),
+            Err(e) => {
+                eprintln!("noct audit: invalid advisory database: {e}");
+                return 1;
+            }
+        },
+    };
+
+    match db {
+        None => {
+            println!("{:<20} {:<10} {:<16} {:<12} {}", "name", "version", "tier", "signed_by", "audit");
+            for pkg in &lock.packages {
+                let tier = pkg.tier.as_str();
+                let tier = if pkg.experimental {
+                    format!("{tier} (experimental)")
+                } else {
+                    tier.to_string()
+                };
+                let (signed_by, status) = match &pkg.source {
+                    crate::manifest::Source::Path(_) => ("-".to_string(), "local"),
+                    _ => (
+                        pkg.signed_by.clone().unwrap_or_else(|| "-".to_string()),
+                        "signed",
+                    ),
+                };
+                println!(
+                    "{:<20} {:<10} {:<16} {:<12} {} (no vuln database)",
+                    pkg.name, pkg.version, tier, signed_by, status
+                );
+            }
+            0
+        }
+        Some(db) => {
+            println!(
+                "{:<20} {:<10} {:<16} {:<12} {} {}",
+                "name", "version", "tier", "signed_by", "audit", "vulns"
+            );
+            for pkg in &lock.packages {
+                let tier = pkg.tier.as_str();
+                let tier = if pkg.experimental {
+                    format!("{tier} (experimental)")
+                } else {
+                    tier.to_string()
+                };
+                let (signed_by, status) = match &pkg.source {
+                    crate::manifest::Source::Path(_) => ("-".to_string(), "local"),
+                    _ => (
+                        pkg.signed_by.clone().unwrap_or_else(|| "-".to_string()),
+                        "signed",
+                    ),
+                };
+                let hits = db.matching(&pkg.name, pkg.version);
+                let vulns = if hits.is_empty() {
+                    "clean".to_string()
+                } else {
+                    hits.iter()
+                        .map(|a| format!("{}({})", a.id, a.severity.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                println!(
+                    "{:<20} {:<10} {:<16} {:<12} {} {}",
+                    pkg.name, pkg.version, tier, signed_by, status, vulns
+                );
+            }
+            0
+        }
     }
-    0
 }

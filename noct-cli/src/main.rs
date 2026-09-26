@@ -17,9 +17,12 @@
 //! | `noct publish`        | 4     | --dry-run only (no registry) |
 //! | `noct doc`            | 4     | stdout per file |
 //! | `noct vendor`         | 4     | offline copy of the lock closure |
+//! | `noct get`            | 4+6a  | fetch the locked closure into the store |
+//! | `noct clean`          | 4+6a  | reclaim the store + legacy in-tree dirs |
 //! | `noct outdated`       | 4     | index comparison, informational |
 //! | `noct completions`    | 4     | shell stub (commands + files) |
 
+mod advisory;
 mod cmd_ast;
 mod cmd_build;
 mod cmd_create;
@@ -33,12 +36,15 @@ mod cmd_completions;
 mod cmd_outdated;
 mod cmd_publish;
 mod cmd_vendor;
+mod cmd_get;
+mod cmd_clean;
 mod cmd_run;
 mod cmd_run_vm;
 mod cmd_test;
 mod fmt_v2;
 mod manifest;
 mod registry;
+mod store;
 
 use std::process;
 
@@ -59,6 +65,8 @@ fn main() {
         Some("publish")     => cmd_publish::run(&args[2..]),
         Some("doc")         => cmd_doc::run(&args[2..]),
         Some("vendor")      => cmd_vendor::run(&args[2..]),
+        Some("get")         => cmd_get::run(&args[2..]),
+        Some("clean")       => cmd_clean::run(&args[2..]),
         Some("outdated")    => cmd_outdated::run(&args[2..]),
         Some("completions") => cmd_completions::run(&args[2..]),
         Some("run-vm")      => cmd_run_vm::run(&args[2..]),
@@ -102,6 +110,8 @@ COMMANDS:
     publish      [Phase 4] Publish to the package registry
     doc          [Phase 4] Generate documentation
     vendor       [Phase 4] Copy the dependency closure into vendor/
+    get          [Phase 4] Fetch the locked closure into the content store
+    clean        [Phase 4] Reclaim the content store (and legacy in-tree dirs)
     outdated     [Phase 4] Show newer indexed versions (informational)
     completions  [Phase 4] Print a shell completion stub
 
@@ -110,7 +120,8 @@ OPTIONS:
     -V, --version  Print the toolchain version
 
     Run `noct build --help` for build-specific flags (--release, --frozen,
-    --emit-nir[=<path>]).
+    --offline, --index, --emit-nir[=<path>]). `noct run` and `noct test`
+    take --frozen, --offline and --index too.
 ",
         version = env!("CARGO_PKG_VERSION")
     );

@@ -1,0 +1,37 @@
+//! Self-contained server smoke for reference-crud.
+//!
+//! Project-mode `noct test` runs each file standalone (no stdlib
+//! concat), so this smoke speaks builtins directly
+//! (`http_server_listen`, `http_server_register_route`,
+//! `http_server_serve_loop`, `http_server_shutdown`,
+//! `http_send_builtin`) instead of the stdlib wrappers the app
+//! itself uses. It proves the serve path end to end: listen, route,
+//! client round trip, stop, join.
+//! Full coverage (CRUD, limits, load) lives in `tests/http_load.rs`.
+
+fn hello(body: String) -> String:
+    "smoke-ok"
+
+task serve(srv: Int):
+    http_server_serve_loop(srv)
+
+fn check_body(b: String, srv: Int, t: Int) -> Unit:
+    match b:
+        "smoke-ok": finish_ok(srv, t)
+        _: assert(false, "bad body")
+
+fn finish_ok(srv: Int, t: Int) -> Unit:
+    http_server_shutdown(srv); await t; println("smoke ok")
+
+fn check_client(srv: Int, t: Int) -> Unit:
+    match http_send_builtin("GET", "http://127.0.0.1:18099/smoke", [], ""):
+        Ok(b): check_body(b, srv, t)
+        Err(e): assert(false, "client failed")
+
+main():
+    match http_server_listen(18099):
+        Ok(srv):
+            http_server_register_route(srv, "GET", "/smoke", "hello"); let t = serve(srv)
+            sleep_builtin(200); check_client(srv, t)
+        Err(e):
+            assert(false, "listen failed")

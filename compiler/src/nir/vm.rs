@@ -3,10 +3,16 @@
 //! This is the M1 deliverable: a bytecode VM that consumes NIR and produces
 //! identical observable behavior to the M0 tree-walking interpreter.
 
+use crate::http_wire::{self, WireError};
 use crate::nir::instr::{CmpOp, ConstValue, Instr};
 use crate::nir::module::NirModule;
 use crate::nir::types::{BlockId, FuncId, ValueId};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum VmValue {
@@ -92,11 +98,477 @@ impl std::fmt::Display for VmValue {
     }
 }
 
+// ── Phase 5/M4 host-IO state (VM mirrors of the interpreter) ───────────────
+//
+// Every helper and error string below mirrors `interp/src/lib.rs`
+// exactly — the interpreter is the oracle, this module never invents
+// its own messages or byte counts (see each item's note).
+
+/// One registered HTTP route: exact method + path match, handler is a
+/// function NAME resolved against the module at serve time.
+#[derive(Debug, Clone)]
+struct VmHttpRoute {
+    method: String,
+    path_pattern: String,
+    handler: String,
+}
+
+struct VmServerState {
+    listener: TcpListener,
+    routes: Vec<VmHttpRoute>,
+    shutdown: Arc<AtomicBool>,
+}
+
+static VM_SERVER_REGISTRY: LazyLock<Mutex<HashMap<u64, VmServerState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static VM_SERVER_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Live per-connection VM server threads (mirrors the interpreter's
+/// `live_connection_threads` hook for the Phase 5 leak pass).
+static VM_CONN_THREADS: AtomicU64 = AtomicU64::new(0);
+/// Currently open VM SQLite connections (mirrors
+/// `live_db_connections`).
+static VM_DB_OPEN: AtomicU64 = AtomicU64::new(0);
+/// High-water marks for the gauges above.
+static VM_CONN_PEAK: AtomicU64 = AtomicU64::new(0);
+static VM_DB_PEAK: AtomicU64 = AtomicU64::new(0);
+
+fn vm_track_up(gauge: &AtomicU64, peak: &AtomicU64) {
+    let now = gauge.fetch_add(1, Ordering::Relaxed) + 1;
+    peak.fetch_max(now, Ordering::Relaxed);
+}
+
+/// Live per-connection VM server threads right now.
+pub fn vm_live_connection_threads() -> u64 {
+    VM_CONN_THREADS.load(Ordering::Relaxed)
+}
+
+/// Currently open VM SQLite connections right now.
+pub fn vm_live_db_connections() -> u64 {
+    VM_DB_OPEN.load(Ordering::Relaxed)
+}
+
+/// Most live VM connection threads seen so far in this process.
+pub fn vm_peak_connection_threads() -> u64 {
+    VM_CONN_PEAK.load(Ordering::Relaxed)
+}
+
+/// Most open VM SQLite connections seen so far in this process.
+pub fn vm_peak_db_connections() -> u64 {
+    VM_DB_PEAK.load(Ordering::Relaxed)
+}
+
+/// Open SQLite connections for one VM instance. Mirrors the
+/// interpreter's `DbRegistry` (`next` starts at 0 and pre-increments,
+/// so the first handle is 1 — same shape, though cross-backend handle
+/// equality is NOT promised).
+#[derive(Debug, Default)]
+struct VmDbRegistry {
+    next: u64,
+    conns: HashMap<u64, rusqlite::Connection>,
+}
+
+// ── Phase 6/Wave 0: monotonic clock + explicit-seed RNG (VM mirror) ──────
+//
+// Mirrors `interp/src/lib.rs` exactly (algorithm, messages, handle
+// shape) — the interpreter is the oracle. ADR-020 (mono millis) +
+// ADR-021 (no global entropy); same acceptance bar (same seed → same
+// sequence across both runtimes).
+
+/// Process-wide monotonic epoch (arbitrary — durations between reads
+/// are the contract, never wall-clock interpretation).
+static VM_TIME_EPOCH: LazyLock<std::time::Instant> =
+    LazyLock::new(std::time::Instant::now);
+
+/// Millis since `VM_TIME_EPOCH` (u64 range, fits `Int`).
+fn vm_mono_ms() -> i128 {
+    VM_TIME_EPOCH.elapsed().as_millis() as i128
+}
+
+/// SplitMix64 step (byte-identical to the interpreter's
+/// `rng_next_u64`: sequential seeds diverge immediately).
+fn vm_rng_next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Live RNG states by opaque handle id (one VM instance).
+#[derive(Debug, Default)]
+struct VmRngRegistry {
+    next: u64,
+    states: HashMap<u64, u64>,
+}
+
+impl Drop for Vm {
+    /// Gauge reconcile for worker VMs (dropped, never `run`):
+    /// mirrors the interpreter's `Drop` so the VM leak gauge cannot
+    /// lie either. Skips on borrow failure rather than double-panic.
+    fn drop(&mut self) {
+        if let Ok(db) = self.db.try_borrow_mut() {
+            let dropped = db.conns.len() as u64;
+            if dropped > 0 {
+                drop(db);
+                VM_DB_OPEN.fetch_sub(dropped, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn vm_ok(value: VmValue) -> VmValue {
+    VmValue::Result(Ok(Box::new(value)))
+}
+
+fn vm_err(message: String) -> VmValue {
+    VmValue::Result(Err(Box::new(VmValue::String(message))))
+}
+
+/// Serve one accepted connection to completion on its worker
+/// thread (VM mirror of the interpreter's worker): bounded read →
+/// route → handler → one close-delimited response. Wire errors
+/// answer without invoking a handler; handler failures (error,
+/// non-String/non-Response, unknown name, panic) answer 500.
+///
+/// Status-aware handlers (Phase 6, mirrored byte-for-byte with the
+/// interpreter): a handler may return an `HttpResponse` struct value
+/// (`status: Int`, `reason: String`, `headers: [[String]]`,
+/// `body: String`) or a plain `String` for 200-as-today. Rendering
+/// and validation live in [`http_wire::encode_status_response`]
+/// (shared); this function only extracts the plain parts, so the
+/// runtimes cannot diverge on what a status means.
+fn vm_serve_one_connection(mut worker: Vm, mut conn: std::net::TcpStream, routes: &[VmHttpRoute]) {
+    let response_bytes = match http_wire::read_request(&mut conn) {
+        Err(WireError::OverHeaderCap) | Err(WireError::OverBodyCap) => {
+            http_wire::response(413, "Payload Too Large")
+        }
+        Err(_) => http_wire::response(400, "Bad Request"),
+        Ok(req) => {
+            let matched = routes
+                .iter()
+                .find(|r| r.method == req.method && r.path_pattern == req.path)
+                .map(|r| r.handler.clone());
+            match matched {
+                None => http_wire::response(404, "Not Found"),
+                Some(handler_name) => {
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let fid = worker.module.get_function(&handler_name).map(|f| f.id);
+                        match fid {
+                            Some(id) => worker.call(id, vec![VmValue::String(req.body)]),
+                            None => Err(VmError::FunctionNotFound(
+                                crate::nir::types::FuncId::UNRESOLVED,
+                            )),
+                        }
+                    }));
+                    match outcome {
+                        Ok(Ok(VmValue::String(s))) => http_wire::response(200, &s),
+                        Ok(Ok(VmValue::Struct { name, fields })) if name == "HttpResponse" => {
+                            match vm_decode_http_response(&fields) {
+                                Some((status, reason, headers, body)) => {
+                                    match http_wire::encode_status_response(
+                                        status, &reason, &headers, &body,
+                                    ) {
+                                        Ok(encoded) => {
+                                            for skipped in &encoded.skipped_wire_owned {
+                                                eprintln!(
+                                                    "http handler `{handler_name}` set wire-owned header `{skipped}`; skipped (framing is wire-owned)"
+                                                );
+                                            }
+                                            encoded.bytes
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "http handler `{handler_name}` returned an unrenderable HttpResponse ({e:?}); answering 500"
+                                            );
+                                            http_wire::response(500, "Internal Server Error")
+                                        }
+                                    }
+                                }
+                                None => {
+                                    eprintln!(
+                                        "http handler `{handler_name}` returned a malformed HttpResponse (need status: Int, reason: String, headers: [[String]], body: String); answering 500"
+                                    );
+                                    http_wire::response(500, "Internal Server Error")
+                                }
+                            }
+                        }
+                        Ok(Ok(_)) => {
+                            eprintln!(
+                                "http handler `{handler_name}` returned a non-String value; answering 500"
+                            );
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("http handler `{handler_name}` failed: {e}");
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                        Err(_) => {
+                            eprintln!("http handler `{handler_name}` panicked; answering 500");
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                    }
+                }
+            }
+        }
+    };
+    http_wire::write_bytes(&mut conn, &response_bytes);
+}
+
+/// Extract the plain `(status, reason, headers, body)` parts from an
+/// `HttpResponse` struct value (VM mirror of the interpreter's
+/// `decode_http_response`: same strictness, same `None`-means-500
+/// contract — field plumbing only, every decision lives in
+/// [`http_wire::encode_status_response`]).
+fn vm_decode_http_response(
+    fields: &HashMap<String, VmValue>,
+) -> Option<(i128, String, Vec<(String, String)>, String)> {
+    let status = match fields.get("status") {
+        Some(VmValue::Int(n)) => *n,
+        _ => return None,
+    };
+    let reason = match fields.get("reason") {
+        Some(VmValue::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let body = match fields.get("body") {
+        Some(VmValue::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let headers = match fields.get("headers") {
+        Some(VmValue::List(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    VmValue::List(pair) if pair.len() == 2 => match (&pair[0], &pair[1]) {
+                        (VmValue::String(k), VmValue::String(v)) => {
+                            out.push((k.clone(), v.clone()))
+                        }
+                        _ => return None,
+                    },
+                    _ => return None,
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    Some((status, reason, headers, body))
+}
+
+fn vm_parse_http_url(url: &str) -> Option<(String, u16, String)> {
+    // Plain HTTP only: no TLS stack, so `https://` is refused (None),
+    // exactly like the interpreter.
+    if url.strip_prefix("https://").is_some() {
+        return None;
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let path = format!("/{path}");
+        let (host, port_str) = authority.split_once(':').unwrap_or((authority, "80"));
+        let port: u16 = port_str.parse().ok()?;
+        Some((host.to_string(), port, path))
+    } else {
+        None
+    }
+}
+
+fn vm_split_http_body(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let body_start = text.find("\r\n\r\n")?;
+    Some(text[body_start + 4..].to_string())
+}
+
+/// Minimal JSON string quoting for SQLite result rendering (mirrors
+/// the interpreter's `json_quote`: `\" \\ \n \r \t` plus `\uXXXX` for
+/// other controls).
+fn vm_json_quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Render one SQLite value as JSON (mirrors the interpreter's
+/// `render_json_value`: integers bare, reals shortest round-trip via
+/// `{:?}`, text quoted, blobs as lowercase hex strings, NULL as
+/// `null`).
+fn vm_render_json_value(value: &rusqlite::types::Value) -> String {
+    use rusqlite::types::Value as SqlValue;
+    match value {
+        SqlValue::Null => "null".to_string(),
+        SqlValue::Integer(int) => int.to_string(),
+        SqlValue::Real(float) => format!("{float:?}"),
+        SqlValue::Text(text) => vm_json_quote(text),
+        SqlValue::Blob(bytes) => {
+            let mut out = String::from("\"");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push('"');
+            out
+        }
+    }
+}
+
+/// Parse the params JSON array of scalars into rusqlite bind values
+/// (mirrors the interpreter's `parse_json_params`, including every
+/// error string — params are scalars by contract, nesting is loud).
+fn vm_parse_json_params(text: &str) -> Result<Vec<rusqlite::types::Value>, String> {
+    use rusqlite::types::Value as SqlValue;
+    // A small JSON-string scanner (mirrors the interpreter's
+    // `parse_json_string` — escapes `\" \\ \/ \n \r \t` only).
+    fn scan_string(text: &str) -> Result<(String, &str), String> {
+        let mut chars = text.char_indices();
+        if chars.next().map(|(_, c)| c) != Some('"') {
+            return Err("expected JSON string".to_string());
+        }
+        let mut value = String::new();
+        let mut escaped = false;
+        for (index, ch) in chars {
+            if escaped {
+                value.push(match ch {
+                    '"' | '\\' | '/' => ch,
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    _ => return Err("unsupported JSON escape".to_string()),
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                return Ok((value, &text[index + 1..]));
+            } else {
+                value.push(ch);
+            }
+        }
+        Err("unterminated JSON string".to_string())
+    }
+    // First scalar separator: a comma or the closing bracket —
+    // whichever comes first (same scan the interpreter does).
+    fn scalar_end(body: &str) -> usize {
+        body.find([',', ']']).unwrap_or(body.len())
+    }
+    let mut body = text.trim();
+    body = body
+        .strip_prefix('[')
+        .ok_or_else(|| "params must be a JSON array like `[1, \"x\"]`".to_string())?
+        .trim_start();
+    if let Some(rest) = body.strip_prefix(']') {
+        if rest.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err("params must be a JSON array like `[1, \"x\"]`".to_string());
+    }
+    let mut out = Vec::new();
+    loop {
+        if body.starts_with('"') {
+            let (value, rest) = scan_string(body)?;
+            out.push(SqlValue::Text(value));
+            body = rest.trim_start();
+        } else if let Some(rest) = body.strip_prefix("true") {
+            out.push(SqlValue::Integer(1));
+            body = rest.trim_start();
+        } else if let Some(rest) = body.strip_prefix("false") {
+            out.push(SqlValue::Integer(0));
+            body = rest.trim_start();
+        } else if let Some(rest) = body.strip_prefix("null") {
+            out.push(SqlValue::Null);
+            body = rest.trim_start();
+        } else {
+            let end = scalar_end(body);
+            let token = body[..end].trim();
+            if token.is_empty() {
+                return Err("params must be a JSON array like `[1, \"x\"]`".to_string());
+            }
+            if let Ok(int) = token.parse::<i64>() {
+                out.push(SqlValue::Integer(int));
+            } else if {
+                let digits = token.trim_start_matches('-');
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            } {
+                // Integer-shaped but outside `i64`: reject loudly
+                // instead of silently coercing through `f64`
+                // (`docs/PHASE5_PRODUCTION.md` §4; mirrors the
+                // interpreter).
+                return Err(format!(
+                    "integer param `{token}` out of range (binds as i64)"
+                ));
+            } else if let Ok(float) = token.parse::<f64>() {
+                out.push(SqlValue::Real(float));
+            } else {
+                return Err(format!("unsupported JSON param `{token}` (scalars only)"));
+            }
+            body = body[end..].trim_start();
+        }
+        if let Some(rest) = body.strip_prefix(',') {
+            body = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = body.strip_prefix(']') {
+            if !rest.trim().is_empty() {
+                return Err("trailing bytes after JSON params array".to_string());
+            }
+            return Ok(out);
+        }
+        return Err("params must be a JSON array like `[1, \"x\"]`".to_string());
+    }
+}
+
+/// The `KEY=VALUE` parsing core behind `DotenvLoad` (mirrors the
+/// interpreter's `dotenv_load_file`: blank lines and `#` comments
+/// skipped; lines without `=` and empty names warn on stderr and skip;
+/// `KEY`/`VALUE` trimmed; the process environment always wins).
+/// Returns the number of variables set, or the read failure.
+fn vm_dotenv_load_file(path: &str) -> Result<i128, String> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read dotenv file `{path}`: {e}"))?;
+    let mut loaded = 0i128;
+    for (index, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            eprintln!("dotenv: ignoring malformed line {} in `{path}`", index + 1);
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            eprintln!("dotenv: ignoring malformed line {} in `{path}`", index + 1);
+            continue;
+        }
+        if std::env::var_os(name).is_none() {
+            unsafe { std::env::set_var(name, value.trim()) };
+            loaded += 1;
+        }
+    }
+    Ok(loaded)
+}
+
 pub struct Vm {
     module: NirModule,
     call_stack: Vec<CallFrame>,
     globals: HashMap<FuncId, VmValue>,
     heap: Vec<VmValue>,
+    /// Open SQLite connections by opaque handle id (Phase 5/M4:
+    /// `Db*`). Interior mutability: `execute_instr` only has `&mut
+    /// self` shared across arms, and the VM is single-threaded —
+    /// same story as the interpreter's `RefCell<DbRegistry>`.
+    db: RefCell<VmDbRegistry>,
+    /// Explicit-seed RNG states by opaque handle id (Phase 6/Wave 0:
+    /// `Rng*`). Same interior-mutability story as `db`.
+    rng: RefCell<VmRngRegistry>,
 }
 
 #[derive(Debug)]
@@ -119,6 +591,8 @@ impl Vm {
             call_stack: Vec::new(),
             globals: HashMap::new(),
             heap: Vec::new(),
+            db: RefCell::new(VmDbRegistry::default()),
+            rng: RefCell::new(VmRngRegistry::default()),
         };
         for func in &vm.module.functions {
             vm.globals.insert(func.id, VmValue::Function(func.id));
@@ -439,6 +913,483 @@ impl Vm {
             Instr::Print { val } => {
                 let v = self.get_value(frame, *val)?;
                 print!("{}", v);
+            }
+            // ── Phase 5/M4 host-IO builtins ──────────────────────────
+            // Every arm mirrors `interp/src/lib.rs`'s `eval_builtin`
+            // arm of the same name exactly (messages, shapes, blocking
+            // behavior) — the interpreter is the oracle. Scalar-shaped
+            // builtins additionally lower to native imports (see
+            // `backends/cranelift`); aggregate-returning ones are
+            // VM-only (no native value representation yet).
+            Instr::Sleep { ms } => {
+                // Cooperative BLOCKING sleep (the M4 floor, not a
+                // timer): real wall-clock block, like the interpreter.
+                let v = self.get_value(frame, *ms)?;
+                match v {
+                    VmValue::Int(n) if n >= 0 => {
+                        std::thread::sleep(std::time::Duration::from_millis(n as u64));
+                    }
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "sleep_builtin requires a non-negative Int (milliseconds)"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            Instr::FsExists { dst, path } => {
+                let v = self.get_value(frame, *path)?;
+                // Non-String operand answers `false` (mirrors the
+                // interpreter — typeck guarantees String, so this is
+                // recovery-only, never a trap).
+                let exists = match v {
+                    VmValue::String(p) => std::path::Path::new(&p).exists(),
+                    _ => false,
+                };
+                frame.locals[dst.0 as usize] = VmValue::Bool(exists);
+            }
+            Instr::IoWrite { src } => {
+                let v = self.get_value(frame, *src)?;
+                print!("{v}");
+            }
+            Instr::IoWriteLn { src } => {
+                let v = self.get_value(frame, *src)?;
+                println!("{v}");
+            }
+            Instr::EnvSet { name, value } => {
+                let n = self.get_value(frame, *name)?;
+                let v = self.get_value(frame, *value)?;
+                match (n, v) {
+                    (VmValue::String(n), VmValue::String(v)) => {
+                        unsafe { std::env::set_var(n, v) };
+                    }
+                    _ => {
+                        eprintln!("env_set_builtin: expected name and value Strings");
+                    }
+                }
+            }
+            Instr::LogEmit { level, message } => {
+                let l = self.get_value(frame, *level)?;
+                let m = self.get_value(frame, *message)?;
+                match (l, m) {
+                    (VmValue::String(level), VmValue::String(message)) => {
+                        // One line, stderr, no timestamp (deterministic
+                        // output — the level gate lives in `log/log.nv`).
+                        eprintln!("[{}] {}", level.to_ascii_uppercase(), message);
+                    }
+                    _ => {
+                        eprintln!("[ERROR] log_emit_builtin: expected level and message Strings");
+                    }
+                }
+            }
+            Instr::HttpServerRegister { server, method, path, handler } => {
+                let s = self.get_value(frame, *server)?;
+                let m = self.get_value(frame, *method)?;
+                let p = self.get_value(frame, *path)?;
+                let h = self.get_value(frame, *handler)?;
+                if let (
+                    VmValue::Int(id),
+                    VmValue::String(method),
+                    VmValue::String(path),
+                    VmValue::String(handler),
+                ) = (s, m, p, h)
+                {
+                    let mut reg =
+                        VM_SERVER_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(state) = reg.get_mut(&(id as u64)) {
+                        state.routes.push(VmHttpRoute {
+                            method,
+                            path_pattern: path,
+                            handler,
+                        });
+                    }
+                }
+            }
+            Instr::HttpServerShutdown { server } => {
+                let s = self.get_value(frame, *server)?;
+                if let VmValue::Int(id) = s {
+                    let mut reg =
+                        VM_SERVER_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(state) = reg.get(&(id as u64)) {
+                        state.shutdown.store(true, Ordering::Relaxed);
+                    }
+                    reg.remove(&(id as u64));
+                }
+            }
+            Instr::HttpSend { dst, method, url, headers, body } => {
+                let m = self.get_value(frame, *method)?;
+                let u = self.get_value(frame, *url)?;
+                let h = self.get_value(frame, *headers)?;
+                let b = self.get_value(frame, *body)?;
+                let result = match (m, u, h, b) {
+                    (
+                        VmValue::String(method),
+                        VmValue::String(url),
+                        VmValue::List(headers),
+                        VmValue::String(body),
+                    ) => self.vm_http_send(&method, &url, &headers, &body),
+                    _ => Err(
+                        "http_send: expected (method, url, headers, body) Strings".to_string(),
+                    ),
+                };
+                frame.locals[dst.0 as usize] = match result {
+                    Ok(body) => vm_ok(VmValue::String(body)),
+                    Err(e) => vm_err(e),
+                };
+            }
+            Instr::HttpServerListen { dst, port } => {
+                let p = self.get_value(frame, *port)?;
+                let result = match p {
+                    VmValue::Int(port) => {
+                        let addr = format!("0.0.0.0:{}", port as u16);
+                        match TcpListener::bind(&addr) {
+                            Ok(listener) => {
+                                listener.set_nonblocking(true).ok();
+                                let handle =
+                                    VM_SERVER_COUNTER.fetch_add(1, Ordering::Relaxed);
+                                let shutdown = Arc::new(AtomicBool::new(false));
+                                VM_SERVER_REGISTRY
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(
+                                        handle,
+                                        VmServerState {
+                                            listener,
+                                            routes: Vec::new(),
+                                            shutdown,
+                                        },
+                                    );
+                                Ok(Box::new(VmValue::Int(handle as i128)))
+                            }
+                            Err(e) => Err(Box::new(VmValue::String(format!(
+                                "http_server_listen: bind failed: {e}"
+                            )))),
+                        }
+                    }
+                    _ => Err(Box::new(VmValue::String(
+                        "http_server_listen: expected port Int".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::HttpServerServeLoop { server } => {
+                let s = self.get_value(frame, *server)?;
+                if let VmValue::Int(id) = s {
+                    self.vm_serve_loop(id as u64)?;
+                }
+            }
+            Instr::DbOpen { dst, path } => {
+                let p = self.get_value(frame, *path)?;
+                let result = match p {
+                    VmValue::String(path) => (|| {
+                        let conn = rusqlite::Connection::open(&path).map_err(|e| {
+                            Box::new(VmValue::String(format!(
+                                "cannot open database `{path}`: {e}"
+                            )))
+                        })?;
+                        // Same busy-timeout discipline as the
+                        // interpreter (Phase 5/M4 concurrent handlers
+                        // share one database file).
+                        conn.busy_timeout(std::time::Duration::from_millis(5000))
+                            .map_err(|e| {
+                                Box::new(VmValue::String(format!(
+                                    "cannot set busy timeout on `{path}`: {e}"
+                                )))
+                            })?;
+                        conn.execute_batch("PRAGMA journal_mode=WAL;").map_err(|e| {
+                            Box::new(VmValue::String(format!(
+                                "cannot set WAL mode on `{path}`: {e}"
+                            )))
+                        })?;
+                        let mut reg = self.db.borrow_mut();
+                        reg.next += 1;
+                        let id = reg.next;
+                        reg.conns.insert(id, conn);
+                        vm_track_up(&VM_DB_OPEN, &VM_DB_PEAK);
+                        Ok(Box::new(VmValue::Int(id as i128)))
+                    })(),
+                    _ => Err(Box::new(VmValue::String(
+                        "db_open_builtin: expected path String".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::DbExec { dst, handle, sql, params } => {
+                let h = self.get_value(frame, *handle)?;
+                let s = self.get_value(frame, *sql)?;
+                let p = self.get_value(frame, *params)?;
+                let result = match (h, s, p) {
+                    (VmValue::Int(id), VmValue::String(sql), VmValue::String(params)) => (|| {
+                        let reg = self.db.borrow();
+                        let conn = reg.conns.get(&(id as u64)).ok_or_else(|| {
+                            Box::new(VmValue::String(format!(
+                                "unknown database handle `{id}` (was it closed?)"
+                            )))
+                        })?;
+                        let values = vm_parse_json_params(&params)
+                            .map_err(|e| Box::new(VmValue::String(e)))?;
+                        let changed = conn
+                            .execute(&sql, rusqlite::params_from_iter(values))
+                            .map_err(|e| {
+                                Box::new(VmValue::String(format!("exec failed: {e}")))
+                            })?;
+                        Ok(Box::new(VmValue::Int(changed as i128)))
+                    })(),
+                    _ => Err(Box::new(VmValue::String(
+                        "db_exec_builtin: expected handle Int, sql String, params JSON String"
+                            .to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::DbQuery { dst, handle, sql, params } => {
+                let h = self.get_value(frame, *handle)?;
+                let s = self.get_value(frame, *sql)?;
+                let p = self.get_value(frame, *params)?;
+                let result = match (h, s, p) {
+                    (VmValue::Int(id), VmValue::String(sql), VmValue::String(params)) => (|| {
+                        let reg = self.db.borrow();
+                        let conn = reg.conns.get(&(id as u64)).ok_or_else(|| {
+                            Box::new(VmValue::String(format!(
+                                "unknown database handle `{id}` (was it closed?)"
+                            )))
+                        })?;
+                        let values = vm_parse_json_params(&params)
+                            .map_err(|e| Box::new(VmValue::String(e)))?;
+                        let mut stmt = conn.prepare(&sql).map_err(|e| {
+                            Box::new(VmValue::String(format!("prepare failed: {e}")))
+                        })?;
+                        let width = stmt.column_count();
+                        let rows = stmt
+                            .query_map(rusqlite::params_from_iter(values), move |row| {
+                                let mut cells = Vec::with_capacity(width);
+                                for i in 0..width {
+                                    let value: rusqlite::types::Value = row.get(i)?;
+                                    cells.push(vm_render_json_value(&value));
+                                }
+                                Ok(format!("[{}]", cells.join(", ")))
+                            })
+                            .map_err(|e| {
+                                Box::new(VmValue::String(format!("query failed: {e}")))
+                            })?;
+                        let mut out = Vec::new();
+                        for row in rows {
+                            out.push(VmValue::String(row.map_err(|e| {
+                                Box::new(VmValue::String(format!("row decode failed: {e}")))
+                            })?));
+                        }
+                        Ok(Box::new(VmValue::List(out)))
+                    })(),
+                    _ => Err(Box::new(VmValue::String(
+                        "db_query_builtin: expected handle Int, sql String, params JSON String"
+                            .to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::DbClose { dst, handle } => {
+                let h = self.get_value(frame, *handle)?;
+                let result = match h {
+                    VmValue::Int(id) => {
+                        let removed = self.db.borrow_mut().conns.remove(&(id as u64));
+                        match removed {
+                            Some(_) => {
+                                VM_DB_OPEN.fetch_sub(1, Ordering::Relaxed);
+                                Ok(Box::new(VmValue::Unit))
+                            }
+                            None => Err(Box::new(VmValue::String(format!(
+                                "unknown database handle `{id}` (was it closed?)"
+                            )))),
+                        }
+                    }
+                    _ => Err(Box::new(VmValue::String(
+                        "db_close_builtin: expected handle Int".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            // Phase 6/Wave 0 (ADR-020): monotonic millis since a
+            // process-wide arbitrary epoch. Mirrors the
+            // interpreter exactly — same epoch helper, same `Int`
+            // result; no wall-clock interpretation.
+            Instr::TimeMonoMs { dst } => {
+                frame.locals[dst.0 as usize] = VmValue::Int(vm_mono_ms());
+            }
+            // Phase 6/Wave 0 (ADR-021): explicit-seed RNG over the
+            // handle registry — values, not ambient authority. Same
+            // SplitMix64 step and same error strings as
+            // `interp/src/lib.rs::rng_next_u64`, so a seeded sequence
+            // replays identically across `run` and `run-vm`.
+            Instr::RngSeed { dst, seed } => {
+                let s = self.get_value(frame, *seed)?;
+                match s {
+                    VmValue::Int(seed) => {
+                        let mut reg = self.rng.borrow_mut();
+                        reg.next += 1;
+                        let id = reg.next;
+                        reg.states.insert(id, seed as u64);
+                        frame.locals[dst.0 as usize] = VmValue::Int(id as i128);
+                    }
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "rng_seed_builtin: expected seed Int".to_string(),
+                        ));
+                    }
+                }
+            }
+            Instr::RngNext { dst, handle } => {
+                let h = self.get_value(frame, *handle)?;
+                match h {
+                    VmValue::Int(id) => {
+                        let mut reg = self.rng.borrow_mut();
+                        match reg.states.get_mut(&(id as u64)) {
+                            Some(state) => {
+                                let value = vm_rng_next_u64(state);
+                                frame.locals[dst.0 as usize] = VmValue::Int(value as i128);
+                            }
+                            None => {
+                                return Err(VmError::TypeMismatch(format!(
+                                    "unknown rng handle `{id}` (was it seeded?)"
+                                )));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "rng_next_builtin: expected handle Int".to_string(),
+                        ));
+                    }
+                }
+            }
+            // Phase 6/M5 (ADR-024): cooperative task cancellation. The
+            // VM owns no task registry and has no spawn instruction —
+            // `noct run-vm` refuses every program with a `task`
+            // declaration before lowering (CONCURRENCY.md §7) — so no
+            // live handle can exist here, and every handle is exactly
+            // the "never spawned" case the interpreter refuses too.
+            // The refusal text core is shared with the interpreter's
+            // `Interpreter::task_cancel` (the pinned contract); only
+            // the tail names which backend said it.
+            Instr::TaskCancel { handle } => {
+                let v = self.get_value(frame, *handle)?;
+                let id = match v {
+                    VmValue::Int(id) => id,
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "task_cancel_builtin: expected handle Int".to_string(),
+                        ));
+                    }
+                };
+                return Err(VmError::UnsupportedByBackend(format!(
+                    "cancel of unknown task handle {id} (never spawned, already awaited, or from a previous run; the NIR VM spawns no tasks — see CONCURRENCY.md §7)"
+                )));
+            }
+            Instr::FsRead { dst, path } => {
+                let p = self.get_value(frame, *path)?;
+                let result = match p {
+                    VmValue::String(path) => match std::fs::read_to_string(&path) {
+                        Ok(contents) => Ok(Box::new(VmValue::String(contents))),
+                        Err(e) => Err(Box::new(VmValue::String(e.to_string()))),
+                    },
+                    _ => Err(Box::new(VmValue::String(
+                        "fs_read_text: expected path String".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::FsWrite { dst, path, contents } => {
+                let p = self.get_value(frame, *path)?;
+                let c = self.get_value(frame, *contents)?;
+                let result = match (p, c) {
+                    (VmValue::String(path), VmValue::String(contents)) => {
+                        match std::fs::write(&path, &contents) {
+                            Ok(()) => Ok(Box::new(VmValue::Unit)),
+                            Err(e) => Err(Box::new(VmValue::String(e.to_string()))),
+                        }
+                    }
+                    _ => Err(Box::new(VmValue::String(
+                        "fs_write_text: expected path and contents Strings".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::FsModifiedMillis { dst, path } => {
+                let p = self.get_value(frame, *path)?;
+                let result = match p {
+                    VmValue::String(path) => std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .map(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| VmValue::Int(d.as_millis() as i128))
+                                .map_err(|e| e.to_string())
+                        })
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r)
+                        .map(Box::new)
+                        .map_err(|e| Box::new(VmValue::String(e))),
+                    _ => Err(Box::new(VmValue::String(
+                        "fs_modified_millis: expected path String".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::EnvGet { dst, name } => {
+                let n = self.get_value(frame, *name)?;
+                let value = match n {
+                    VmValue::String(n) => std::env::var(&n)
+                        .ok()
+                        .map(|v| Box::new(VmValue::String(v))),
+                    _ => None,
+                };
+                frame.locals[dst.0 as usize] = VmValue::Option(value);
+            }
+            Instr::ConfigGet { dst, path, key } => {
+                let p = self.get_value(frame, *path)?;
+                let k = self.get_value(frame, *key)?;
+                let result = match (p, k) {
+                    (VmValue::String(path), VmValue::String(key)) => {
+                        match std::fs::read_to_string(&path) {
+                            Ok(contents) => {
+                                let mut found = None;
+                                for line in contents.lines() {
+                                    let line = line.trim();
+                                    if line.is_empty() || line.starts_with('#') {
+                                        continue;
+                                    }
+                                    if let Some((n, v)) = line.split_once('=') {
+                                        if n.trim() == key {
+                                            found = Some(v.trim().to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                                match found {
+                                    Some(v) => Ok(Box::new(VmValue::String(v))),
+                                    None => Err(Box::new(VmValue::String(format!(
+                                        "configuration key `{key}` not found"
+                                    )))),
+                                }
+                            }
+                            Err(e) => Err(Box::new(VmValue::String(e.to_string()))),
+                        }
+                    }
+                    _ => Err(Box::new(VmValue::String(
+                        "config_get_builtin: expected path and key Strings".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::DotenvLoad { dst, path } => {
+                let p = self.get_value(frame, *path)?;
+                let result = match p {
+                    VmValue::String(path) => vm_dotenv_load_file(&path)
+                        .map(|n| Box::new(VmValue::Int(n)))
+                        .map_err(|e| Box::new(VmValue::String(e))),
+                    _ => Err(Box::new(VmValue::String(
+                        "dotenv_load_builtin: expected path String".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
             }
             Instr::CondBranch { cond, then_block, else_block } => {
                 let cond_val = self.get_value(frame, *cond)?;
@@ -761,6 +1712,126 @@ impl Vm {
             ConstValue::Unit => Ok(VmValue::Unit),
         }
     }
+
+    // ── Phase 5/M4 host-IO helpers ──────────────────────────────────────
+    // Both mirror `interp/src/lib.rs` exactly (same request bytes,
+    // same response slicing, same handler-body contract).
+
+    /// Blocking plaintext-HTTP client over TCP (mirrors the
+    /// interpreter's `http_send_builtin` byte-for-byte: header pairs
+    /// are 2-lists of Strings, non-pair entries are skipped, a
+    /// missing Content-Type is supplied for non-empty bodies).
+    /// Returns the response BODY text only.
+    fn vm_http_send(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[VmValue],
+        body: &str,
+    ) -> Result<String, String> {
+        let (host, port, path) = vm_parse_http_url(url)
+            .ok_or_else(|| format!("unsupported URL scheme (expected http://): {url}"))?;
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for header in headers {
+            if let VmValue::List(pair) = header {
+                if pair.len() == 2 {
+                    if let (VmValue::String(k), VmValue::String(v)) = (&pair[0], &pair[1]) {
+                        pairs.push((k.clone(), v.clone()));
+                    }
+                }
+            }
+        }
+        if !body.is_empty() && !pairs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+            pairs.push(("Content-Type".to_string(), "text/plain".to_string()));
+        }
+        let mut req =
+            format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n");
+        for (k, v) in &pairs {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        if !body.is_empty() {
+            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        req.push_str("\r\n");
+        req.push_str(body);
+        let mut conn = std::net::TcpStream::connect((host.as_str(), port))
+            .map_err(|e| format!("connection failed: {e}"))?;
+        std::io::Write::write_all(&mut conn, req.as_bytes())
+            .map_err(|e| format!("write failed: {e}"))?;
+        let mut response = Vec::new();
+        std::io::Read::read_to_end(&mut conn, &mut response)
+            .map_err(|e| format!("read failed: {e}"))?;
+        vm_split_http_body(&response)
+            .ok_or_else(|| "malformed HTTP response: missing header terminator".to_string())
+    }
+
+    /// Blocking HTTP accept loop (mirrors the interpreter's
+    /// `http_server_serve_loop` through the shared
+    /// `crate::http_wire` layer: same limits, same codes, same byte
+    /// shapes — only handler invocation differs, running nested
+    /// frames via `call` on a per-connection worker VM). One OS
+    /// thread per connection; the accept loop never blocks on a
+    /// handler. Handler names resolve against the worker's module;
+    /// unknown names and non-String results answer 500. Shutdown
+    /// stops accepting and drains in-flight connections before
+    /// returning.
+    fn vm_serve_loop(&mut self, handle: u64) -> Result<(), VmError> {
+        let (shutdown_flag, listener) = {
+            let reg = VM_SERVER_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+            match reg.get(&handle) {
+                Some(state) => match state.listener.try_clone() {
+                    Ok(l) => (state.shutdown.clone(), l),
+                    Err(_) => return Ok(()),
+                },
+                None => return Ok(()),
+            }
+        };
+        listener.set_nonblocking(true).ok();
+        let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        loop {
+            if shutdown_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    // Blocking mode for the wire layer's read timeouts
+                    // (mirrors the interpreter: accepted sockets
+                    // inherit the nonblocking listener).
+                    let _ = conn.set_nonblocking(false);
+                    let routes = {
+                        let reg = VM_SERVER_REGISTRY
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        match reg.get(&handle) {
+                            Some(state) => state.routes.clone(),
+                            None => break,
+                        }
+                    };
+                    let worker = Vm::new(self.module.clone());
+                    // 8 MiB stacks, matching the interpreter's workers:
+                    // handlers run at `main`-depth call budgets.
+                    workers.push(
+                        std::thread::Builder::new()
+                            .stack_size(8 * 1024 * 1024)
+                            .spawn(move || {
+                                vm_track_up(&VM_CONN_THREADS, &VM_CONN_PEAK);
+                                vm_serve_one_connection(worker, conn, &routes);
+                                VM_CONN_THREADS.fetch_sub(1, Ordering::Relaxed);
+                            })
+                            .expect("spawn connection worker"),
+                    );
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        for w in workers {
+            w.join().ok();
+        }
+        Ok(())
+    }
 }
 
 enum ControlFlow {
@@ -799,4 +1870,13 @@ pub enum VmError {
     /// which this variant previously lacked (see landmine (c)).
     #[error("malformed CFG: {0}")]
     MalformedCfg(String),
+    /// The program reached an operation this backend cannot execute.
+    /// Today: cooperative task cancellation, which needs the task
+    /// registry the VM does not have (it spawns no tasks, and
+    /// `noct run-vm` refuses programs carrying a `task` declaration —
+    /// CONCURRENCY.md §7). Raised loudly by construction: the
+    /// alternative, treating an unspawnable handle as a successful
+    /// cancel, would report a cancellation that never happened.
+    #[error("unsupported by this backend: {0}")]
+    UnsupportedByBackend(String),
 }

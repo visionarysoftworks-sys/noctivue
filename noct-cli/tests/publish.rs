@@ -45,6 +45,9 @@ fn run_cli_in_keys(dir: &Path, keys: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(dir)
         .env("NOCT_KEYS", keys)
+        // Fetched content is global; pin the store per test so the
+        // suite never writes to the developer's real one.
+        .env("NOCT_STORE", dir.parent().unwrap_or(dir).join("store"))
         .env_remove("NOCT_SIGNING_KEY")
         .env_remove("NOCT_KEY_ID")
         .stdout(std::process::Stdio::piped())
@@ -505,11 +508,13 @@ fn publish_dry_run_publishes_nothing_byte_identical() {
     );
 
     let before_index = snapshot_tree(&root);
-    let before_noct = snapshot_tree(&dir.join(".noct"));
+    // Fetched content is global now, so the store is what a dry-run
+    // must leave alone (it used to assert on the in-tree cache).
+    let before_store = snapshot_tree(&dir.parent().unwrap().join("store"));
     let before_manifest = std::fs::read(dir.join("nestpkg.nvpm")).expect("read manifest");
     let before_lock = std::fs::read(dir.join("nestpkg.lock")).expect("read lock");
     assert!(!before_index.is_empty(), "index snapshot must be non-empty");
-    assert!(!before_noct.is_empty(), "cache snapshot must be non-empty");
+    assert!(!before_store.is_empty(), "store snapshot must be non-empty");
 
     let out = run_cli_in_keys(&dir, &keys, &["publish", "--dry-run"]);
     assert_eq!(
@@ -535,11 +540,15 @@ fn publish_dry_run_publishes_nothing_byte_identical() {
     );
 
     let after_index = snapshot_tree(&root);
-    let after_noct = snapshot_tree(&dir.join(".noct"));
+    let after_store = snapshot_tree(&dir.parent().unwrap().join("store"));
     let after_manifest = std::fs::read(dir.join("nestpkg.nvpm")).expect("re-read manifest");
     let after_lock = std::fs::read(dir.join("nestpkg.lock")).expect("re-read lock");
     assert_eq!(before_index, after_index, "dry-run mutated the index");
-    assert_eq!(before_noct, after_noct, "dry-run mutated .noct/cache");
+    assert_eq!(before_store, after_store, "dry-run mutated the content store");
+    assert!(
+        !dir.join(".noct").exists(),
+        "a dry-run must not create in-tree dependency data"
+    );
     assert_eq!(before_manifest, after_manifest, "dry-run mutated the manifest");
     assert_eq!(before_lock, after_lock, "dry-run mutated the lockfile");
     cleanup(&base);

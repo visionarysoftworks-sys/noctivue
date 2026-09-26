@@ -414,10 +414,9 @@ pub unsafe extern "C" fn noctivue_rt_log_emit(level: *const u8, message: *const 
 // instead of stubbed: entries would serve nothing today (serving
 // needs callbacks into compiled program code, which is why
 // `serve_loop` stays a loud `UnsupportedInstr`), yet the observable
-// contract — register-then-shutdown is silent `Unit` — holds exactly.
-// Stored routes are never read today (serving needs program-code
-// callbacks, which is why `serve_loop` stays a loud `UnsupportedInstr`)
-// — the shape is kept so `register` stays structural, not stubbed.
+// contract — register-then-shutdown is silent `Unit` — holds exactly
+// (stored routes are never read today — the shape is kept so
+// `register` stays structural, not stubbed).
 #[allow(dead_code)]
 struct NativeRoute {
     method: String,
@@ -495,19 +494,15 @@ pub extern "C" fn noctivue_dashboard_arith(a: i64, b: i64) -> i64 {
     a.wrapping_add(b)
 }
 
-/// Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+/// Native runtime equality helpers.
 ///
 /// Each returns `1` when the relation holds, `0` otherwise; the Cranelift
 /// backend lowers the corresponding NIR instruction to a call of the
-/// matching symbol.
+/// matching symbol. (Restored 2026-09-17: still called by lowering —
+/// see NOCTIVUE_RT_STRING_EQ / NOCTIVUE_RT_CHAR_EQ.)
 #[no_mangle]
 pub extern "C" fn noctivue_rt_string_eq(a: i64, b: i64) -> i64 {
     if a == b { 1 } else { 0 }
-}
-
-#[no_mangle]
-pub extern "C" fn noctivue_rt_float_le(a: f64, b: f64) -> i64 {
-    if a <= b { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -515,9 +510,55 @@ pub extern "C" fn noctivue_rt_char_eq(a: i64, b: i64) -> i64 {
     if a == b { 1 } else { 0 }
 }
 
+/// `noctivue_rt_char_gt(a: I64, b: I64) -> I8` — char greater-than.
 #[no_mangle]
-pub extern "C" fn noctivue_rt_char_lt(a: i64, b: i64) -> i64 {
-    if a < b { 1 } else { 0 }
+pub extern "C" fn noctivue_rt_char_gt(a: i64, b: i64) -> u8 {
+    (a > b) as u8
+}
+
+/// `noctivue_rt_char_le(a: I64, b: I64) -> I8` — char less-than-or-equal.
+#[no_mangle]
+pub extern "C" fn noctivue_rt_char_le(a: i64, b: i64) -> u8 {
+    (a <= b) as u8
+}
+
+/// `noctivue_rt_string_push(s: I64, c: I64) -> I64` — push a char onto a string.
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_string_push(s: i64, c: i64) -> *mut u8 {
+    let header = s as *const (*const u8, usize);
+    if header.is_null() {
+        return noctivue_rt_str_from_parts(std::ptr::null(), 0);
+    }
+    let data = (*header).0;
+    let len = (*header).1;
+    let new_len = len + 1;
+    let layout = Layout::from_size_align(new_len, 1).expect("string buffer layout");
+    let dst = alloc(layout);
+    if data.is_null() || len == 0 {
+        std::ptr::write_bytes(dst, 0, new_len);
+    } else {
+        std::ptr::copy_nonoverlapping(data, dst, len);
+    }
+    *dst.add(new_len - 1) = c as u8;
+    let new_header = alloc_str(slice::from_raw_parts(dst, new_len));
+    new_header
+}
+
+/// `noctivue_rt_string_pop(s: I64) -> I64` — pop a char from a string.
+/// Returns the new string header (empty string if original was empty).
+#[no_mangle]
+pub unsafe extern "C" fn noctivue_rt_string_pop(s: i64) -> *mut u8 {
+    let header = s as *const (*const u8, usize);
+    if header.is_null() {
+        return noctivue_rt_str_from_parts(std::ptr::null(), 0);
+    }
+    let data = (*header).0;
+    let len = (*header).1;
+    if len == 0 {
+        return noctivue_rt_str_from_parts(std::ptr::null(), 0);
+    }
+    let new_len = len - 1;
+    noctivue_rt_str_from_parts(data, new_len)
 }
 
 // ── Phase 5: net.http FFI stubs ──────────────────────────────────────────────
@@ -599,6 +640,81 @@ mod tests {
             *(rec as *mut i64).add(2) = 20;
             assert_eq!(noctivue_rt_list_get(rec, 0), 10);
             assert_eq!(noctivue_rt_list_get(rec, 1), 20);
+        }
+    }
+
+    #[test]
+    fn hostio_sleep_zero_returns() {
+        // Zero sleep is a no-op (negative traps the process, so it is
+        // covered CLI-side in `native_build.rs`, never here).
+        noctivue_rt_sleep_ms(0);
+    }
+
+    #[test]
+    fn hostio_fs_exists_true_and_false() {
+        unsafe {
+            let dir = std::env::temp_dir().join("noctivue-rt-hostio");
+            std::fs::create_dir_all(&dir).ok();
+            let present = dir.join("present.txt");
+            std::fs::write(&present, b"x").unwrap();
+            let here = alloc_str(present.to_string_lossy().as_bytes());
+            assert_eq!(noctivue_rt_fs_exists(here), 1);
+            let gone = alloc_str(dir.join("absent.txt").to_string_lossy().as_bytes());
+            assert_eq!(noctivue_rt_fs_exists(gone), 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn hostio_io_writes_handle_null_safely() {
+        // Output itself is asserted CLI-side (pipes); here the
+        // contract is "never traps, null-safe like `print`".
+        unsafe {
+            let h = noctivue_rt_str_from_parts(b"hi".as_ptr(), 2);
+            noctivue_rt_io_write(h);
+            noctivue_rt_io_writeln(h);
+            noctivue_rt_io_write(std::ptr::null());
+            noctivue_rt_io_writeln(std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn hostio_env_set_round_trip() {
+        unsafe {
+            let name = alloc_str(b"NOCTIVUE_RT_HOSTIO_TEST".as_slice());
+            let value = alloc_str(b"v42".as_slice());
+            noctivue_rt_env_set(name, value);
+            assert_eq!(
+                std::env::var("NOCTIVUE_RT_HOSTIO_TEST").as_deref(),
+                Ok("v42")
+            );
+            std::env::remove_var("NOCTIVUE_RT_HOSTIO_TEST");
+        }
+    }
+
+    #[test]
+    fn hostio_log_emit_runs() {
+        // Line format is asserted CLI-side (stderr pipes); here the
+        // contract is "never traps, null-safe".
+        unsafe {
+            let level = noctivue_rt_str_from_parts(b"info".as_ptr(), 4);
+            let msg = noctivue_rt_str_from_parts(b"unit".as_ptr(), 4);
+            noctivue_rt_log_emit(level, msg);
+            noctivue_rt_log_emit(std::ptr::null(), std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn hostio_http_register_shutdown_unknown_handles() {
+        // No listener can exist (listen is VM-only), so every handle
+        // is unknown — register/shutdown must be silent no-ops, never
+        // traps (mirrors the interpreter exactly).
+        unsafe {
+            let m = noctivue_rt_str_from_parts(b"GET".as_ptr(), 3);
+            let p = noctivue_rt_str_from_parts(b"/".as_ptr(), 1);
+            let h = noctivue_rt_str_from_parts(b"h".as_ptr(), 1);
+            noctivue_rt_http_server_register(999, m, p, h);
+            noctivue_rt_http_server_shutdown(999);
         }
     }
 

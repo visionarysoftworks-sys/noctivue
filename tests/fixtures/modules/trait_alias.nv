@@ -1,0 +1,5 @@
+// @skip-test (module-graph negative fixture: evaluated via ModuleGraph E0109, covered by modules::tests)
+import support::shapes::Named as N
+
+main():
+    println("x")

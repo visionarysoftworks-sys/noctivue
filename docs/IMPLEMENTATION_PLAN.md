@@ -198,6 +198,20 @@ developer using only public tooling.
    CONCURRENCY.md §7 for real non-blocking sockets and an executor
    suitable for concurrent request handling, not just single-task
    await chains.
+    - *Amendment 2026-09-26 (rescoped, not reordered):* the
+      "executor suitable for concurrent request handling" is
+      delivered as one OS thread per connection/task with
+      worker-private interpreters/VMs (the `for_task` precedent),
+      proven by the §5 load harness (16×128, zero failures, zero
+      leak deltas). Real non-blocking sockets and `async fn` stay
+      Deferred to M5 (DECISIONS.md:70-72); the blocking-threads
+      floor with at-least sleep timing is the M4 runtime
+      (`docs/PHASE5_PRODUCTION.md` §§2–3). Rationale: the exit
+      criteria demand concurrent *correctness*, not a specific
+      mechanism; the executor (with cancellation, non-blocking
+      timers, and multiplexed pools) is M5 work with its own exit
+      criteria (CONCURRENCY.md §4/§7), and inventing one in M4
+      would strand the reference app on an interim API.
 2. **`net.http`** — HTTP client and server in stdlib (HTTP/1.1 first;
    HTTP/2 as stretch), plus TLS via an FFI binding to a vetted C
    library (FFI.md §6 boundary discipline applies: the `unsafe`
@@ -212,6 +226,14 @@ developer using only public tooling.
    isolated `unsafe` boundary, a thin async query interface, and
    connection pooling. Explicitly not a full ORM at this phase — that's
    ecosystem territory, revisited no earlier than M5.
+    - *Amendment 2026-09-26 (same session as item 1):* the reference
+      database is SQLite, file-backed (ADR-019); the delivered
+      interface is synchronous and blocking, and the Postgres-class
+      driver plus the async query interface ride the M5 executor —
+      "async" in the item above names the M5 interface, not an M4
+      deliverable. Single-statement atomicity is sufficient for the
+      reference app; multi-statement transactions arrive with the
+      Postgres-class driver as one designed unit (PHASE5 §4).
 5. **Config & structured logging** — env var/file-based config loading,
    and a leveled, structured `log` facade with a pluggable sink, both
    in stdlib.
@@ -276,6 +298,26 @@ developer using only public tooling.
   instead of per-project `.noct/cache/` + `.noct/packages/`;
   in-tree `.noct/` holds only build outputs. `vendor/` still builds
   offline, and a manual `noct clean` reclaims the store.
+
+**Status log:**
+- 2026-09-26 — the content-store exit criterion above is **met**;
+  the rest of Phase 6 is not. Fetched content now lives in the global
+  store (`archives/` + `trees/` + `index/` + `points/` under
+  `$NOCT_STORE` or the per-OS data home), keyed by the lock's
+  `content: sha256:…` hashes, with both halves kept, the archive
+  hashed once at fetch, the tree placed atomically and read-only, and
+  in-tree `.noct/` holding build outputs only. `vendor/` still builds
+  offline and precedes the store in the resolver's search order;
+  `noct clean` reclaims the store and the legacy in-tree pair, and
+  prints the preserved set. The lockfile format is unchanged: the
+  store's own record holds the tree hash the build re-verifies, which
+  is what makes a hand-edited extracted tree fail the build instead of
+  shipping. Builds may auto-fetch a missing locked dependency but never
+  re-resolve; `--frozen` and `--offline` are hard opt-outs. Full
+  design, the per-OS root table, the measured warm-path costs and the
+  legacy-migration decision are in the dated amendment under
+  TOOLCHAIN.md §3. Still open in this phase: the deployment-pipeline,
+  audit/signing-enforcement and second-team criteria above.
 
 ## 9. Phase 7 — M6: Multi-Target Compilation & Interop Expansion
 

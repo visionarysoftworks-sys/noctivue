@@ -1,0 +1,237 @@
+//! reference-crud — Phase 5 reference application (M4 exit criterion 1).
+//!
+//! A CRUD REST API backed by a real (file) SQLite database, built
+//! end-to-end from public stdlib plus the package manager — no
+//! direct compiler-crate access, no third-party code. Binding-only
+//! SQL (values bind from JSON arrays, never interpolated), and every
+//! handler opens, uses, and closes its own pool on its connection
+//! thread (`docs/PHASE5_PRODUCTION.md` §1).
+//!
+//! Run it (stdlib files first, entry point last — the pre-import
+//! distribution model, `stdlib/SPEC.md` §1):
+//!
+//! ```text
+//! noct run ../../stdlib/core/convert.nv ../../stdlib/core/compare.nv \
+//!   ../../stdlib/option/option.nv ../../stdlib/result/result.nv \
+//!   ../../stdlib/strings/string.nv ../../stdlib/strings/format.nv \
+//!   ../../stdlib/testing/assertions.nv ../../stdlib/net/http/request.nv \
+//!   ../../stdlib/net/http/response.nv ../../stdlib/net/http/client.nv \
+//!   ../../stdlib/net/http/server.nv ../../stdlib/db/sqlite.nv \
+//!   ../../stdlib/db/pool.nv lib/main.nv
+//! ```
+//!
+//! The demo serves 60 s on port 18080 (`crud.db` in the working
+//! directory), then stops. Try: `POST /items` (`name=Ada`),
+//! `GET /items`, `POST /update` (`id=1&name=Bo`),
+//! `POST /delete` (`id=1`), `GET /health`, `GET /poolcheck`,
+//! `GET /integrity`. The port is one line (`app_port`) — change it
+//! if 18080 is taken where you run this.
+
+fn db_path() -> String:
+    "crud.db"
+
+fn app_port() -> Int:
+    18080
+
+fn val_after(body: String, key: String) -> Option<String>:
+    match string_index_of(body, key):
+        Some(at): substr_to_amp(body, at + key.length)
+        None: None
+
+fn substr_to_amp(s: String, from: Int) -> Option<String>:
+    if from < 0:
+        None
+    else:
+        if from > s.length:
+            None
+        else:
+            scan_from(s, from)
+
+fn scan_from(s: String, from: Int) -> Option<String>:
+    var out = ""; var i = from
+    while i < s.length:
+        if s[i] == '&':
+            i = s.length
+        else:
+            out = out + "{s[i]}"; i = i + 1
+    Some(out)
+
+fn rows_json(rows: [String]) -> String:
+    "[" + join_rows(rows) + "]"
+
+fn join_rows(rows: [String]) -> String:
+    var out = ""; var i = 0
+    while i < rows.length:
+        if i > 0:
+            out = out + ","
+        out = out + rows[i]; i = i + 1
+    out
+
+fn close_pool(pool: Pool, out: String) -> String:
+    match pool_close(pool):
+        Ok(_): out
+        Err(e): "err: close: {e}"
+
+fn items_create(body: String) -> String:
+    sleep_builtin(1)
+    match val_after(body, "name="):
+        Some(name): create_row(name)
+        None: "err: missing name"
+
+fn create_row(name: String) -> String:
+    match pool_open(db_path(), 3):
+        Ok(pool): create_in(pool, name)
+        Err(e): "err: {e}"
+
+fn create_in(pool: Pool, name: String) -> String:
+    match pool_checkout(pool):
+        Ok(co): exec_insert(co, name)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn exec_insert(co: PoolCheckout, name: String) -> String:
+    match db_exec(co.db, "INSERT INTO items(name) VALUES (?)", "[\"{name}\"]"):
+        Ok(_): insert_id(pool_checkin(co))
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+fn insert_id(pool: Pool) -> String:
+    match pool_checkout(pool):
+        Ok(co): read_last_id(co)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn read_last_id(co: PoolCheckout) -> String:
+    match db_query(co.db, "SELECT last_insert_rowid()", "[]"):
+        Ok(rows): close_pool(pool_checkin(co), first_row(rows))
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+fn first_row(rows: [String]) -> String:
+    if rows.length == 0:
+        "err: no id"
+    else:
+        rows[0]
+
+fn items_list(body: String) -> String:
+    sleep_builtin(1)
+    match pool_open(db_path(), 3):
+        Ok(pool): list_in(pool)
+        Err(e): "err: {e}"
+
+fn list_in(pool: Pool) -> String:
+    match pool_checkout(pool):
+        Ok(co): read_all(co)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn read_all(co: PoolCheckout) -> String:
+    match db_query(co.db, "SELECT id, name FROM items", "[]"):
+        Ok(rows): close_pool(pool_checkin(co), rows_json(rows))
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+fn items_update(body: String) -> String:
+    sleep_builtin(1)
+    match val_after(body, "id="):
+        Some(id): update_name(id, body)
+        None: "err: missing id"
+
+fn update_name(id: String, body: String) -> String:
+    match val_after(body, "name="):
+        Some(name): run_update(id, name)
+        None: "err: missing name"
+
+fn run_update(id: String, name: String) -> String:
+    match pool_open(db_path(), 3):
+        Ok(pool): update_in(pool, id, name)
+        Err(e): "err: {e}"
+
+fn update_in(pool: Pool, id: String, name: String) -> String:
+    match pool_checkout(pool):
+        Ok(co): exec_update(co, id, name)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn exec_update(co: PoolCheckout, id: String, name: String) -> String:
+    match db_exec(co.db, "UPDATE items SET name = ? WHERE id = ?", "[\"{name}\", {id}]"):
+        Ok(_): close_pool(pool_checkin(co), "ok")
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+fn items_delete(body: String) -> String:
+    sleep_builtin(1)
+    match val_after(body, "id="):
+        Some(id): run_delete(id)
+        None: "err: missing id"
+
+fn run_delete(id: String) -> String:
+    match pool_open(db_path(), 3):
+        Ok(pool): delete_in(pool, id)
+        Err(e): "err: {e}"
+
+fn delete_in(pool: Pool, id: String) -> String:
+    match pool_checkout(pool):
+        Ok(co): exec_delete(co, id)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn exec_delete(co: PoolCheckout, id: String) -> String:
+    match db_exec(co.db, "DELETE FROM items WHERE id = ?", "[{id}]"):
+        Ok(_): close_pool(pool_checkin(co), "ok")
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+fn health(body: String) -> String:
+    "ok"
+
+fn poolcheck(body: String) -> String:
+    match pool_open(db_path(), 1):
+        Ok(pool): check_one(pool)
+        Err(e): "err: {e}"
+
+fn check_one(pool: Pool) -> String:
+    match pool_checkout(pool):
+        Ok(co): close_count(pool_checkin(co))
+        Err(e): close_pool(pool, "err: {e}")
+
+fn close_count(pool: Pool) -> String:
+    match pool_close(pool):
+        Ok(n): "{n}"
+        Err(e): "err: {e}"
+
+fn integrity(body: String) -> String:
+    match pool_open(db_path(), 1):
+        Ok(pool): integrity_in(pool)
+        Err(e): "err: {e}"
+
+fn integrity_in(pool: Pool) -> String:
+    match pool_checkout(pool):
+        Ok(co): read_integrity(co)
+        Err(e): close_pool(pool, "err: {e}")
+
+fn read_integrity(co: PoolCheckout) -> String:
+    match db_query(co.db, "PRAGMA integrity_check", "[]"):
+        Ok(rows): close_pool(pool_checkin(co), first_row(rows))
+        Err(e): close_pool(pool_checkin(co), "err: {e}")
+
+task serve(srv: Int):
+    http_server_serve(srv)
+
+fn main():
+    match db_open(db_path()):
+        Ok(db): setup_app(db)
+        Err(e): assert(false, "open failed")
+
+fn setup_app(db: Db) -> Unit:
+    match db_exec(db, "CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT)", "[]"):
+        Ok(_): start_server(db)
+        Err(e): assert(false, "init failed")
+
+fn start_server(db: Db) -> Unit:
+    match db_close(db):
+        Ok(_): listen_now()
+        Err(e): assert(false, "init close failed")
+
+fn listen_now() -> Unit:
+    match http_server_listen(app_port()):
+        Ok(srv):
+            http_server_route(srv, "POST", "/items", "items_create")
+            http_server_route(srv, "GET", "/items", "items_list")
+            http_server_route(srv, "POST", "/update", "items_update")
+            http_server_route(srv, "POST", "/delete", "items_delete")
+            http_server_route(srv, "GET", "/health", "health")
+            http_server_route(srv, "GET", "/poolcheck", "poolcheck")
+            http_server_route(srv, "GET", "/integrity", "integrity"); let t = serve(srv)
+            sleep_builtin(60000); http_server_stop(srv); await t; println("reference-crud done")
+        Err(e): assert(false, "listen failed")

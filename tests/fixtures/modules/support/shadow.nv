@@ -1,0 +1,14 @@
+// Shadow probe: same-named locals inside dependencies must survive
+// linking untouched (the alias rewrite is root-scoped).
+export struct Box:
+    contents: String
+
+export fn make() -> Box:
+    Box { contents: "hi" }
+
+export fn unbox(b: Box) -> String:
+    b.contents
+
+fn probe() -> String:
+    let api = Box { contents: "x" }
+    api.contents

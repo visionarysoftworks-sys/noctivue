@@ -1,0 +1,59 @@
+# **Status:** Draft proposal for Phase 6, not normative.
+# Reference CI for the reference-crud app (draft, Phase 6 testing-at-scale).
+# NOTE: GitHub only runs repo-root .github/workflows/; this copy is a
+# template source for `noct create --template ci` (instances use `.`).
+
+name: reference-crud CI (draft)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  toolchain:
+    name: Toolchain builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      # Repo-root steps: run from the workspace root, not the package dir.
+      - name: Build workspace (repo root)
+        run: cargo build --workspace
+      - name: Test workspace (repo root)
+        run: cargo test --workspace
+
+  package-gates:
+    name: Package gates
+    needs: toolchain
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/reference-crud
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      # LATER: pin and install `noct` here before the gates.
+      - name: Check formatting
+        run: noct fmt --check
+      - name: Lint package
+        run: noct lint
+      - name: Run package tests
+        run: noct test
+      - name: Validate publish readiness
+        run: noct publish --dry-run
+
+  smoke:
+    name: Serve smoke
+    needs: package-gates
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/reference-crud
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      # `noct test` runs each file standalone, including tests/crud_smoke.nv.
+      - name: Run serve smoke
+        run: noct test
+      # LATER (later waves): artifact/log upload, image publish, and
+      # deploy jobs extend this pipeline; nothing deploys from this draft.

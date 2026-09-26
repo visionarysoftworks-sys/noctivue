@@ -9,9 +9,12 @@ use crate::ast::{Item, Program};
 use crate::diagnostics::{Diagnostic, DiagnosticSink, Severity, Span};
 use crate::hir::Module;
 use crate::lexer::lex;
+use crate::modules::ModuleGraph;
 use crate::parser::parse;
 use crate::resolver::resolve;
 use crate::typeck::typecheck;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Result of analyzing a single source file.
@@ -35,6 +38,15 @@ pub struct AnalysisResult {
 ///
 /// This is the primary entry point for LSP server and other tooling.
 /// It runs: lex → parse → resolve → typecheck, collecting diagnostics at each stage.
+///
+/// Import-aware layer: the pipeline above is single-file, so flat
+/// uses of linked modules surface here as `E0201 unknown identifier`
+/// while `noct run` resolves them. When `file_path` names a real file
+/// on disk, its module graph is consulted: E0201s for names the graph
+/// exports are suppressed, and this file's graph diagnostics
+/// (E0100–E0109/W0101, per-file spans) are surfaced. Hover,
+/// go-to-definition, and completions stay single-file (a documented
+/// limitation, not a silent gap).
 pub fn analyze_file(file_path: impl AsRef<str>, source: &str) -> AnalysisResult {
     let file_path = file_path.as_ref().to_string();
     let mut sink = DiagnosticSink::new();
@@ -44,14 +56,139 @@ pub fn analyze_file(file_path: impl AsRef<str>, source: &str) -> AnalysisResult 
     let resolved = resolve(ast.clone(), &mut sink);
     let typed = typecheck(resolved.clone(), &mut sink);
 
+    let mut diagnostics = sink.take();
+    apply_module_graph_diagnostics(&file_path, &ast, &mut diagnostics);
+
     AnalysisResult {
         file_path,
         source: source.to_string(),
-        diagnostics: sink.take(),
+        diagnostics,
         ast,
         resolved,
         typed,
     }
+}
+
+/// Best-effort import awareness for single-file analysis (see
+/// [`analyze_file`]). Never fails: any unresolvable path simply keeps
+/// the single-file diagnostics unchanged.
+fn apply_module_graph_diagnostics(
+    file_path: &str,
+    program: &Program,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(disk) = uri_to_fs_path(file_path) else {
+        return;
+    };
+    if !disk.is_file() {
+        return;
+    }
+    let Ok(graph) = ModuleGraph::load(std::slice::from_ref(&disk)) else {
+        return;
+    };
+    let canonical = disk.canonicalize().unwrap_or(disk);
+    // Names the linked program provides: E0201s for these are an
+    // artifact of single-file analysis, not real errors.
+    let mut provided: HashSet<String> = graph
+        .files
+        .iter()
+        .flat_map(|f| graph.exported_names(&f.path))
+        .collect();
+    // Alias (or module) names of imports that resolve: `v.foo()`
+    // flags the alias object `v` in single-file analysis, but the
+    // linker rewrites it to the flattened `foo()` before typeck —
+    // so suppress the alias exactly when its import resolves.
+    // Unresolved imports keep both their E0101 and the follow-on
+    // E0201s (genuinely broken, must stay visible).
+    if let Some(importer) = graph.files.iter().find(|f| f.path == canonical) {
+        for import in &program.imports {
+            if graph.resolve_import_decl(importer, import).is_some() {
+                let name = import
+                    .alias
+                    .clone()
+                    .or_else(|| import.path.last().cloned())
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    provided.insert(name);
+                }
+            }
+        }
+    }
+    if !provided.is_empty() {
+        diagnostics.retain(|d| {
+            if d.code.as_deref() != Some("E0201") {
+                return true;
+            }
+            match ident_in_message(&d.message) {
+                Some(name) => !provided.contains(name),
+                None => true,
+            }
+        });
+    }
+    // This file's own graph diagnostics (deduped against identical
+    // single-file ones, e.g. parse errors reported by both).
+    let seen: HashSet<(Option<String>, String, usize, usize)> = diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.clone(),
+                d.message.clone(),
+                d.labels.first().map(|l| l.span.start).unwrap_or(0),
+                d.labels.first().map(|l| l.span.end).unwrap_or(0),
+            )
+        })
+        .collect();
+    for d in graph.diagnostics_for(&canonical) {
+        let key = (
+            d.code.clone(),
+            d.message.clone(),
+            d.labels.first().map(|l| l.span.start).unwrap_or(0),
+            d.labels.first().map(|l| l.span.end).unwrap_or(0),
+        );
+        if !seen.contains(&key) {
+            diagnostics.push(d);
+        }
+    }
+}
+
+/// Extract the `` `name` `` from `unknown identifier \`name\``.
+fn ident_in_message(message: &str) -> Option<&str> {
+    let start = message.find('`')?;
+    let rest = &message[start + 1..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// Map an LSP URI (or plain path) to a filesystem path.
+/// Handles `file://` prefixes and `%XX` escapes; returns `None`
+/// when the input cannot name a file.
+fn uri_to_fs_path(uri: &str) -> Option<PathBuf> {
+    let s = uri.strip_prefix("file://").unwrap_or(uri);
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    let mut it = s.as_bytes().iter();
+    while let Some(&b) = it.next() {
+        if b == b'%' {
+            let hi = *it.next()?;
+            let lo = *it.next()?;
+            let hex = |c: u8| (c as char).to_digit(16);
+            bytes.push(((hex(hi)? << 4) | hex(lo)?) as u8);
+        } else {
+            bytes.push(b);
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    // Windows `file:///C:/...` carries one leading slash too many;
+    // Unix `/home/...` must keep its own.
+    let trimmed = decoded.strip_prefix('/').unwrap_or(&decoded);
+    let path = if trimmed.len() >= 2
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && &trimmed[1..2] == ":"
+    {
+        PathBuf::from(trimmed)
+    } else {
+        PathBuf::from(&decoded)
+    };
+    Some(path)
 }
 
 /// Convert a byte-offset [`Span`] to an LSP [`Position`] (0-based line/character).

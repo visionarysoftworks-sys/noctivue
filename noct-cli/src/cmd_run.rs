@@ -3,9 +3,14 @@
 //! [Phase 1] Pipeline: lex → parse → resolve → typecheck → interpret.
 //!
 //! Usage:
-//!   noct run [files...]
+//!   noct run [files...] [--offline] [--frozen] [--index <dir>]
 //!   noct run                       # runs main.nv in the current package
 //!   noct run lib/main.nv           # loads local imports automatically
+//!
+//! The package gate (lock + store) runs first, and can be narrowed with
+//! `--frozen` (metadata-only) or `--offline` (no fetching); `--index`
+//! lets a missing locked dependency be fetched on the spot. See
+//! `registry::Gate`.
 
 use std::path::Path;
 
@@ -14,9 +19,17 @@ use compiler::diagnostics::DiagnosticSink;
 /// Read roots and their local import graph into one source-backed diagnostic
 /// unit. The compiler module loader still parses each file independently;
 /// joining here preserves the existing command-line diagnostic format.
+///
+/// The global content store is handed to the resolver as an extra
+/// package root, so `import <pkg>::…` finds `trees/<sha256>/` through
+/// the store's by-name pointers. `vendor/` still comes first (the
+/// committed escape hatch wins over fetched content), and the legacy
+/// in-tree `.noct/packages/` is no longer searched at all — in-tree
+/// holds only build outputs now.
 pub(crate) fn read_module_graph(paths: &[&str]) -> Result<compiler::modules::ModuleGraph, String> {
     let roots = paths.iter().map(|p| Path::new(p).to_path_buf()).collect::<Vec<_>>();
-    compiler::modules::ModuleGraph::load(&roots)
+    let package_roots = vec![crate::store::Store::open().resolution_root()];
+    compiler::modules::ModuleGraph::load_with(&roots, &package_roots)
 }
 
 /// Name the file owning a whole-unit byte offset (see `read_module_graph`).
@@ -38,8 +51,41 @@ pub(crate) fn owner_file(files: &[(String, usize)], offset: usize) -> &str {
 
 /// Entry point called from `main.rs`.
 pub fn run(args: &[String]) -> i32 {
+    // Dependency flags are parsed (and stripped) before anything else,
+    // so the file list below stays a file list.
+    let mut gate = crate::registry::Gate::default();
+    let mut files: Vec<&str> = Vec::new();
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--offline" => gate.offline = true,
+            "--frozen" | "--locked" => gate.frozen = true,
+            "--index" => match it.next() {
+                Some(v) => gate.index = Some(Path::new(v).to_path_buf()),
+                None => {
+                    eprintln!("noct run: --index needs a directory");
+                    return 1;
+                }
+            },
+            "-h" | "--help" => {
+                eprintln!("usage: noct run [files...] [--frozen] [--offline] [--index <dir>]");
+                eprintln!("  --frozen: metadata-only; the lock is checked, the store is not read");
+                eprintln!("  --offline: never fetch; a missing dependency is an error");
+                eprintln!("  --index <dir>: fetch a locked dependency missing from the store");
+                return 0;
+            }
+            // An unrecognised flag is an error, never a file name: this
+            // used to be filtered out silently, which turned a typo into
+            // "the wrong program ran".
+            other if other.starts_with('-') => {
+                eprintln!("noct run: unknown flag `{other}`");
+                return 1;
+            }
+            other => files.push(other),
+        }
+    }
     // Same package gate as `build` (P-003 §6); silent without a manifest.
-    if let Err(message) = crate::registry::require_package_current(Path::new(".")) {
+    if let Err(message) = crate::registry::require_package_current(Path::new("."), &gate) {
         eprintln!("noct run: {message}");
         return 1;
     }
@@ -48,15 +94,10 @@ pub fn run(args: &[String]) -> i32 {
     // `env_get` see file values during interpretation.
     autoload_dotenv_files();
     // 1. Resolve file paths (all non-flag args, or "main.nv" in cwd)
-    let paths: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-    let paths = if paths.is_empty() {
+    let paths = if files.is_empty() {
         vec!["main.nv"]
     } else {
-        paths
+        files
     };
 
     // 2. Read + join source files

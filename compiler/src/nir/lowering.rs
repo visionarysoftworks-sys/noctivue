@@ -321,6 +321,223 @@ impl LoweringContext {
         dst
     }
 
+    /// Fetch host-builtin call arg `idx`, or synthesize a zero-valued
+    /// default (`""` for strings, `0` for ints) when the call site was
+    /// already rejected by typeck (E0200) and only reaches lowering
+    /// through HIR error recovery — never panic the backend.
+    fn host_arg(
+        &mut self,
+        arg_vals: &[ValueId],
+        idx: usize,
+        is_string: bool,
+        nir_block: &mut crate::nir::module::Block,
+    ) -> ValueId {
+        if let Some(v) = arg_vals.get(idx).copied() {
+            return v;
+        }
+        let def = ValueId(self.next_local_index);
+        self.next_local_index += 1;
+        let (value, ty) = if is_string {
+            (ConstValue::String(String::new()), Ty::String)
+        } else {
+            (ConstValue::Int(0), Ty::Int)
+        };
+        nir_block.add_instr(Instr::Const {
+            dst: def,
+            value,
+            ty: NirTy::new(ty, self.mode),
+        });
+        def
+    }
+
+    /// Lower one Phase 5/M4 host-IO builtin call to its dedicated
+    /// instruction (see `instr.rs`'s Host I/O section). Returns
+    /// `Some(dst)` when `name` is a host builtin (the instruction is
+    /// already emitted — Unit builtins additionally get the `Print`
+    /// pattern's trailing `Const Unit`), `None` otherwise so the caller
+    /// falls through to ordinary `Call` lowering.
+    fn lower_host_builtin(
+        &mut self,
+        name: &str,
+        arg_vals: &[ValueId],
+        dst: ValueId,
+        nir_block: &mut crate::nir::module::Block,
+    ) -> Option<ValueId> {
+        // Statement-shaped (Unit) builtins share one epilogue: emit
+        // the side effect, then bind `dst` to Unit. Takes `&mut Self`
+        // explicitly so `host_arg` calls and emission can share the
+        // borrow without fighting the closure captures.
+        fn emit_unit(
+            slf: &mut LoweringContext,
+            instr: Instr,
+            dst: ValueId,
+            nb: &mut crate::nir::module::Block,
+        ) -> Option<ValueId> {
+            nb.add_instr(instr);
+            nb.add_instr(Instr::Const {
+                dst,
+                value: ConstValue::Unit,
+                ty: NirTy::new(Ty::Unit, slf.mode),
+            });
+            Some(dst)
+        }
+        match name {
+            // ── Scalar subset (VM + native) ──────────────────────────
+            "sleep_builtin" => {
+                let ms = self.host_arg(arg_vals, 0, false, nir_block);
+                emit_unit(self, Instr::Sleep { ms }, dst, nir_block)
+            }
+            "fs_exists" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::FsExists { dst, path });
+                Some(dst)
+            }
+            "io_write" => {
+                let src = self.host_arg(arg_vals, 0, true, nir_block);
+                emit_unit(self, Instr::IoWrite { src }, dst, nir_block)
+            }
+            "io_writeln" => {
+                let src = self.host_arg(arg_vals, 0, true, nir_block);
+                emit_unit(self, Instr::IoWriteLn { src }, dst, nir_block)
+            }
+            "env_set_builtin" => {
+                let n = self.host_arg(arg_vals, 0, true, nir_block);
+                let v = self.host_arg(arg_vals, 1, true, nir_block);
+                emit_unit(self, Instr::EnvSet { name: n, value: v }, dst, nir_block)
+            }
+            "log_emit_builtin" => {
+                let level = self.host_arg(arg_vals, 0, true, nir_block);
+                let message = self.host_arg(arg_vals, 1, true, nir_block);
+                emit_unit(self, Instr::LogEmit { level, message }, dst, nir_block)
+            }
+            "http_server_register_route" => {
+                let server = self.host_arg(arg_vals, 0, false, nir_block);
+                let method = self.host_arg(arg_vals, 1, true, nir_block);
+                let path = self.host_arg(arg_vals, 2, true, nir_block);
+                let handler = self.host_arg(arg_vals, 3, true, nir_block);
+                emit_unit(
+                    self,
+                    Instr::HttpServerRegister { server, method, path, handler },
+                    dst,
+                    nir_block,
+                )
+            }
+            "http_server_shutdown" => {
+                let server = self.host_arg(arg_vals, 0, false, nir_block);
+                emit_unit(self, Instr::HttpServerShutdown { server }, dst, nir_block)
+            }
+            // ── VM-only subset (aggregate returns) ───────────────────
+            "http_send_builtin" => {
+                let method = self.host_arg(arg_vals, 0, true, nir_block);
+                let url = self.host_arg(arg_vals, 1, true, nir_block);
+                // Headers are a List (no `ConstValue::List` exists for
+                // the missing-arg default, so an Int placeholder stands
+                // in — the VM shape-checks it into the same `Err` the
+                // interpreter returns when the arg is absent).
+                let headers = self.host_arg(arg_vals, 2, false, nir_block);
+                let body = self.host_arg(arg_vals, 3, true, nir_block);
+                nir_block.add_instr(Instr::HttpSend { dst, method, url, headers, body });
+                Some(dst)
+            }
+            "http_server_listen" => {
+                let port = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::HttpServerListen { dst, port });
+                Some(dst)
+            }
+            "http_server_serve_loop" => {
+                let server = self.host_arg(arg_vals, 0, false, nir_block);
+                emit_unit(self, Instr::HttpServerServeLoop { server }, dst, nir_block)
+            }
+            "db_open_builtin" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::DbOpen { dst, path });
+                Some(dst)
+            }
+            "db_exec_builtin" => {
+                let handle = self.host_arg(arg_vals, 0, false, nir_block);
+                let sql = self.host_arg(arg_vals, 1, true, nir_block);
+                let params = self.host_arg(arg_vals, 2, true, nir_block);
+                nir_block.add_instr(Instr::DbExec { dst, handle, sql, params });
+                Some(dst)
+            }
+            "db_query_builtin" => {
+                let handle = self.host_arg(arg_vals, 0, false, nir_block);
+                let sql = self.host_arg(arg_vals, 1, true, nir_block);
+                let params = self.host_arg(arg_vals, 2, true, nir_block);
+                nir_block.add_instr(Instr::DbQuery { dst, handle, sql, params });
+                Some(dst)
+            }
+            "db_close_builtin" => {
+                let handle = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::DbClose { dst, handle });
+                Some(dst)
+            }
+            "fs_read_text" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::FsRead { dst, path });
+                Some(dst)
+            }
+            "fs_write_text" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                let contents = self.host_arg(arg_vals, 1, true, nir_block);
+                nir_block.add_instr(Instr::FsWrite { dst, path, contents });
+                Some(dst)
+            }
+            "fs_modified_millis_builtin" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::FsModifiedMillis { dst, path });
+                Some(dst)
+            }
+            "env_get_builtin" => {
+                let n = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::EnvGet { dst, name: n });
+                Some(dst)
+            }
+            "config_get_builtin" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                let key = self.host_arg(arg_vals, 1, true, nir_block);
+                nir_block.add_instr(Instr::ConfigGet { dst, path, key });
+                Some(dst)
+            }
+            "dotenv_load_builtin" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::DotenvLoad { dst, path });
+                Some(dst)
+            }
+            // Phase 6/Wave 0 (ADR-020/021): monotonic clock + explicit
+            // RNG. Scalar `Int` shapes (no aggregates), so these join
+            // the VM-executed set with interpreter-identical semantics
+            // (see `vm.rs`); native fails loud until the backend track
+            // lowers them (same VM-only precedent as the aggregate
+            // builtins above, but genuinely lowerable — timers are
+            // values, so no loud-fail is *added* here).
+            "time_mono_ms_builtin" => {
+                nir_block.add_instr(Instr::TimeMonoMs { dst });
+                Some(dst)
+            }
+            "rng_seed_builtin" => {
+                let seed = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::RngSeed { dst, seed });
+                Some(dst)
+            }
+            "rng_next_builtin" => {
+                let handle = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::RngNext { dst, handle });
+                Some(dst)
+            }
+            // Phase 6/M5 (ADR-024): cooperative task cancellation. One
+            // statement-shaped instruction for the whole effect (the
+            // flag write), same epilogue as `sleep_builtin`; the
+            // cancelled value is the TARGET's, observed at its own
+            // `await`, so nothing is returned here.
+            "task_cancel_builtin" => {
+                let handle = self.host_arg(arg_vals, 0, false, nir_block);
+                emit_unit(self, Instr::TaskCancel { handle }, dst, nir_block)
+            }
+            _ => None,
+        }
+    }
+
     fn lower_stmt(&mut self, stmt: &crate::hir::items::TypedStmt, nir_block: &mut crate::nir::module::Block) {
         use crate::hir::items::TypedStmtKind;
         match &stmt.kind {
@@ -1057,6 +1274,15 @@ impl LoweringContext {
                             ty: NirTy::new(expr.ty.clone(), self.mode),
                         });
                         return dst;
+                    }
+                    // Phase 5/M4 host-IO builtins: one instruction per
+                    // builtin (see `instr.rs`'s Host I/O section). Arity
+                    // is checked by typeck (E0200); a missing arg here
+                    // means an already-reported error, so the helper
+                    // falls back to a zero-valued default rather than
+                    // panicking the backend.
+                    if let Some(host) = self.lower_host_builtin(name, &arg_vals, dst, nir_block) {
+                        return host;
                     }
                 }
 

@@ -1,0 +1,6 @@
+// @skip-test (module-graph negative fixture: evaluated via ModuleGraph W0101, covered by modules::tests)
+import support::partly as p
+
+main():
+    println(p.public_one())
+    println(p.private_one())

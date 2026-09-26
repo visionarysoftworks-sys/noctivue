@@ -1,0 +1,4 @@
+package:
+    name: reference_crud
+    version: 0.1.0
+    description: Phase 5 reference CRUD REST API on SQLite (public stdlib only).

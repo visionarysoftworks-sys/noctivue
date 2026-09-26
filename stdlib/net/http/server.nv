@@ -6,8 +6,14 @@
 //! via `http_server_stop` from another thread.
 
 /// A handler function takes the request BODY as a String and
-/// returns the response body String. Registered by exact
-/// method + path (unmatched requests get 404).
+/// returns either the response body String (answered 200 with
+/// `Content-Type: text/plain`, the M4 shape) or an `HttpResponse`
+/// struct value (answered with exactly its status, headers, and
+/// body — the Phase 6 status-aware shape; build one with
+/// `http_response` / `http_response_with_headers`). Registered by
+/// exact method + path (unmatched requests get 404 `Not Found`).
+/// A handler returning any other value, failing, or missing answers
+/// 500 `Internal Server Error` — never 200, never silent.
 /// Handlers are registered by route path.
 
 /// Start listening on the given port. Returns a server handle (opaque).

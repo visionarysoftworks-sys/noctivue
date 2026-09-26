@@ -57,10 +57,12 @@ use crate::nir::module::NirModule;
 use crate::nir::types::{BlockId as NirBlockId, FuncId as NirFuncId, ValueId};
 
 use super::abi::{
-    NOCTIVUE_RT_CHECKED_SDIV, NOCTIVUE_RT_CHECKED_SREM, NOCTIVUE_RT_CHECKED_UDIV,
-    NOCTIVUE_RT_CHECKED_UREM, NOCTIVUE_RT_FREM, NOCTIVUE_RT_PANIC, NOCTIVUE_RT_PRINT,
-    NOCTIVUE_RT_STR_CONCAT, NOCTIVUE_RT_STR_FROM_BOOL, NOCTIVUE_RT_STR_FROM_FLOAT,
-    NOCTIVUE_RT_STR_FROM_INT, NOCTIVUE_RT_STR_FROM_PARTS, NOCTIVUE_DASHBOARD_ARITH,
+    NOCTIVUE_RT_CHAR_EQ, NOCTIVUE_RT_CHECKED_SDIV, NOCTIVUE_RT_CHECKED_SREM, NOCTIVUE_RT_CHECKED_UDIV,
+    NOCTIVUE_RT_CHECKED_UREM, NOCTIVUE_RT_ENV_SET, NOCTIVUE_RT_FREM, NOCTIVUE_RT_FS_EXISTS,
+    NOCTIVUE_RT_HTTP_SERVER_REGISTER, NOCTIVUE_RT_HTTP_SERVER_SHUTDOWN, NOCTIVUE_RT_IO_WRITE,
+    NOCTIVUE_RT_IO_WRITELN, NOCTIVUE_RT_LOG_EMIT, NOCTIVUE_RT_PANIC, NOCTIVUE_RT_PRINT,
+    NOCTIVUE_RT_SLEEP_MS, NOCTIVUE_RT_STR_CONCAT, NOCTIVUE_RT_STR_FROM_BOOL, NOCTIVUE_RT_STR_FROM_FLOAT,
+    NOCTIVUE_RT_STR_FROM_INT, NOCTIVUE_RT_STR_FROM_PARTS, NOCTIVUE_RT_STRING_EQ, NOCTIVUE_DASHBOARD_ARITH,
     NOCTIVUE_DASHBOARD_ECHO, RUNTIME_IMPORTS,
 };
 use super::lower::{clif_type_for, clif_type_for_opt, lower_instr, signature_for, FuncLowerCtx, RtRefs};
@@ -118,6 +120,14 @@ pub struct RtIds {
     pub str_from_float: ClifFuncId,
     pub str_from_bool: ClifFuncId,
     pub str_concat: ClifFuncId,
+    pub sleep_ms: ClifFuncId,
+    pub fs_exists: ClifFuncId,
+    pub io_write: ClifFuncId,
+    pub io_writeln: ClifFuncId,
+    pub env_set: ClifFuncId,
+    pub log_emit: ClifFuncId,
+    pub http_server_register: ClifFuncId,
+    pub http_server_shutdown: ClifFuncId,
     pub checked_sdiv: ClifFuncId,
     pub checked_udiv: ClifFuncId,
     pub checked_srem: ClifFuncId,
@@ -125,6 +135,8 @@ pub struct RtIds {
     pub frem: ClifFuncId,
     pub dashboard_echo: ClifFuncId,
     pub dashboard_arith: ClifFuncId,
+    pub string_eq: ClifFuncId,
+    pub char_eq: ClifFuncId,
 }
 
 /// Compile `module` to a native object file at `output_path`. Does not
@@ -247,6 +259,14 @@ fn declare_runtime_imports(
         str_from_float: get(NOCTIVUE_RT_STR_FROM_FLOAT),
         str_from_bool: get(NOCTIVUE_RT_STR_FROM_BOOL),
         str_concat: get(NOCTIVUE_RT_STR_CONCAT),
+        sleep_ms: get(NOCTIVUE_RT_SLEEP_MS),
+        fs_exists: get(NOCTIVUE_RT_FS_EXISTS),
+        io_write: get(NOCTIVUE_RT_IO_WRITE),
+        io_writeln: get(NOCTIVUE_RT_IO_WRITELN),
+        env_set: get(NOCTIVUE_RT_ENV_SET),
+        log_emit: get(NOCTIVUE_RT_LOG_EMIT),
+        http_server_register: get(NOCTIVUE_RT_HTTP_SERVER_REGISTER),
+        http_server_shutdown: get(NOCTIVUE_RT_HTTP_SERVER_SHUTDOWN),
         checked_sdiv: get(NOCTIVUE_RT_CHECKED_SDIV),
         checked_udiv: get(NOCTIVUE_RT_CHECKED_UDIV),
         checked_srem: get(NOCTIVUE_RT_CHECKED_SREM),
@@ -254,6 +274,8 @@ fn declare_runtime_imports(
         frem: get(NOCTIVUE_RT_FREM),
         dashboard_echo: get(NOCTIVUE_DASHBOARD_ECHO),
         dashboard_arith: get(NOCTIVUE_DASHBOARD_ARITH),
+        string_eq: get(NOCTIVUE_RT_STRING_EQ),
+        char_eq: get(NOCTIVUE_RT_CHAR_EQ),
     })
 }
 
@@ -301,8 +323,16 @@ fn is_supported(instr: &Instr) -> bool {
         | Instr::ICmp { .. }
         | Instr::FCmp { .. }
         | Instr::ToString { .. }
-        | Instr::Call { .. }
+        |         Instr::Call { .. }
         | Instr::Print { .. }
+        | Instr::Sleep { .. }
+        | Instr::FsExists { .. }
+        | Instr::IoWrite { .. }
+        | Instr::IoWriteLn { .. }
+        | Instr::EnvSet { .. }
+        | Instr::LogEmit { .. }
+        | Instr::HttpServerRegister { .. }
+        | Instr::HttpServerShutdown { .. }
         | Instr::Phi { .. }
         | Instr::Branch { .. }
         | Instr::CondBranch { .. }
@@ -388,6 +418,9 @@ fn collect_value_types(
                 }
                 Instr::ToString { dst, .. } => {
                     types.insert(*dst, Ty::String);
+                }
+                Instr::FsExists { dst, .. } => {
+                    types.insert(*dst, Ty::Bool);
                 }
                 Instr::Phi { dst, ty, incoming, .. } => {
                     if matches!(ty.inner, Ty::Unknown) {
@@ -597,6 +630,14 @@ fn compile_function(
         str_from_float: obj_module.declare_func_in_func(rt_ids.str_from_float, &mut ctx.func),
         str_from_bool: obj_module.declare_func_in_func(rt_ids.str_from_bool, &mut ctx.func),
         str_concat: obj_module.declare_func_in_func(rt_ids.str_concat, &mut ctx.func),
+        sleep_ms: obj_module.declare_func_in_func(rt_ids.sleep_ms, &mut ctx.func),
+        fs_exists: obj_module.declare_func_in_func(rt_ids.fs_exists, &mut ctx.func),
+        io_write: obj_module.declare_func_in_func(rt_ids.io_write, &mut ctx.func),
+        io_writeln: obj_module.declare_func_in_func(rt_ids.io_writeln, &mut ctx.func),
+        env_set: obj_module.declare_func_in_func(rt_ids.env_set, &mut ctx.func),
+        log_emit: obj_module.declare_func_in_func(rt_ids.log_emit, &mut ctx.func),
+        http_server_register: obj_module.declare_func_in_func(rt_ids.http_server_register, &mut ctx.func),
+        http_server_shutdown: obj_module.declare_func_in_func(rt_ids.http_server_shutdown, &mut ctx.func),
         checked_sdiv: obj_module.declare_func_in_func(rt_ids.checked_sdiv, &mut ctx.func),
         checked_udiv: obj_module.declare_func_in_func(rt_ids.checked_udiv, &mut ctx.func),
         checked_srem: obj_module.declare_func_in_func(rt_ids.checked_srem, &mut ctx.func),

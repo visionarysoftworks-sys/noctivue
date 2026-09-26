@@ -358,6 +358,574 @@ derive Deserialize for User:
 user-defined derives, derive for enums, `impl`-block method
 synthesis beyond the marker, reflection of any kind.
 
+### ADR-019 — SQLite File-Backed Reference Database (Phase 5/M4)
+
+**Status:** Confirmed (implemented: `db/sqlite.nv` + `db/pool.nv`
+over bundled rusqlite, binding-only JSON interchange, task-local
+pools, 16×128 two-cycle load harness in `tests/http_load.rs`).
+Filed 2026-09-26 to repair the dangling `docs/PHASE5_PRODUCTION.md`
+reference — the decision predates this entry, which records rather
+than re-decides it.
+
+**The constraint.** The M4 reference app needs a production
+database with zero system dependencies and zero network services
+in test. A client-server engine fails that bar; SQLite (bundled
+via rusqlite, no system library) passes it.
+
+**Decision.** SQLite is the reference engine: file-backed temp
+databases under load (`PRAGMA integrity_check` + spot reads),
+`:memory:` for unit smokes, WAL journaling + 5 s busy timeout for
+concurrent handlers, single-statement atomicity as sufficient
+(the reference CRUD is expressible without multi-statement
+transactions). Values bind from JSON scalar arrays only —
+interpolation into SQL text is a convention + self-grep test
+failure, never a runtime guess.
+
+**Non-goals (still deferred, explicitly):** replication/failover,
+a client-server (Postgres-class) driver, multi-statement
+transactions (one designed unit with that driver, Phase 6),
+full ORM (never core — ecosystem).
+
+### ADR-020 — Monotonic Clock Source (Phase 6/Wave 0)
+
+**Status:** Implemented (2026-09-26, Phase 6/Wave 0 — `time_mono_ms_builtin`
+in the interpreter + NIR VM, Cranelift loud-reject, `stdlib/time/instant.nv`
+promoted to runnable, `tests/clock_rng.rs` 10/10). The Proposed rationale
+below is retained verbatim per §1 (no silent rewrites); the
+implementation-outcome amendment is recorded at the end of this entry.
+
+**The constraint.** Nothing in the tree can observe time passing:
+`stdlib/time/clock.nv` is byte-empty and no doc mentions time at
+all. Wall-clock dates need a timezone database (M6+ weight), but
+every Phase 6 timing feature only needs *durations between
+instants* — a far smaller surface.
+
+**Decision.** Monotonic milliseconds first: a `time_mono_ms_builtin`
+(interp-only initially, VM/`build` fail loud per the host-IO
+precedent), with `stdlib/time/instant.nv` promoted to runnable
+carrying the mono-clock wrapper only. Semantics: arbitrary epoch,
+`u64` millis, never goes backward within a process; no date/time
+interpretation at the builtin layer. The `resilience` lib's `Int`
+millis integrate onto it unchanged, and its fake-clock test
+pattern becomes the conformance oracle (real clock must agree
+with simulated clock on policy math).
+
+**Non-goals (still deferred, explicitly):** wall-clock dates,
+timezones, calendars, NTP, sleep precision beyond at-least,
+deadline objects (built in libraries on top, not in the builtin).
+
+**Implementation amendment — 2026-09-26 (Wave 0, as built).** One
+correction to the Decision's mechanism, recorded rather than assumed:
+the builtin shipped on BOTH runtimes from day one, not interp-only.
+The host-IO precedent (VM/build fail loud) would have made
+`time_mono_ms_builtin` interp-only; but it is a pure scalar `Int`
+computation over a process anchor, so lowering needed no new `Instr`
+— `Instr::TimeMonoMs` was added to the existing VM-executed set
+(`compiler/src/nir/lowering.rs`, `compiler/src/nir/vm.rs`) and
+Cranelift rejects it through its normal `is_supported` pre-check, so
+`noct build` still fails loud. Every Decision semantic is honored:
+arbitrary process epoch (`LazyLock<Instant>` in both runtimes),
+millisecond `Int`, monotonic within a process, and no date/time
+interpretation at the builtin layer. `stdlib/time/clock.nv` remains a
+byte-empty reserved stub — the wall-clock non-goal is untouched. The
+Decision's "resilience fake-clock as conformance oracle" clause is
+NOT yet discharged: `libs/resilience` still has no test binding real
+`instant_now_ms()` against its simulated clock (see that lib's
+`docs/overview.md`).
+
+### ADR-021 — Explicit-Seed RNG, No Global Entropy (Phase 6/Wave 0)
+
+**Status:** Implemented (2026-09-26, Phase 6/Wave 0 — `rng_seed_builtin` +
+`rng_next_builtin` in the interpreter + NIR VM, Cranelift loud-reject,
+`stdlib/numbers/random.nv` promoted to runnable, `tests/clock_rng.rs`
+10/10). The Proposed rationale below is retained verbatim per §1 (no
+silent rewrites); the implementation-outcome amendment is recorded at
+the end of this entry.
+
+**The constraint.** Jitter and property tests need randomness, but
+a global entropy source is untestable (unreplayable failures) and
+unauditable (unpredictable consumption). The `testing_ext` lib
+already proved the alternative shape in pure `.nv` (seeded LCG,
+threaded state, deterministic replay) — this ADR ratifies that
+shape at the builtin layer.
+
+**Decision.** Values, not ambient authority: `rng_seed_u64(seed)
+-> Rng` plus `rng_next(Rng) -> RngOut { value, state }`, threaded
+explicitly like pool/breaker handles. Deterministic replay is the
+acceptance bar (same seed → same sequence, pinned in tests). OS
+entropy arrives no earlier than M6 with its own audit note, and
+cryptographic randomness is never promised from this surface
+(crypto RNG belongs to the Phase 6 crypto work, audited
+separately).
+
+**Non-goals (still deferred, explicitly):** a global `random()`,
+float distributions, crypto-grade output, OS-entropy seeding.
+
+**Implementation amendment — 2026-09-26 (Wave 0, as built).** The
+Decision's named surface (`rng_seed_u64(seed) -> Rng`,
+`rng_next(Rng) -> RngOut { value, state }`) was NOT built as written;
+what landed is a flatter, still-explicit shape, recorded here because a
+surface rename is exactly the kind of silent divergence the amendment
+process exists to prevent:
+- `rng_seed_builtin(seed: Int) -> Int` allocates an opaque handle from
+  a per-run registry (the `DbRegistry` handle shape), and
+  `rng_next_builtin(handle: Int) -> Int` advances it. The
+  `{ value, state }` record was dropped: SplitMix64 keeps the state in
+  the registry, so a returned struct would have been a second copy of
+  state that could drift from the registry. The `Rng` *struct* still
+  exists at the `.nv` layer (`stdlib/numbers/random.nv`) so the
+  "values, not ambient authority" threading reads the same in user
+  code — but it wraps only the `Int` handle, so the VM's
+  struct-returning-call gap (FuncId::UNRESOLVED, noted in
+  `tests/clock_rng.rs`) keeps the `Rng`-struct path interp-only. That
+  is a documented test-scoping boundary, not a mirrored surface, and it
+  is called out in the test file rather than hidden.
+- Both runtimes implement one byte-identical SplitMix64 step
+  (`interp::rng_next_u64` / `compiler::nir::vm::vm_rng_next_u64`),
+  pinned by `tests/clock_rng.rs`; same seed → same sequence across
+  `run` and `run-vm` is the acceptance bar and it is green.
+- All non-goals hold: there is no global `random()`, no float
+  distribution, no OS-entropy seeding, and no crypto claim anywhere in
+  the surface or its docs. Unknown handles fail loudly in both
+  runtimes (`unknown rng handle ...`).
+
+### ADR-022 — Minimal String-Keyed Map Values (Phase 6/Wave 0)
+
+**Status:** Proposed (paper first — unblocks route tables,
+catalogs, headers, and JSON objects as values).
+
+**The constraint.** `Map` values do not exist (SPEC.md C6); the
+parallel-list workaround in libraries does not scale to route
+tables or i18n catalogs, and the ownership story gates only
+*in-place* mutation — not values (the `FieldSet` functional-update
+precedent from P-001 applies: clone-on-write needs no borrowck).
+
+**Decision.** A closed, minimal surface in the ADR-018 spirit:
+string keys only (covers catalogs, headers, route tables, and
+JSON objects — the actual M4/M5 use cases), functional update
+semantics (`map_set` returns the new map, the input is observably
+unchanged), builtins `map_new`/`map_get`/`map_set`/`map_len`/
+`map_keys` over an insertion-ordered pair store. The surface reads
+`Map<String, T>` with `T` monomorphic per map until generics land;
+general key types and in-place mutation are deferred, never
+precluded. Iteration order is insertion order, documented, not
+guaranteed across versions.
+
+**Non-goals (still deferred, explicitly):** non-String keys,
+in-place mutation, a hashing API, concurrent maps, `Map` in
+`derive` field position (revisit with ADR-018's successor).
+
+### ADR-023 — TLS/Driver Vehicle Selection Criteria (Phase 6/Wave 0)
+
+**Status:** Proposed as *criteria + shortlist* — the pick itself
+locks via amendment here after a time-boxed Wave 1 spike, before
+main implementation (hybrid per the Wave-planning record: decide
+enough up front that parallel tracks stop guessing, learn enough
+in the spike that the pick survives contact with packaging).
+
+**What gets judged.** TLS: static-link story, license, client +
+server API coverage, auditability of the binding, packaging
+weight. Driver: wire-protocol completeness, transaction +
+savepoint support, fit with the M5 executor story, packaging
+weight. Both: the `unsafe` boundary review plan and the tier
+labels they will carry in `noct audit`.
+
+**Explicitly on the table.** The plan's "FFI-bound driver"
+wording is an assumption, not a ruling: a pure-Rust crate
+competitor is judged by the same criteria (no C toolchain and no
+`unsafe` boundary to audit are real points in its favor). Same
+for TLS (vetted-C vs audited-Rust). The spike must include a
+static-binary packaging probe, since Wave 4 deployment is where
+a C dependency would hurt most — that failure mode is what the
+up-front criteria exist to catch early.
+
+**Lock rule.** No implementation past the spike until the pick is
+amended into this entry with the measured rationale. Unknowns
+that reopen it: throughput shortfall under §5-style load,
+static-link failure, license conflict.
+
+**Lock amendment — 2026-09-26 (Wave 1 lock run): DEFERRED, with
+sealed sub-decisions.** Verdict: **DEFERRED** — the measurements
+below decide the rustls crypto provider and confirm offline
+reproducibility, but the driver pick cannot lock without an
+authenticated Postgres conformance run, and TLS cannot lock
+without the handshake matrix. Nothing here is fabricated: every
+cell is `[measured]` (observed in this run on Windows/MSVC,
+scratch in `Temp\opencode\adr23-lock`, never in the repo) or
+names its explicit blocker.
+
+**Sealed (no re-measurement needed at the lock run):**
+1. Criteria + shortlist stand as written above (TLS: rustls /
+   mbedTLS-TF-PSA / OpenSSL / LibreSSL; driver: pure-Rust
+   `postgres` blocking facade / libpq-FFI). Raw
+   `tokio-postgres` async core stays rejected — see the ADR-009
+   note.
+2. Provider pick — **`ring`** (sealed, statically decided).
+   `[measured]` `rustls 0.23.45` + `ring 0.17.14` clean-builds
+   in ~146 s, links statically by default, and runs (9 cipher
+   suites enumerated) via the already-proven `cc` path with
+   `cl.exe` NOT on `PATH`. `[measured]` `aws-lc-rs 1.18.1`
+   configures (finds only the VS-bundled CMake, which is NOT on
+   `PATH`) but its full C++ source compile exceeded a 15-min
+   budget without producing the lib; no cmake/perl/nasm on
+   `PATH` in a plain shell. License is not the decider
+   (`[measured]` all clean and MIT-compatible, no election:
+   ring `Apache-2.0 AND ISC`, rustls `Apache-2.0 OR ISC OR
+   MIT`, aws-lc-rs `ISC AND (Apache-2.0 OR ISC)`). Reopen only:
+   a future aws-lc-rs recipe that builds hermetically inside the
+   offline-build proof AND beats ring on binary size —
+   packaging evidence, not opinion.
+3. Offline reproducibility confirmed. `[measured]` this machine
+   is ONLINE (`cargo search`/`fetch` succeed); every candidate
+   resolves (`rustls 0.23.45`, `ring 0.17.14`, `aws-lc-rs
+   1.18.1`, `postgres 0.19.14` over `tokio-postgres 0.7.18` +
+   `tokio 1.53.1`) and is now in the local cargo cache, so the
+   lock run re-verifies hermetically with `cargo build
+   --offline`.
+4. Driver build. `[measured]` `postgres 0.19.14` clean-builds
+   (5m23s, pure Rust, zero system deps, zero new build tools)
+   and links; licenses `MIT OR Apache-2.0` (both crates). Live
+   queries NOT run — see shopping list item 1.
+5. Postgres hunt. `[measured]` a test Postgres EXISTS
+   (PostgreSQL 18, `localhost:64534` via `PGPORT`, `pg_isready`
+   accepting, `scram-sha-256` everywhere, role `postgres`
+   exists) but NO credentials are available in this session (no
+   `PGUSER`/`PGPASSWORD`, password auth fails) — conformance is
+   blocked on access, not existence. No simulation performed,
+   no config touched.
+
+**ADR-009 interpretation note (sealed).** The `postgres`
+blocking facade's hidden internal tokio driver does NOT violate
+"one official async runtime": `[knowledge]` it exposes no Tokio
+types across the `.nv` boundary and every call joins on the
+calling OS thread (the M4 blocking-threads floor) — structured
+join at scope exit per PHASE5_PRODUCTION.md §3, no different in
+kind from a C library spawning worker threads. Conditions:
+(i) no Tokio handle/future crosses into `.nv` user code;
+(ii) no background work outlives the call (no detach);
+(iii) M5 re-opens only whether a native async surface is
+added, never the M4 blocking use.
+
+**Shopping list for the lock run (each names its blocker):**
+1. Driver conformance vs a real Postgres (SCRAM, extended
+   protocol, prepared statements, transactions + savepoints,
+   pooled concurrent use, one `COPY` + one `LISTEN`/`NOTIFY`
+   leg). Blocker: authenticated access to the PG18 instance
+   above (or any test Postgres).
+2. TLS handshake interop matrix (rustls+ring client+server
+   against each other + one external peer) + Windows
+   trust-store decision (bundled roots vs platform verifier)
+   with `noct audit` tier/label treatment. Blocker: design
+   time + verifier-crate API read.
+3. Release binary-size deltas (rustls+ring vs any revived
+   challenger). Blocker: items 1–2 first; mbedTLS still needs
+   network + its own CMake proof.
+4. M5-executor integration sketch for the facade (per the
+   ADR-009 note §iii). Blocker: design time.
+5. License texts pinned into `noct audit` rows (texts verified
+   above; recording is lock-run paperwork).
+
+**Hybrid rule (what Wave 1 implementation may start NOW).**
+Stdlib scaffolding may proceed against `rustls 0.23 + ring`
+(client+server API shape, error-to-`Result` mapping,
+`native`-tier audit rows) and against the `postgres` blocking
+facade (pool/borrow discipline per PHASE5_PRODUCTION.md §1,
+transaction API as one designed unit) — both picks' build and
+packaging evidence is in. What reopens: ANY shopping-list
+failure, ANY static-link/hermetic-build failure, ANY license
+conflict or unrecorded election, throughput shortfall under a
+§5-style load harness, or any M5-executor integration needing
+a second runtime (revives libpq and forces the ADR-009 note
+open).
+
+**Lock amendment — 2026-09-26 (Wave 1 lock-run follow-up): LOCKED.**
+Verdict: **LOCKED** — every shopping-list leg measured PASS on
+Windows/MSVC in `Temp\opencode\adr23-lockrun` (never in the repo),
+instance `localhost:64535` from datadir `Temp\opencode\pglock`
+(PostgreSQL 18.3, initdb UTF8/scram-sha-256, role `postgres`),
+scratch DB `adr23lock`. Port 64534 untouched throughout. Sealed
+sub-decisions stand (`ring` provider, ADR-009 note, offline cache).
+`[measured]` below = observed this run; versions pinned:
+`rustls 0.23.45`, `ring 0.17.14`, `postgres 0.19.14`
+(over `tokio-postgres 0.7.18`), `rcgen 0.14.10`,
+`webpki-roots 1.0.9`, `rustls-platform-verifier 0.7.1`.
+1. Driver conformance (`postgres` sync facade, `pgconf` bin,
+   start→all-legs→stop in one call, SCRAM auth): `[measured]`
+   scram-connect PASS 550 ms; prepared-extended PASS 326 ms;
+   txn-savepoint PASS 749 ms (ids=[1,2], rollback leg clean);
+   concurrent-16 PASS 2708 ms, method=one-client-per-thread
+   (16 independent connects, 16/16 ok — no hand-rolled pool);
+   copy PASS 349 ms (count=2, out_bytes=16);
+   listen-notify PASS 393 ms (adr23chan/ping123).
+   TOTAL 5089 ms, failures=0.
+2. TLS interop (`tlsmat`, ring-only
+   `rustls = { version = "0.23.45", default-features = false,
+   features = ["std","tls12","ring"] }`): `[measured]` cert-gen
+   PASS 3 ms via `rcgen 0.14 generate_simple_self_signed`
+   (localhost; cert_der 354 B, key_der 138 B; openssl CLI absent,
+   not used); config-build PASS 1 ms; 9 cipher suites enumerated
+   (TLS13_AES_256_GCM_SHA384, TLS13_AES_128_GCM_SHA256,
+   TLS13_CHACHA20_POLY1305_SHA256 + 6 ECDHE ECDSA/RSA);
+   handshake PASS 13 ms over 127.0.0.1 TCP, ping-tls/pong-tls
+   both ways, negotiated TLS13_AES_256_GCM_SHA384 / TLSv1_3
+   both ends. TOTAL 22 ms.
+3. Trust-store INPUTS (`trustmat`): `[measured]` bundled API
+   `webpki_roots::TLS_SERVER_ROOTS` len=121, deps only
+   `rustls-pki-types` (lightest); platform-verifier APIs
+   `ClientConfig::with_platform_verifier()` OK (9 suites) and
+   `BuilderVerifierExt::with_platform_verifier()` with explicit
+   ring provider OK; full `cargo tree -p
+   rustls-platform-verifier` = log + rustls(ring, no aws-lc
+   pulled) + windows-sys/windows-link, 27-line trustmat tree.
+   Weight: trustmat 875008 B vs tls-only 698880 B (+176128 B
+   for roots+verifier+windows-sys). Recommendation: platform
+   verifier as the client default (OS store, live trust,
+   enterprise CA/proxy, Windows-API revocation; rustls-team
+   best-default opinion; deployed by 1Password/Bitwarden/Signal/
+   rustup; works ring-only), bundled `webpki-roots` as opt-in
+   for hermetic/container (deterministic, no OS dependency).
+   Both `native` tier; `webpki-roots` license CDLA-Permissive-2.0
+   recorded. Server side needs no store (presents cert).
+4. Release size deltas (always-linked scratch bins, `x86_64-pc-
+   windows-msvc` .exe): `[measured]` base 131072 B; tls-only
+   698880 B (+567808 B); pg-only 1225216 B (+1094144 B);
+   both 1788928 B (+1657856 B; shared-dep saving 4096 B vs sum
+   of deltas). Full-harness binaries for reference: pgconf
+   1556480 B, tlsmat 1877504 B (incl. rcgen), trustmat 875008 B.
+5. Licenses (texts verified in cargo cache, `LICENSE*`
+   present): `[measured]` ring 0.17.14 `Apache-2.0 AND ISC`;
+   rustls 0.23.45 `Apache-2.0 OR ISC OR MIT`; postgres 0.19.14
+   `MIT OR Apache-2.0` (tokio-postgres 0.7.18 same). No
+   election needed. Exact `noct audit` rows (code untouched —
+   text for implementation; `signed_by` = registry key at add
+   time; format per `cmd_audit.rs` name/version/tier/signed_by/
+   audit): `ring 0.17.14 native <key> signed (no vuln
+   database) // license Apache-2.0 AND ISC`; `rustls 0.23.45
+   native <key> signed (no vuln database) // license
+   Apache-2.0 OR ISC OR MIT`; `postgres 0.19.14 native <key>
+   signed (no vuln database) // license MIT OR Apache-2.0`.
+   Trust-store rows when added: `webpki-roots 1.0.9 native
+   <key> signed (no vuln database) // license
+   CDLA-Permissive-2.0`; `rustls-platform-verifier 0.7.1 native
+   <key> signed (no vuln database) // license MIT OR Apache-2.0`.
+Reopen conditions (carry the hybrid list + spike §6
+counter-argument): throughput shortfall under §5-style load;
+ANY static-link/hermetic failure; ANY license conflict or
+unrecorded election (incl. CDLA scope for bundled roots);
+ANY protocol-conformance failure the C reference passes; ANY
+M5-executor integration needing a second runtime (revives libpq,
+forces ADR-009 note open); any enterprise mandate the pure-Rust
+pair cannot meet (new PG auth method, FIPS module, OS TLS-policy
+— the reference-lag hedge was correctly priced).
+**Hybrid-rule revision.** The hybrid rule above is superseded:
+full implementation is authorized against `rustls 0.23 + ring`
+and the `postgres` blocking facade with the trust-store
+recommendation in (3); scaffolding constraints become build
+constraints (hermetic offline build from committed lockfile, no
+new build tools, `native`-tier rows as in (5)). Nothing else in
+this entry changes.
+
+### ADR-024 — M5 Non-Blocking Executor (Phase 6)
+
+**Status:** Proposed (merges `docs/EXECUTOR_DESIGN_DRAFT.md` §§1–5
+as the normative executor record and resolves-or-carries its §6
+items below; the draft itself stays untouched and non-normative).
+On acceptance, ADR-009's "async fn and non-blocking executor are
+Deferred to M5" resolves to this entry; ADR-009's own text is
+amended separately, never silently rewritten here.
+**The executor is NOT implemented.** A partial *runtime-side core* has
+landed in `interp/src/lib.rs` ahead of acceptance — see
+"Implementation status" at the end of this entry, which records exactly
+what runs, what is orphaned, and which of this ADR's compatibility
+promises it already contradicts.
+
+**The constraint.** The M4 floor (CONCURRENCY.md §4,
+PHASE5_PRODUCTION.md §§2–3) is one OS thread per task/connection:
+correct under the 16×128 load harness but bounded by the OS, not
+the runtime — the unboundedness M5 exists to remove. ADR-009 locks
+one official runtime, structured concurrency with no
+fire-and-forget, and defers `async fn` plus the non-blocking
+executor to M5. The executor must therefore retire
+thread-per-connection *without* a dual-runtime interregnum, reuse
+the already-validated NIR suspend/resume shape (NIR.md §5: block
+splits, tag dispatch, `phi`-carried state, `early_return` — no new
+`Instr`), keep every M4 program compiling with identical values,
+and add cooperative cancellation plus non-blocking timers without
+inventing preemptive kills or ambient authority (ADR-020/021).
+
+**Decision.** Option A of the draft (fixed work-stealing pool +
+single readiness event loop, std-only, zero new dependencies
+under the ADR-023 bar), with the draft's §6 open items resolved
+as follows (rationale per item; what is not resolved here is
+carried explicitly below — never silently picked):
+
+- Workers: default `available_parallelism` capped at 64
+  (INITIAL default — Wave 2 measures under §5-style load and amends
+  this number with evidence; the cap shape, not the value, is what
+  is pinned here); override via `NOCT_WORKERS` env (positive int,
+  loud error otherwise); a manifest key is deferred to the config
+  track. Rationale: the 16×128 mix binds on SQLite-serialized
+  writes long before 64 workers matter, so the ceiling only
+  prevents oversubscription pathology on many-core CI; worker
+  count stays recorded-not-thresholded engineering, never a gate.
+- Blocking bridge + spill rule: fixed bridge pool, default cap =
+  worker count (same initial-default status — measured in Wave 2);
+  queue-full is a loud `Err` (never silent growth,
+  never an implicit wait). Sizing rule (documented, not coded):
+  keep bridge cap >= pool max so pool-exhaustion stays the binding
+  backpressure signal. The bound is also the anti-deadlock story:
+  N sync-awaits against a smaller bridge fail loud instead of
+  wedging.
+- Sync `await` stays a blocking-bridge join (draft R2 confirmed —
+  CONCURRENCY.md §2's flagship awaits from sync `main`, so a
+  loud-error redirect would break source compatibility).
+  Anti-masking guardrail: bridge joins are bounded (previous
+  bullet), bridge depth is a test-visible gauge, and the 30 s
+  watchdog plus drain reporting still turn lifetime bugs into loud
+  failures.
+- Timers: tickless heap owned by the readiness thread (wake at
+  next expiry, no fixed tick); `sleep(0)` yields — re-queues
+  behind and is a cancellation checkpoint. Rationale: at-least
+  admits both, but yield makes `sleep(0)` a usable cooperative
+  yield with deterministic cancel semantics instead of a
+  potential busy-spin.
+- `select` v1: DEFERRED — timeout/hedge compose from oneshot +
+  timers (AC1's hedge leg proves adequacy); reopened only on
+  measured evidence, owned by the resilience-library track.
+- Pool: `pool_checkout_wait(pool, timeout_ms)` added as the
+  explicit opt-in waiting variant (suspends; timeout is
+  `Err("pool checkout timed out")`-class, exact string pinned in
+  tests; negative timeout is a loud `Err`); default
+  `pool_checkout` and both pinned strings stay byte-for-byte.
+- Handle ids: monotonic within a run, NEVER reused; stale,
+  unknown, or double await/cancel is a loud error. Rationale:
+  reuse would alias a new task onto a dead scope's id — silent
+  wrong-task values, the exact failure the loud-errors discipline
+  forbids. u64 space makes exhaustion a non-issue.
+- RNG in executor: jitter for timeout/hedge MUST thread ADR-021
+  explicit-seed `Rng` handles — no ambient source. Tests pin
+  per-sequence replay (same seed → same jitter sequence, agreeing
+  with the fake-clock oracle); exact cross-task interleaving order
+  is NOT pinned (pinning it would overspecify the scheduler).
+
+Preserved (argued, not assumed): one official runtime (no
+`--executor=` flag period — a gated dual runtime is two
+schedulers, rejected under R8); structured concurrency +
+join-on-cancel (cancel sets flags; scope exit still joins every
+child; a cancelled child reports a `cancelled`-class value
+composable with `?`); task-local handle rules (`for_task` fresh
+registries; bare `Db`/`PoolCheckout` across tasks stays a loud
+error; cross-task sharing only via explicit sync types);
+cancellation composes with join (no detach-by-cancel — a cancel
+that detaches would be fire-and-forget under another name).
+
+**Migration / compatibility contract.** Existing `task`/`await`
+programs are SOURCE- and VALUE-compatible (same handles, same
+single-use/unknown-handle errors, same drain-at-exit).
+`tests/http_load.rs` is EXTENDED, not replaced: the M4 legs keep
+passing except the two implementation-naming assertions
+re-baselined to executor gauges (live/parked tasks, bridge depth,
+multiplexed connections); timeout + hedge legs are added (AC1).
+`for_task` registries are PRESERVED in phase 1; relaxation arrives
+only through sync types. Explicitly breaking — and nothing else:
+(a) thread-count observability re-baselined to task gauges;
+(b) `sleep` overlap constants recalibrated (same structure);
+(c) pool struct shape may gain queue-depth fields behind unchanged
+strings; (d) `http_server_serve_loop` goes readiness-driven behind
+an unchanged route-table surface. No syntax, manifest, lockfile,
+registry, or other error-string change.
+
+**Acceptance criteria.** AC1 extended harness (16×128 floor +
+timeout leg + hedge-with-proven-join leg; latency
+recorded-not-thresholded; PHASE5 triple-zero: pool delta zero,
+gauges to baseline, second cycle no growth). AC2 cancellation
+tests (sleep-parked, channel-parked, scope-cancel-joins-all,
+idempotent cancel-after-completion, unknown/double loud,
+drain-reported un-awaited, sibling-unaffected). AC3
+no-regression list (drain, pool strings + `Ok(1)`/`Ok(0)`,
+loud-failure discipline, at-least sleep + negative panics,
+binding-only SQL grep, file-backed integrity + `:memory:`
+smoke). AC4 backend parity (loud `unknown-runtime-symbol` on
+`run-vm`/`build` until lowered; differential
+suspend/resume/phi coverage before native). AC5
+zero-new-dependency audit. New pins: `cancelled`-class strings,
+checkout-timeout strings, id monotonicity (no reuse observable
+in a soak), `sleep(0)`-yields (returns control + observes a
+pending cancel).
+
+**Non-goals (still deferred, explicitly):** the draft §6
+non-goal list in full — work-stealing tuning as a guarantee;
+TLS/auth/rate-limit/HTTP-2/status-aware codes/ORM/metrics
+export/`noct audit` enforcement/replication/driver pick (Phase 6
+owners); preemptive kills, builtin deadlines, priorities,
+pinning API, unbounded channels, reentrant mutexes, RwLock v1,
+`select` v1; wall-clock/timezone/NTP/precision; VM/native
+executor lowering in v1; cross native/managed sharing;
+multi-statement transactions + eviction policy; timeouts/hedging
+as anything but blessed libraries.
+
+**Open items carried (owner decides; implementers MUST NOT
+silently pick):** (i) native-backend port mechanism — link the
+same Rust executor vs. port the protocol in native codegen —
+owner: backend (`runtime-native`/Cranelift) track; constraint:
+identical observable protocol (cancel strings, join-on-cancel,
+gauge semantics once frozen) proven by the AC4 differential
+suite; WASM (M6) assumes whatever the port settles. (ii) OTel
+gauge names/timing — gauges stay test-only until Phase 6
+observability lands — owner: Wave 4 observability track. (iii)
+UI/readiness-loop convergence — owner: UI track (MEMORY_MODEL
+RUNTIME owners); constraint: nothing in this ADR precludes
+convergence. (iv) `select` reopen + worker-override manifest key
+— owners: resilience-library / config tracks respectively.
+
+**Implementation status (recorded 2026-09-26, integration audit).**
+An audit of the Phase 6 waves found a partial M5 executor core already
+in `interp/src/lib.rs` even though this entry is still Proposed and
+PHASE5_PRODUCTION.md §6 lists "cancellation, spawn limits" as
+deferred. Recording it here so the record is not silent:
+
+- **Runs today (reachable from `.nv`):** the worker cap. `spawn_task`
+  refuses loudly past `executor_worker_count()` (default
+  `available_parallelism` capped at 64, `NOCT_WORKERS` override,
+  loud on malformed values), and `join_task` admits through the
+  bounded blocking bridge (`blocking_bridge_acquire`, cap = worker
+  count, loud `Err` when full, 30 s watchdog). Gauges
+  (`live_executor_tasks`, `peak_executor_tasks`, `bridge_depth`,
+  `bridge_peak`) are `pub` with no test coverage.
+- **Partially runs:** cooperative cancellation. The per-task
+  `AtomicBool` flag, the `sleep` cancel checkpoint (including
+  `sleep(0)` → `yield_now` + checkpoint), the pinned
+  `task {id} cancelled` value, and the drain's cancelled-report path
+  are all live — but the only writer of the flag is
+  `Interpreter::task_cancel`, a Rust-only `pub fn` with no
+  `.nv`-callable builtin, no typeck signature, no VM arm, and no
+  stdlib wrapper. No user program can set a flag, so the checkpoint
+  and the cancelled value are unreachable in practice.
+- **Orphaned (no users, no tests):** `TicklessTimerHeap` and
+  `timer_now_ms`. The heap is a complete, correct, FIFO-ordered
+  tickless structure with an injectable clock — and nothing schedules
+  into it. `timer_now_ms` is a process-anchored `Instant` millis clock
+  that the heap was meant to be ordered on.
+- **Contradicts this ADR today:** (1) the migration contract's
+  "existing `task`/`await` programs are SOURCE- and VALUE-compatible"
+  does not cover a spawn *refusal* past the cap, which is a new
+  observable loud failure and is not in the explicitly-breaking list;
+  (2) `docs/PHASE5_PRODUCTION.md` §6 and `docs/CONCURRENCY.md` §4
+  describe the cap/bridge as M5 design, not as shipped behavior;
+  (3) `sleep_builtin` gained cancel polling, which is an M4 timing
+  path — the audit fixed a regression there (a naive elapsed counter
+  accumulated the OS timer's overshoot and broke
+  `tests/async_test.rs::tasks_overlap_in_wall_clock`), but the
+  cancellation *mechanism* is still unreachable, so the risk it added
+  bought nothing.
+- **Owner action required before Wave 2 starts:** either finish the
+  surface (a `task_cancel_builtin` + typeck + VM arm + `.nv` wrapper,
+  per the mirror rule) or delete the unreachable half; and reconcile
+  PHASE5_PRODUCTION.md §6 / CONCURRENCY.md §4 with what actually runs.
+  This audit did not add or remove executor code — that is Wave 2
+  implementation, and the decision to keep or revert the cap is the
+  ADR owner's, not the auditor's.
+
 ### ADR-025 — `.nvir` / `.nvc` Artifact Extensions
 
 **Status:** Proposed. Stage 1 (`.nvir` dumps) is **implemented**;

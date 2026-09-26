@@ -21,6 +21,14 @@ fn bool_eq(a: Bool, b: Bool) -> Bool:
 fn char_eq(a: Char, b: Char) -> Bool:
     a == b
 
+/// Char greater-than. [+Char] Native: yes (S3).
+fn char_gt(a: Char, b: Char) -> Bool:
+    a > b
+
+/// Char less-than-or-equal. [+Char] Native: yes (S3).
+fn char_le(a: Char, b: Char) -> Bool:
+    a <= b
+
 /// Int less-than.
 fn int_lt(a: Int, b: Int) -> Bool:
     a < b

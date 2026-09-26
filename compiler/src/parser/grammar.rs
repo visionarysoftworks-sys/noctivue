@@ -227,7 +227,18 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = self.current_span().end;
+        // End at the last consumed token (the final path/alias
+        // identifier). `current_span()` would name the *next*
+        // unconsumed token (often a zero-width newline), which used
+        // to produce empty or inverted import spans in E0101 labels.
+        let end = if self.pos > 0 {
+            self.tokens
+                .get(self.pos - 1)
+                .map(|s| s.span.end)
+                .unwrap_or(start)
+        } else {
+            start
+        };
         self.skip_newlines();
         Some(ImportDecl {
             path,
@@ -2146,9 +2157,28 @@ impl<'a> Parser<'a> {
                 }))
             }
             Token::Ident(ref s) => {
-                let s = s.clone();
+                let mut s = s.clone();
                 let span = self.current_span();
                 self.advance();
+                // Qualified struct literal (`alias::Name { ... }`),
+                // mirroring qualified type paths above: the linker
+                // strips a leading import-alias prefix at link time.
+                while *self.peek() == Token::ColonColon {
+                    // Only treat `::` as a qualifier when an
+                    // identifier follows; otherwise leave the tokens
+                    // for the enclosing parse (error recovery).
+                    if !matches!(self.peek2(), Token::Ident(_)) {
+                        break;
+                    }
+                    self.advance();
+                    match self.parse_ident() {
+                        Some(next) => {
+                            s.push_str("::");
+                            s.push_str(&next);
+                        }
+                        None => break,
+                    }
+                }
                 // Struct literal: `Name { field: val, ... }`
                 // Only parse as struct literal when `{` follows immediately
                 // (no newline between the ident and the brace).
@@ -2346,8 +2376,22 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::Ident(ref name) => {
-                let name = name.clone();
+                let mut name = name.clone();
                 self.advance();
+                // Qualified type paths (`alias::Item`) for module
+                // aliases. The linker strips a leading import-alias
+                // prefix once imports are linked (modules.rs), so
+                // downstream stages keep seeing plain type names.
+                while *self.peek() == Token::ColonColon {
+                    self.advance();
+                    match self.parse_ident() {
+                        Some(next) => {
+                            name.push_str("::");
+                            name.push_str(&next);
+                        }
+                        None => break,
+                    }
+                }
                 // Generic args: `Name<T, U>`
                 let generic_args = if *self.peek() == Token::Lt {
                     self.advance();

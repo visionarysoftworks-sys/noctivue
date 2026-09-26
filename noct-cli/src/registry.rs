@@ -18,8 +18,9 @@
 //!   tarball + signature + key directory).
 //! - **Tarball framing v1** (fixture interchange, not a wire format):
 //!   repeated `[u32LE path-len][path][u64LE content-len][content]`.
-//!   Unpacks under `.noct/packages/<name>-<version>/`; raw bytes also
-//!   cached at `.noct/cache/<name>-<version>.pkg` for hash re-checks.
+//!   Unpacks into the global content store's `trees/<sha256>/` (see
+//!   `store.rs`); the raw bytes are kept beside it at
+//!   `archives/<sha256>.pkg` and are hashed ONCE, at fetch.
 //! - **Resolution**: highest satisfying version per requirement set
 //!   (fixpoint over the closure — constraints only accumulate, so no
 //!   backtracking false-conflicts), tier conflicts are errors,
@@ -36,7 +37,13 @@
 //!   closed on key OR signature mismatch; `--rotate-key` re-prints and
 //!   re-records explicitly. No `--insecure` flag exists on purpose.
 //! - **Verification is mandatory on fetch** for registry sources;
-//!   `path` sources are exempt (your tree, your responsibility).
+//!   `path` sources are exempt (your tree, your responsibility). The
+//!   check order is load-bearing and unchanged: content hash → TOFU
+//!   key → signature, and the store is written only after all three
+//!   pass.
+//! - **Fetched content lives in the global store, not in the project**
+//!   (TOOLCHAIN.md §3, ADR-026). `store.rs` owns the layout; this
+//!   module owns the ONE path into it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -45,6 +52,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::manifest::{self, LockedPackage, Lockfile, Manifest, SemVer, Source, Tier, VersionReq};
+use crate::store::{self, Store, StoreState};
 
 // ── Hashing + signing primitives ────────────────────────────────────────────
 
@@ -506,25 +514,48 @@ fn req_text(req: VersionReq) -> String {
     }
 }
 
-// ── Fetch + verify + cache ──────────────────────────────────────────────────
+// ── Fetch + verify + the global store ───────────────────────────────────────
 
-/// Cache locations under a project root.
-pub fn cache_file(project: &Path, name: &str, version: SemVer) -> PathBuf {
-    project.join(".noct").join("cache").join(format!("{name}-{version}.pkg"))
-}
-
-pub fn unpack_dir(project: &Path, name: &str, version: SemVer) -> PathBuf {
-    project.join(".noct").join("packages").join(format!("{name}-{version}"))
+/// The LEGACY in-tree derived directories under a project root, in the
+/// order `noct clean` reclaims them.
+///
+/// Fetched content is global now (TOOLCHAIN.md §3, ADR-026), so these
+/// two are *legacy*: a project that has them from before the move still
+/// builds — `noct get` (or a build's auto-fetch) puts verified content
+/// in the store, and these are then dead weight `noct clean` reclaims.
+/// They are never READ: an in-tree tree nobody verified is exactly the
+/// thing this change stops compiling, and reading it would undo that.
+///
+/// The list stays a function of the layout rather than something
+/// `cmd_clean` spells out, so a reclamation command can never widen to
+/// something that is not derived. `.noct/` itself, `nestpkg.nvpm`,
+/// `nestpkg.lock`, `vendor/` (the committed escape hatch) and every
+/// source file are NOT in this list and must never be added to it.
+pub fn derived_dirs(project: &Path) -> Vec<PathBuf> {
+    let noct = project.join(".noct");
+    vec![noct.join("cache"), noct.join("packages")]
 }
 
 /// Fetch one locked registry package: bytes → hash check → TOFU key
-/// check → signature check → cache + unpack. `rotate_key` re-prints
-/// and re-records the index key explicitly (never automatic).
+/// check → signature check → the global store (archive + extracted
+/// tree, placed atomically and read-only). `rotate_key` re-prints and
+/// re-records the index key explicitly (never automatic).
 /// `keys` is the TOFU directory (production: `key_dir()`).
+///
+/// The order and the wording of these checks are the security contract
+/// and are unchanged by the move to a global store: the content hash
+/// first (bytes that do not match the lock are never looked at further),
+/// then the TOFU key (a changed publisher key fails closed and points at
+/// `--rotate-key`), then the signature. The store is written only after
+/// all three pass, so a failed fetch leaves no entry at all.
+///
+/// The archive is hashed HERE, once, and never again by a build: the
+/// store verifies the extracted tree against its own recorded tree hash
+/// instead (see `store.rs`).
 pub fn fetch_locked(
     locked: &LockedPackage,
     index: &dyn Registry,
-    project: &Path,
+    store: &Store,
     keys: &Path,
     rotate_key: bool,
 ) -> Result<(), String> {
@@ -538,6 +569,7 @@ pub fn fetch_locked(
             locked.name, entry.content_hash
         ));
     }
+    store::count_archive_hash();
     let actual = sha256_hex(&entry.tarball);
     if actual != expected {
         return Err(format!(
@@ -583,67 +615,107 @@ pub fn fetch_locked(
         )
     })?;
 
-    let cache = cache_file(project, &locked.name, locked.version);
-    if let Some(parent) = cache.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("cannot create cache: {e}"))?;
-    }
-    fs::write(&cache, &entry.tarball).map_err(|e| format!("cannot write cache: {e}"))?;
-    let dest = unpack_dir(project, &locked.name, locked.version);
-    if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| format!("cannot clear {}: {e}", dest.display()))?;
-    }
-    fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
-    for (rel, bytes) in unpack(&entry.tarball)? {
-        let target = dest.join(&rel);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("cannot create dir: {e}"))?;
-        }
-        fs::write(&target, &bytes).map_err(|e| format!("cannot unpack {rel}: {e}"))?;
-    }
-    Ok(())
+    // One write, one door: the store places the archive, unpacks the
+    // tree atomically, marks it read-only, and records the tree hash.
+    store.put(locked, &entry.tarball)
 }
 
-/// Re-verify cached tarballs against the lock (P-003 §6: verified on
-/// every build that touches the cache). Returns problems; empty = ok.
-pub fn check_cache_current(lock: &Lockfile, project: &Path) -> Vec<String> {
+/// What one build/run/test invocation is allowed to do about a missing
+/// dependency. The three knobs are a strict narrowing — the strongest
+/// (`--frozen`) wins — and the remedy text is derived from them, never
+/// hardcoded, because wrong advice in an error is how a user learns to
+/// stop reading the error.
+#[derive(Debug, Clone, Default)]
+pub struct Gate {
+    /// `--frozen`: metadata only. The manifest/lock check runs; the
+    /// store is not read and nothing is fetched (TOOLCHAIN.md §3:
+    /// "`--frozen` stays metadata-only").
+    pub frozen: bool,
+    /// `--offline`: the store is checked and every tree verified, but a
+    /// miss is an error, never a fetch.
+    pub offline: bool,
+    /// `--index <dir>`: a file-backed index auto-fetch may pull a
+    /// missing locked package from. There is no default registry, so
+    /// without one a miss stays a miss.
+    pub index: Option<PathBuf>,
+}
+
+impl Gate {
+    /// May this gate fetch a missing locked package? Only when nothing
+    /// opted out AND there is somewhere to fetch from.
+    pub fn can_fetch(&self) -> bool {
+        !self.frozen && !self.offline && self.index.is_some()
+    }
+
+    /// The clause appended to a failure, naming the ACTUAL reason the
+    /// dependency is not usable.
+    pub fn remedy(&self) -> &'static str {
+        if self.frozen {
+            "--frozen: this build must not fetch (metadata-only); re-run without it, or `noct get --index <dir>` beforehand"
+        } else if self.offline {
+            "--offline: no fetching; run `noct get --index <dir>` beforehand, or re-run with --index <dir> to fetch on demand"
+        } else if self.index.is_some() {
+            "re-run with --index <dir> to fetch it now, or `noct get --index <dir>` for the whole locked closure"
+        } else {
+            "run `noct get --index <dir>` to fetch the locked closure, or pass --index <dir> to fetch on demand"
+        }
+    }
+}
+
+/// Re-verify every locked registry package's stored tree against the
+/// store's own records. Returns problems; empty = ok.
+///
+/// `verify: false` is the `--frozen` case, which must not touch the
+/// store at all (metadata-only by contract). Note what is NOT here any
+/// more: a per-build re-hash of the archive. The archive was hashed
+/// once at fetch; the tree is what a build reads, and it is what the
+/// build verifies (TOOLCHAIN.md §3).
+pub fn check_store_current(lock: &Lockfile, store: &Store, verify: bool) -> Vec<String> {
+    if !verify {
+        return Vec::new();
+    }
     let mut problems = Vec::new();
     for pkg in &lock.packages {
         if !matches!(pkg.source, Source::Registry) {
             continue;
         }
-        let cache = cache_file(project, &pkg.name, pkg.version);
-        let bytes = match fs::read(&cache) {
-            Ok(b) => b,
-            Err(_) => {
-                problems.push(format!(
-                    "`{}` not in cache (run `noct add` to fetch)",
-                    pkg.name
-                ));
-                continue;
-            }
-        };
-        match &pkg.content {
-            Some(expected) => {
-                let actual = sha256_hex(&bytes);
-                if &actual != expected {
-                    problems.push(format!(
-                        "`{}` cache hash mismatch: expected {expected}, found {actual}",
-                        pkg.name
-                    ));
-                }
-            }
-            None => problems.push(format!("`{}` lock entry has no content hash", pkg.name)),
+        if let StoreState::NeedsFetch(why) = store.state(pkg) {
+            problems.push(format!("`{}@{}` is not usable: {why}", pkg.name, pkg.version));
         }
     }
     problems
 }
 
-/// Manifest-vs-lock-vs-cache gate for build/run/test (P-003 §6: the
-/// lock is the build input — a stale lock is an error prompting
-/// `add`, never a silent re-resolve). Skips silently when no
-/// manifest is present (single-file use has no package context).
+/// Manifest-vs-lock-vs-store gate for build/run/test (P-003 §6: the
+/// lock is the build input — a stale lock is an error prompting `add`,
+/// never a silent re-resolve). Skips silently when no manifest is
+/// present (single-file use has no package context).
 /// `project` is the directory holding `nestpkg.nvpm` (usually cwd).
-pub fn require_package_current(project: &Path) -> Result<(), String> {
+///
+/// Three behaviours, in this order:
+///
+/// 1. **A stale or missing lock is an error, and fetching never
+///    repairs it.** Re-resolution is `noct add`'s job alone. This is
+///    the hard line auto-fetch does not cross: it fills the store from
+///    the lock, it never edits the lock.
+/// 2. **A locked dependency the store cannot serve is fetched** when
+///    the gate allows it — through the same `fetch_locked` verify path
+///    as `noct get` (hash → TOFU key → signature), never a laxer one —
+///    announced on stderr with one line per package naming what was
+///    fetched and why.
+/// 3. Otherwise every problem is a named error whose remedy points at
+///    `noct get` (the bulk closure command), not at `noct add`.
+pub fn require_package_current(project: &Path, gate: &Gate) -> Result<(), String> {
+    require_package_current_in(project, gate, &Store::open())
+}
+
+/// [`require_package_current`] against an explicit store — the seam
+/// tests need, and the reason the store is a parameter at all.
+pub fn require_package_current_in(
+    project: &Path,
+    gate: &Gate,
+    store: &Store,
+) -> Result<(), String> {
     let manifest_path = project.join("nestpkg.nvpm");
     let manifest_text = match fs::read_to_string(&manifest_path) {
         Ok(t) => t,
@@ -651,8 +723,7 @@ pub fn require_package_current(project: &Path) -> Result<(), String> {
     };
     let manifest = manifest::parse_manifest(&manifest_text)
         .map_err(|e| format!("invalid manifest: {e}"))?;
-    let needs_lock =
-        !manifest.dependencies.is_empty() || !manifest.dev_dependencies.is_empty();
+    let needs_lock = !manifest.dependencies.is_empty() || !manifest.dev_dependencies.is_empty();
     let lock_path = project.join("nestpkg.lock");
     let lock_text = match fs::read_to_string(&lock_path) {
         Ok(t) => t,
@@ -665,8 +736,68 @@ pub fn require_package_current(project: &Path) -> Result<(), String> {
     };
     let lock = manifest::parse_lockfile(&lock_text)
         .map_err(|e| format!("invalid lockfile: {e}"))?;
-    let mut problems = manifest::check_lock_current(&manifest, &lock);
-    problems.extend(check_cache_current(&lock, project));
+
+    // 1. The lock first, and alone: nothing below can fix a stale lock.
+    let lock_problems = manifest::check_lock_current(&manifest, &lock);
+    if !lock_problems.is_empty() {
+        let mut msg = String::from("package is not current:");
+        for p in lock_problems {
+            msg.push_str(&format!("\n  - {p}"));
+        }
+        msg.push_str(
+            "\n(run `noct add` to re-resolve: a stale lock is never repaired by fetching)",
+        );
+        return Err(msg);
+    }
+
+    // `--frozen` stops here, by contract: the lock is the build input
+    // and the store is not consulted.
+    if gate.frozen {
+        return Ok(());
+    }
+
+    // 2. The store, with auto-fetch where allowed.
+    let keys = key_dir();
+    let mut problems: Vec<String> = Vec::new();
+    for pkg in &lock.packages {
+        if !matches!(pkg.source, Source::Registry) {
+            continue;
+        }
+        let StoreState::NeedsFetch(why) = store.state(pkg) else {
+            continue;
+        };
+        if !gate.can_fetch() {
+            problems.push(format!("`{}@{}` is not usable: {why}", pkg.name, pkg.version));
+            continue;
+        }
+        let Some(index_dir) = gate.index.clone() else {
+            problems.push(format!("`{}@{}` is not usable: {why}", pkg.name, pkg.version));
+            continue;
+        };
+        // The one fetch path — the same one `noct get` and `noct add`
+        // use. `rotate_key` is deliberately not exposed: re-recording a
+        // publisher key is an explicit, out-of-band-verified act.
+        let index = FileIndex::new(index_dir);
+        eprintln!(
+            "auto-fetching `{}@{}` into the store (it was not usable: {why})",
+            pkg.name, pkg.version
+        );
+        if let Err(e) = fetch_locked(pkg, &index, store, &keys, false) {
+            problems.push(format!("`{}@{}` could not be fetched: {e}", pkg.name, pkg.version));
+            continue;
+        }
+        // Exit 0 from a fetch is a claim about the bytes just written,
+        // never about what the store now holds: re-read the disk.
+        if let StoreState::NeedsFetch(after) = store.state(pkg) {
+            problems.push(format!(
+                "`{}@{}` was fetched but is still not usable: {after}",
+                pkg.name, pkg.version
+            ));
+        }
+    }
+    if let Some(line) = store::trace_line("gate") {
+        eprintln!("{line}");
+    }
     if problems.is_empty() {
         return Ok(());
     }
@@ -674,7 +805,7 @@ pub fn require_package_current(project: &Path) -> Result<(), String> {
     for p in problems {
         msg.push_str(&format!("\n  - {p}"));
     }
-    msg.push_str("\n(run `noct add` to refresh)");
+    msg.push_str(&format!("\n({})", gate.remedy()));
     Err(msg)
 }
 
@@ -890,46 +1021,165 @@ mod tests {
             &[Fixture { name: "leaf", version: "1.4.0", deps: &[], files: &[("lib/main.nv", "hi")] }],
         );
         let index = FileIndex::new(root);
-        let project = dir.join("proj");
+        let store = Store::with_root(dir.join("store"));
         let keys = dir.join("keys");
-        fs::create_dir_all(&project).unwrap();
         let locked = &resolve(&top_manifest("    leaf: 1.0.0\n"), &index).unwrap()[0];
+        let lock = Lockfile { lock_version: 1, packages: vec![locked.clone()] };
 
-        // First fetch: TOFU prints + records, cache + unpack land.
-        fetch_locked(locked, &index, &project, &keys, false).unwrap();
+        // First fetch: TOFU prints + records, and BOTH halves of the
+        // store land (archive + read-only extracted tree + record).
+        fetch_locked(locked, &index, &store, &keys, false).unwrap();
         assert!(keys.join(KEY_ID).exists());
-        assert!(cache_file(&project, "leaf", locked.version).exists());
-        let main = unpack_dir(&project, "leaf", locked.version).join("lib/main.nv");
-        assert_eq!(fs::read_to_string(main).unwrap(), "hi");
-        assert!(check_cache_current(
-            &Lockfile { lock_version: 1, packages: vec![locked.clone()] },
-            &project
-        )
-        .is_empty());
+        let hex = store::content_hex(locked.content.as_deref().unwrap()).unwrap();
+        assert!(store.archive_path(hex).is_file());
+        let main = store.tree_path(hex).join("lib/main.nv");
+        assert_eq!(fs::read_to_string(&main).unwrap(), "hi");
+        assert!(check_store_current(&lock, &store, true).is_empty());
 
-        // Tampered cache: re-verify fails closed.
-        fs::write(cache_file(&project, "leaf", locked.version), b"evil").unwrap();
-        let problems = check_cache_current(
-            &Lockfile { lock_version: 1, packages: vec![locked.clone()] },
-            &project,
-        );
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].contains("hash mismatch"), "{problems:?}");
+        // Tampered extracted tree: the build-time re-verify fails
+        // closed. This is the blocker the store exists to fix — a
+        // hand-edited tree must never compile.
+        store::clear_readonly_tree(&store.tree_path(hex)).unwrap();
+        fs::write(&main, "evil():\n").unwrap();
+        let problems = check_store_current(&lock, &store, true);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("extracted tree hash mismatch"), "{problems:?}");
 
         // Rotated publisher key without --rotate-key: refused.
         let other_pub = pubkey_hex(&[0x77; 32]);
         fs::write(keys.join(KEY_ID), format!("{other_pub}\n")).unwrap();
-        // Restore good cache first (fetch re-verifies hash before keys).
-        let entry = index.entry("leaf", locked.version).unwrap();
-        fs::write(cache_file(&project, "leaf", locked.version), &entry.tarball).unwrap();
-        let err = fetch_locked(locked, &index, &project, &keys, false).unwrap_err();
+        let err = fetch_locked(locked, &index, &store, &keys, false).unwrap_err();
         assert!(err.contains("--rotate-key"), "{err}");
-        // With --rotate-key: re-records and succeeds.
-        fetch_locked(locked, &index, &project, &keys, true).unwrap();
+        // With --rotate-key: re-records and succeeds (and the drifted
+        // tree is replaced by verified bytes, never patched).
+        fetch_locked(locked, &index, &store, &keys, true).unwrap();
         assert_eq!(
             fs::read_to_string(keys.join(KEY_ID)).unwrap().trim(),
             pubkey_hex(&SEED)
         );
+        assert!(check_store_current(&lock, &store, true).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derived_dirs_are_only_the_two_legacy_reclaimable_trees() {
+        let got = derived_dirs(Path::new("proj"));
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("proj").join(".noct").join("cache"),
+                PathBuf::from("proj").join(".noct").join("packages"),
+            ]
+        );
+        // The footgun guard: a committed `vendor/`, the manifest, the
+        // lock and `.noct/` itself must never appear here, or `noct
+        // clean` becomes a way to eat checked-in data.
+        for forbidden in ["vendor", "nestpkg.nvpm", "nestpkg.lock", ".noct"] {
+            assert!(
+                !got.iter().any(|p| p.ends_with(forbidden)),
+                "`{forbidden}` must not be a clean target: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_state_needs_both_halves_and_reports_why() {
+        let dir = scratch();
+        let root = build_index(
+            &dir,
+            &[Fixture {
+                name: "leaf",
+                version: "1.4.0",
+                deps: &[],
+                files: &[("lib/main.nv", "hi")],
+            }],
+        );
+        let index = FileIndex::new(root);
+        let store = Store::with_root(dir.join("store"));
+        let keys = dir.join("keys");
+        let locked = &resolve(&top_manifest("    leaf: 1.0.0\n"), &index).unwrap()[0];
+        let hex = store::content_hex(locked.content.as_deref().unwrap()).unwrap();
+
+        // Absent: nothing to be ready about.
+        match store.state(locked) {
+            StoreState::Ready => panic!("nothing fetched yet — must not be Ready"),
+            StoreState::NeedsFetch(reason) => {
+                assert!(reason.contains("no archive"), "{reason}")
+            }
+        }
+
+        fetch_locked(locked, &index, &store, &keys, false).unwrap();
+        assert_eq!(store.state(locked), StoreState::Ready);
+
+        // Tampered bytes in the tree: the reason must name the
+        // mismatch, not just say "fetch me" — a loud refetch needs a
+        // loud reason.
+        store::clear_readonly_tree(&store.tree_path(hex)).unwrap();
+        fs::write(store.tree_path(hex).join("lib/main.nv"), "evil").unwrap();
+        match store.state(locked) {
+            StoreState::Ready => panic!("tampered tree must not be Ready"),
+            StoreState::NeedsFetch(reason) => {
+                assert!(reason.contains("extracted tree hash mismatch"), "{reason}")
+            }
+        }
+
+        // Half a copy is not a copy: an archive with no extracted tree
+        // still needs a fetch (the resolver reads the tree, not the
+        // archive).
+        store.put(locked, &index.entry("leaf", locked.version).unwrap().tarball)
+            .unwrap();
+        store::clear_readonly_tree(&store.tree_path(hex)).unwrap();
+        fs::remove_dir_all(store.tree_path(hex)).unwrap();
+        match store.state(locked) {
+            StoreState::Ready => panic!("missing extracted tree must not be Ready"),
+            StoreState::NeedsFetch(reason) => {
+                assert!(reason.contains("extracted tree is missing"), "{reason}")
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_gate_refuses_to_fetch_when_opted_out() {
+        let dir = scratch();
+        let root = build_index(
+            &dir,
+            &[Fixture { name: "leaf", version: "1.4.0", deps: &[], files: &[("lib.nv", "hi")] }],
+        );
+        let index = FileIndex::new(root.clone());
+        let store = Store::with_root(dir.join("store"));
+        let project = dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let manifest = top_manifest("    leaf: 1.0.0\n");
+        let lock = Lockfile {
+            lock_version: 1,
+            packages: resolve(&manifest, &index).unwrap(),
+        };
+        std::fs::write(
+            project.join("nestpkg.nvpm"),
+            "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n    leaf: 1.0.0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("nestpkg.lock"),
+            manifest::serialize_lockfile(&lock),
+        )
+        .unwrap();
+
+        // No index, no fetch: the error must name `noct get` (the bulk
+        // closure command), not `noct add` (which re-resolves).
+        let err =
+            require_package_current_in(&project, &Gate::default(), &store).unwrap_err();
+        assert!(err.contains("noct get"), "{err}");
+        assert!(!err.contains("noct add"), "{err}");
+
+        // `--offline` names the flag that refused; `--frozen` never even
+        // looks at the store.
+        let offline = Gate { offline: true, index: Some(root.clone()), ..Gate::default() };
+        let err = require_package_current_in(&project, &offline, &store).unwrap_err();
+        assert!(err.contains("--offline"), "{err}");
+        let frozen = Gate { frozen: true, index: Some(root.clone()), ..Gate::default() };
+        assert!(require_package_current_in(&project, &frozen, &store).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 }

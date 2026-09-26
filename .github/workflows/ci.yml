@@ -1,0 +1,46 @@
+# Noctivue CI drift gates.
+#
+# ubuntu-only by design: the grammar generator, the theme audit, and
+# `cargo test --workspace` are all OS-independent (relative paths,
+# Node's path.join), so one Linux leg covers drift. Add a Windows leg
+# later only if packaging or line-ending issues need it.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node (for theme audit)
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # (a) Test gate — the documented equivalent from AGENTS.md.
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      # (b) Grammar drift gate — the TextMate grammar is generated from
+      # compiler tokens, never hand-edited. Regenerate and fail if the
+      # checked-in copy differs from what the generator produces. The
+      # generator's ONLY output is
+      # editors/vscode/syntaxes/noctivue.tmLanguage.json (resolved from
+      # the compiler crate's manifest dir); no other copy is gated.
+      - name: Grammar regeneration check
+        run: |
+          cargo run -p compiler --bin gen_syntax_highlighting
+          git diff --exit-code -- editors/vscode/syntaxes/noctivue.tmLanguage.json
+
+      # (c) Theme audit gate — audit-theme.js reads ./syntaxes/... relative
+      # to its own directory, so it must run from editors/vscode.
+      - name: Theme audit
+        working-directory: editors/vscode
+        run: node audit-theme.js themes/noctivue-dark-color-theme.json

@@ -102,6 +102,20 @@ toward the Confirmed text until an ADR amendment lands (`docs/DECISIONS.md`
   enforcement, sandboxing, transactions, cancellation:** each explicitly
   deferred into Phase 6 (`docs/PHASE5_PRODUCTION.md` §6). The pipeline
   documents their absence; it MUST NOT reimplement them ad hoc.
+  - *Update 2026-09-26 (phase 6/wave 1, integration audit):* the
+    **handler status-code** half is no longer absent — a route handler
+    may return an `HttpResponse` struct value (`stdlib/net/http/
+    response.nv::http_response_with_headers`) and the server answers
+    with exactly that status, reason, and headers on both `run` and
+    `run-vm`; plain `String` still means 200, and malformed/out-of-range
+    statuses answer 500. The status-aware **client** (`HttpSendFull`)
+    and connection caps are still deferred to the backend track
+    (`docs/WAVE1_HANDOFF_LOWERING.md`). Treat status codes as available
+    for handlers, not for the client or for caps.
+  - *Update 2026-09-26 (integration audit):* **cancellation** is
+    partially present in the runtime but unreachable from `.nv` — see
+    `docs/DECISIONS.md` ADR-024's "Implementation status". An operator
+    must not assume a task can be cancelled from a Noctivue program.
 - **No orchestrator lock-in:** nothing in §§3–5 requires a specific
   platform, agent, or vendor backend. Edge TLS and the log collector are
   the only platform-provided pieces this draft assumes.

@@ -15,6 +15,12 @@ official LSP, and **one** official lockfile format (ADR-010, Principle 9).
 ```text
 noct create     scaffold a new package
 noct add        add a dependency
+noct get        fetch the whole locked dependency closure (the `pub get`
+                analogue; `path` sources are skipped, already-present
+                packages are verified and not refetched)
+noct clean      reclaim derived dependency data (.noct/cache/ +
+                .noct/packages/; never vendor/, the manifest, the lock,
+                or sources)
 noct audit       show dependency trust rows (tiers + signers, no vuln DB yet)
 noct build      compile the current package
 noct run        build and execute
@@ -26,8 +32,17 @@ noct publish    publish to the package registry
 ```
 
 AI-facing extensions to this surface are specified separately in
-AI_TOOLING.md (`--json` flags on diagnostics/ast/etc.), since they are a
+AI_TOOLING.md (`--json` flags on diagnostics/ast/etc.), since these are a
 cross-cutting concern rather than a single command.
+
+**Amendment 2026-09-26 (additive note, nothing above rewritten).** The
+`noct get` / `noct clean` lines above describe the pre-store behaviour
+of `.noct/cache/` + `.noct/packages/`. Both commands now read and
+reclaim the **global** content store instead (and `clean` still reclaims
+the legacy in-tree pair); `noct build`/`run`/`test` additionally take
+`--frozen`, `--offline` and `--index <dir>`. The full statement is the
+dated amendment at the end of §3.
+
 
 ## 3. Package Manager
 
@@ -75,6 +90,97 @@ cross-cutting concern rather than a single command.
   metadata-only. `vendor/` remains the committed offline escape
   hatch. Until the move, in-tree `.noct/cache/` +
   `.noct/packages/` is the standing layout.
+
+**Amendment 2026-09-26 — the move has landed (the bullet above is now
+history; nothing in it was edited).** The global content-addressed
+store is implemented and is the standing layout. What shipped:
+
+- **Root.** `NOCT_STORE` if set, else the per-OS *data* home,
+  mirroring `registry::key_dir`'s per-OS split: `%APPDATA%\noctivue`
+  (else `%USERPROFILE%\.noctivue`) on Windows,
+  `~/Library/Application Support/noctivue` on macOS, and
+  `$XDG_DATA_HOME/noctivue` (else `~/.local/share/noctivue`) on Linux
+  and other Unixes. This supersedes the "Until the move, in-tree
+  `.noct/cache/` + `.noct/packages/` is the standing layout" clause
+  above: fetched content no longer lives in the project at all.
+- **Layout.** `archives/<sha256>.pkg` (the archive, hashed once at
+  fetch), `trees/<sha256>/` (the extracted tree, read-only and placed
+  atomically), `index/<sha256>.record` (the store's own record of that
+  tree's hash), and `points/<name>-<version>.point` (one line naming
+  the tree path, which is how a hash-keyed store is still found by
+  *name*). ADR-026 sketched `store/sha256/<ab>/<cdef…>/` plus a
+  parallel `extracted/`; the flat names above are what shipped, under
+  the same root, and prefix-sharding is deferred until a store actually
+  needs it.
+- **Trust root for the tree.** The lockfile format did **not** change
+  (no new fields): it records one hash per package, the archive's. So
+  the store's own `index/<sha256>.record` is the trust root for the
+  extracted tree — written at unpack, from bytes already verified
+  against the lock, and re-checked by the build before it compiles from
+  the tree. This closes the hole the store exists to fix: a
+  hand-edited extracted tree used to compile and ship.
+- **Verification cost, measured (release build, Windows, warm page
+  cache; a fixture tree of N files, mean of 20–50 runs):**
+
+  | tree | old gate (archive read + SHA, per build) | new warm gate (fingerprint walk) | ratio |
+  |------|------------------------------------------|----------------------------------|-------|
+  | 10 files / 20 KiB   | 0.40 ms | 0.66 ms | **0.6x (slower)** |
+  | 20 files / 81 KiB   | 1.27 ms | 0.60 ms | 2.1x |
+  | 40 files / 162 KiB  | 1.90 ms | 1.03 ms | 1.8x |
+  | 200 files / 3.1 MiB | 38.1 ms | 1.94 ms | 19.7x |
+  | 500 files / 15.6 MiB| 178 ms  | 4.30 ms | 41x |
+
+  The warm path is a **stat walk, not a byte re-hash**: a fingerprint
+  over `(relative path, length, mtime)` recorded beside the tree hash,
+  compared on every build. It beats the old per-build archive hash
+  above ~20 files / ~100 KiB and loses below it — for a trivial
+  single-file package the warm gate is ~0.3 ms *slower* per build, and
+  that is the honest crossover, not a win everywhere. The cold path
+  (a moved mtime forces the full content hash) costs 1.6–2.6x the old
+  gate, because N per-file opens are not one big read. In-process
+  repeats are memoized, so `noct test`'s per-file gates pay the walk
+  once, not N times. First implementation of the walk re-queried every
+  file with `fs::metadata` and was ~10x slower than the numbers above;
+  scan-time `DirEntry` metadata is what makes the walk cheap.
+  `NOCT_STORE_REVERIFY=1` forces the full content hash on every check,
+  and `NOCT_STORE_TRACE=1` prints the counters
+  (`archives=… trees=… fingerprints=… memo-hits=…`) so the claim is
+  measurable rather than asserted.
+- **Read-only is a deterrent, not a boundary.** Extracted trees land
+  read-only (the read-only file attribute on Windows, write bits
+  dropped elsewhere). Anything that can write to the store can also
+  rewrite the record the hash is compared against, so the hash is the
+  check and read-only only makes an accidental edit fail loudly.
+  Filesystem permissions are the real boundary, and they are the
+  operator's call. ADR-026's "never a per-build re-hash" is amended
+  accordingly: there is no per-build re-hash of the *archive*; the
+  *tree* is verified per build against the store's record.
+- **Migration, chosen and documented.** A project that still has
+  in-tree `.noct/cache/` + `.noct/packages/` builds: those directories
+  are **ignored and refetched** into the store through the normal
+  verified path (`noct get`, or a build's auto-fetch). They are never
+  *read* — silently trusting an unverified in-tree tree is the exact
+  bug this change closes — and `noct clean` reclaims them. Adopting the
+  legacy bytes "with verification" was the alternative and was rejected:
+  it is a second route into the store that skips the index, and with it
+  the signature re-check, contradicting the one-fetch-path rule. The
+  cost is one `noct get` per machine; a project that cannot reach an
+  index keeps building from `vendor/`, which needs neither.
+- **Builds may fetch; they may never re-resolve.** `noct build`/`run`/
+  `test` share the package gate: a stale or missing lock is an error
+  pointing at `noct add` (fetching fills the store *from* the lock; it
+  never edits it), while a locked dependency the store cannot serve is
+  fetched on the spot through the same verified path as `noct get`,
+  announced on stderr. `--frozen` (metadata-only) and the new
+  `--offline` are hard opt-outs, and `--index <dir>` is what enables
+  the auto-fetch (there is still no default registry).
+- **`noct clean` is machine-wide, and says so.** It reclaims the
+  store's `archives/`, `trees/`, `index/` and `points/` (never the store
+  root itself), plus the legacy in-tree pair, and prints whose bytes
+  each line removed. `vendor/`, the manifest, the lock, every source
+  file, `.noct/build/` and `.noct/` itself are preserved and the
+  preserved set is printed on every run. No reference counting or
+  auto-GC yet, as ADR-026 defers.
 
 ## 4. Formatter
 

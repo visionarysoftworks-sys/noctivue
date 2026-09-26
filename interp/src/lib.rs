@@ -46,13 +46,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use compiler::ast::{BinOp, UnaryOp};
-use compiler::diagnostics::{Diagnostic, DiagnosticSink};
+use compiler::diagnostics::{Diagnostic, DiagnosticSink, Severity};
+use compiler::http_wire::{self, WireError};
 use compiler::hir;
 use compiler::hir::items::{
     Enum, Function, Struct, TypedArm, TypedExprKind, TypedInterpPart, TypedPattern, TypedStmtKind,
@@ -60,6 +60,7 @@ use compiler::hir::items::{
 
 // ── Phase 5: net.http server state (interpreter) ──────────────────────────────
 
+#[derive(Debug, Clone)]
 struct HttpRoute {
     method: String,
     path_pattern: String,
@@ -75,17 +76,217 @@ struct ServerState {
 static INTERP_SERVER_REGISTRY: LazyLock<Mutex<HashMap<u64, ServerState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static INTERP_SERVER_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Live per-connection server threads right now (Phase 5/M4
+/// observability hook for the load-test leak pass:
+/// `docs/PHASE5_PRODUCTION.md` §5a–b).
+static INTERP_CONN_THREADS: AtomicU64 = AtomicU64::new(0);
+/// Currently open SQLite connections across all interpreter runs in
+/// this process (same hook: open delta must return to zero).
+static INTERP_DB_OPEN: AtomicU64 = AtomicU64::new(0);
+/// High-water marks for the gauges above (monotonic per process;
+/// the load harness asserts overlap happened, then zero at rest).
+static INTERP_CONN_PEAK: AtomicU64 = AtomicU64::new(0);
+static INTERP_DB_PEAK: AtomicU64 = AtomicU64::new(0);
 
-fn parse_request_line(line: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = line.lines().next()?.split_whitespace().collect();
-    if parts.len() < 3 {
-        return None;
+fn track_up(gauge: &AtomicU64, peak: &AtomicU64) {
+    let now = gauge.fetch_add(1, Ordering::Relaxed) + 1;
+    peak.fetch_max(now, Ordering::Relaxed);
+}
+
+// ── Phase 6/Wave 0: monotonic clock + explicit-seed RNG ─────────────────────
+//
+// ADR-020 (mono millis) + ADR-021 (no global entropy). The clock is a
+// process-wide `Instant` epoch (arbitrary, never goes backward); the RNG
+// is a per-interpreter handle registry in the `DbRegistry` shape (u64
+// handles, `next` pre-increments so the first handle is 1). Determinism
+// bar: same seed → same sequence, in this runtime and in the VM (which
+// mirrors this algorithm exactly — see `compiler/src/nir/vm.rs`).
+
+/// Process-wide monotonic epoch (arbitrary — durations between reads
+/// are the contract, never wall-clock interpretation).
+static TIME_EPOCH: LazyLock<std::time::Instant> =
+    LazyLock::new(std::time::Instant::now);
+
+/// Millis since `TIME_EPOCH` (u64 range, fits `Int`).
+fn mono_ms() -> i128 {
+    TIME_EPOCH.elapsed().as_millis() as i128
+}
+
+/// SplitMix64 step: `state` advances, the mixed output is returned.
+/// Chosen because sequential seeds diverge immediately (a plain LCG
+/// would hand consecutive seeds consecutive first draws).
+fn rng_next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Live RNG states by opaque handle id (one interpreter run).
+#[derive(Debug, Default)]
+struct RngRegistry {
+    next: u64,
+    states: HashMap<u64, u64>,
+}
+
+/// Live per-connection server threads right now.
+pub fn live_connection_threads() -> u64 {
+    INTERP_CONN_THREADS.load(Ordering::Relaxed)
+}
+
+/// Currently open SQLite connections right now.
+pub fn live_db_connections() -> u64 {
+    INTERP_DB_OPEN.load(Ordering::Relaxed)
+}
+
+/// Most live connection threads seen so far in this process.
+pub fn peak_connection_threads() -> u64 {
+    INTERP_CONN_PEAK.load(Ordering::Relaxed)
+}
+
+/// Most open SQLite connections seen so far in this process.
+pub fn peak_db_connections() -> u64 {
+    INTERP_DB_PEAK.load(Ordering::Relaxed)
+}
+
+/// Serve one accepted connection to completion on its worker thread:
+/// bounded read → route → handler → one close-delimited response.
+/// Wire errors answer without invoking a handler; handler failures
+/// (error, non-String/non-Response, unknown name, panic) answer 500
+/// — never 200, never silent, never fatal to the accept loop.
+///
+/// Status-aware handlers (Phase 6): a handler may return an
+/// `HttpResponse` struct value (`status: Int`, `reason: String`,
+/// `headers: [[String]]`, `body: String` — the
+/// `stdlib/net/http/request.nv` shape) for a status-aware response,
+/// or a plain `String` for 200-as-today. Rendering and validation
+/// live in [`http_wire::encode_status_response`] (shared with the
+/// VM); this function only extracts the plain parts, so the
+/// runtimes cannot diverge on what a status means.
+fn serve_one_connection(worker: Interpreter, mut conn: std::net::TcpStream, routes: &[HttpRoute]) {
+    let mut worker_sink = DiagnosticSink::new();
+    let response_bytes = match http_wire::read_request(&mut conn) {
+        Err(WireError::OverHeaderCap) | Err(WireError::OverBodyCap) => {
+            http_wire::response(413, "Payload Too Large")
+        }
+        Err(_) => http_wire::response(400, "Bad Request"),
+        Ok(req) => {
+            let matched = routes
+                .iter()
+                .find(|r| r.method == req.method && r.path_pattern == req.path)
+                .map(|r| r.handler.clone());
+            match matched {
+                None => http_wire::response(404, "Not Found"),
+                Some(handler_name) => {
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        worker.eval_function(
+                            &handler_name,
+                            &[Value::String(req.body)],
+                            &mut worker_sink,
+                        )
+                    }));
+                    match outcome {
+                        Ok(Ok(Value::String(s))) => http_wire::response(200, &s),
+                        Ok(Ok(Value::Struct { name, fields })) if name == "HttpResponse" => {
+                            match decode_http_response(&fields) {
+                                Some((status, reason, headers, body)) => {
+                                    match http_wire::encode_status_response(
+                                        status, &reason, &headers, &body,
+                                    ) {
+                                        Ok(encoded) => {
+                                            for skipped in &encoded.skipped_wire_owned {
+                                                eprintln!(
+                                                    "http handler `{handler_name}` set wire-owned header `{skipped}`; skipped (framing is wire-owned)"
+                                                );
+                                            }
+                                            encoded.bytes
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "http handler `{handler_name}` returned an unrenderable HttpResponse ({e:?}); answering 500"
+                                            );
+                                            http_wire::response(500, "Internal Server Error")
+                                        }
+                                    }
+                                }
+                                None => {
+                                    eprintln!(
+                                        "http handler `{handler_name}` returned a malformed HttpResponse (need status: Int, reason: String, headers: [[String]], body: String); answering 500"
+                                    );
+                                    http_wire::response(500, "Internal Server Error")
+                                }
+                            }
+                        }
+                        Ok(Ok(_)) => {
+                            eprintln!(
+                                "http handler `{handler_name}` returned a non-String value; answering 500"
+                            );
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("http handler `{handler_name}` failed: {e:?}");
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                        Err(_) => {
+                            eprintln!("http handler `{handler_name}` panicked; answering 500");
+                            http_wire::response(500, "Internal Server Error")
+                        }
+                    }
+                }
+            }
+        }
+    };
+    for d in worker_sink.take() {
+        if matches!(d.severity, Severity::Error) {
+            let code = d.code.as_deref().unwrap_or("E????");
+            eprintln!("http handler: [{code}] {}", d.message);
+        }
     }
-    Some((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        parts[2].to_string(),
-    ))
+    http_wire::write_bytes(&mut conn, &response_bytes);
+}
+
+/// Extract the plain `(status, reason, headers, body)` parts from an
+/// `HttpResponse` struct value. `None` means malformed (a missing or
+/// mistyped field, or a malformed header pair) — the caller answers
+/// 500 loudly. Header pairs are strict here (any non-2-list or
+/// non-String entry is malformed): request headers tolerate peer
+/// sloppiness, but response headers come from our own handler, so a
+/// misshapen pair is our bug, not the peer's. Range and framing
+/// validation live in [`http_wire::encode_status_response`], shared
+/// with the VM — this helper makes no decisions, only extracts.
+fn decode_http_response(
+    fields: &HashMap<String, Value>,
+) -> Option<(i128, String, Vec<(String, String)>, String)> {
+    let status = match fields.get("status") {
+        Some(Value::Int(n)) => *n,
+        _ => return None,
+    };
+    let reason = match fields.get("reason") {
+        Some(Value::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let body = match fields.get("body") {
+        Some(Value::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let headers = match fields.get("headers") {
+        Some(Value::List(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::List(pair) if pair.len() == 2 => match (&pair[0], &pair[1]) {
+                        (Value::String(k), Value::String(v)) => out.push((k.clone(), v.clone())),
+                        _ => return None,
+                    },
+                    _ => return None,
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    Some((status, reason, headers, body))
 }
 
 // ── Value ─────────────────────────────────────────────────────────────────────
@@ -256,6 +457,11 @@ pub struct Interpreter {
     /// Parsed JSON documents by opaque handle id (`doc_*_builtin`).
     /// Same story as `db`; cleared on every `run`.
     json_docs: RefCell<JsonRegistry>,
+    /// Explicit-seed RNG states by opaque handle id (Phase 6/Wave 0:
+    /// `rng_*_builtin`). Same interior-mutability story as `db`;
+    /// cleared on every `run` (handles restart at 1, sequences replay
+    /// from their seed).
+    rng: RefCell<RngRegistry>,
     /// Outstanding spawned tasks by handle id (Phase 5/M4). Behind a
     /// `Mutex` because worker threads are joined through `&self`
     /// methods; cleared (after draining) on every `run`.
@@ -267,6 +473,24 @@ pub struct Interpreter {
 struct DbRegistry {
     next: u64,
     conns: HashMap<u64, rusqlite::Connection>,
+}
+
+impl Drop for Interpreter {
+    /// Last-resort gauge reconcile: connection workers are dropped,
+    /// never `run`, so handles left open at worker exit would
+    /// otherwise read as a leak in the next run's accounting. Well-
+    /// behaved programs close explicitly (this stays zero); the hook
+    /// only keeps the gauge honest. Borrow failures (panicking while
+    /// borrowed) skip rather than double-panic.
+    fn drop(&mut self) {
+        if let Ok(db) = self.db.try_borrow_mut() {
+            let dropped = db.conns.len() as u64;
+            if dropped > 0 {
+                drop(db);
+                INTERP_DB_OPEN.fetch_sub(dropped, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Parsed JSON documents by opaque handle id (Phase 5/M4:
@@ -307,9 +531,74 @@ enum JsonDom {
 // interpreter used to be single-threaded). Lock poisoning is
 // tolerated, never panicked on: a poisoned lock still yields its
 // data via `into_inner`.
+//
+// ── M5 executor core (ADR-024, runtime side) ────────────────────────────────
+//
+// This region implements the runtime-side executor core on top of the
+// M4 floor WITHOUT changing any M4 observable behavior (same handles,
+// same single-use/unknown-handle errors, same drain-at-exit). What is
+// new here, per ADR-024:
+//
+// - Worker cap: `executor_worker_count()` (default
+//   `available_parallelism` capped at 64 — an INITIAL default Wave 2
+//   measures, never repinned here; override via `NOCT_WORKERS`, loud
+//   on bad values). `spawn_task` refuses loudly past the cap instead
+//   of oversubscribing. `EXECUTOR_LIVE_TASKS`/`EXECUTOR_PEAK_TASKS`
+//   are the test-visible gauges.
+// - Blocking bridge: sync `await` joins through a bounded bridge
+//   (cap = worker count, same initial-default status; sizing rule
+//   "bridge cap >= pool max" is documented, not coded). Queue-full is
+//   a loud `Err` (never silent growth, never implicit wait) and the
+//   entry is retained for retry. `bridge_depth()`/`bridge_peak()` are
+//   the test-visible gauges. A 30 s watchdog bounds every join and the
+//   drain, turning lifetime bugs into loud failures.
+// - Cancellation: cooperative at suspend points only (`sleep` waits,
+//   including `sleep(0)`, and task exit — the suspend points this
+//   thread-per-task phase owns; channel-parked delivery arrives with
+//   the channel track, same flag protocol). `task_cancel(id)` sets the
+//   flag (idempotent; loud on unknown ids); the worker maps a set flag
+//   to the pinned `task {id} cancelled` value (composable with `?`);
+//   scope exit still joins every child (join-on-cancel — a cancel that
+//   detached would be fire-and-forget under another name). Handles stay
+//   monotonic within a run and are NEVER reused; `await` stays
+//   single-use (double-await is loud) while `cancel` is idempotent —
+//   including cancel-after-completion, which is a no-op success tracked
+//   via the `completed` tombstone set. The `.nv`-callable surface is
+//   `task_cancel_builtin` (mirrored through
+//   `stdlib/concurrency/task.nv::task_cancel`); the NIR VM arm is in
+//   `compiler/src/nir/vm.rs` and refuses loudly.
+// - Tickless timers: `TicklessTimerHeap` (wake at next expiry, no fixed
+//   tick) ordered on the Wave 0 monotonic-millis contract
+//   (`stdlib/time/instant.nv::instant_now_ms()` — owned by the time
+//   track; this region codes against EXACTLY that name/shape and falls
+//   back to a process-anchored `Instant` until it lands; see
+//   `timer_now_ms`). `sleep(0)` yields (`yield_now` + cancellation
+//   checkpoint) instead of busy-spinning.
+// - Anchoring: this region owns ONLY task/executor/timer/cancellation
+//   state. It does NOT touch db/http/time/rng/pg/channel arms (parallel
+//   tracks own those). `task_cancel_builtin` is the one `.nv`-callable
+//   name added here, and it is threaded end-to-end (typeck, NIR
+//   lowering, VM arm) per the backend-parity rule; `noct run-vm` and
+//   `noct build` still refuse `task` programs wholesale, so they reach
+//   the VM arm only for handles that were never spawned — the same
+//   case the interpreter refuses.
 struct TaskRegistry {
     next_id: u64,
-    tasks: HashMap<u64, std::thread::JoinHandle<TaskOutcome>>,
+    tasks: HashMap<u64, TaskEntry>,
+    /// Handles consumed by `join` (awaited or drained). Retained so
+    /// `cancel` after completion is a no-op success (idempotent) while
+    /// `await` after completion stays loudly single-use. Cleared on
+    /// every `run` alongside `tasks` (ids restart at 1 per run).
+    completed: std::collections::HashSet<u64>,
+}
+
+/// One outstanding task: its join handle plus its cancellation flag.
+/// The flag is shared with the worker thread (which owns a private
+/// interpreter that cannot see this registry), so `sleep` observes it
+/// through the thread-local below rather than through `&self`.
+struct TaskEntry {
+    handle: std::thread::JoinHandle<TaskOutcome>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Default for TaskRegistry {
@@ -317,6 +606,7 @@ impl Default for TaskRegistry {
         TaskRegistry {
             next_id: 1,
             tasks: HashMap::new(),
+            completed: std::collections::HashSet::new(),
         }
     }
 }
@@ -325,6 +615,8 @@ impl Default for TaskRegistry {
 struct TaskOutcome {
     /// The task body's result, with `EarlyReturn`/`UncaughtError`
     /// mapped exactly as `eval_function` maps them for sync calls.
+    /// A worker whose cancel flag was set reports the pinned
+    /// `task {id} cancelled` value here as `Ok` (composable with `?`).
     result: std::result::Result<Value, RuntimeError>,
     /// Diagnostics the task emitted while running (merged into the
     /// awaiting/draining sink at `join`).
@@ -333,6 +625,240 @@ struct TaskOutcome {
 
 fn lock_tasks(tasks: &Mutex<TaskRegistry>) -> std::sync::MutexGuard<'_, TaskRegistry> {
     tasks.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Thread-local cancel state for the running worker: `(task_id, flag)`.
+/// Set by `spawn_task` inside the worker thread before the body runs,
+/// cleared when the worker finishes. `None` on `main` and on threads
+/// that are not executor workers. Read by `sleep_builtin` (the suspend
+/// point this phase owns) without touching `&self` registries.
+thread_local! {
+    static CURRENT_TASK_CANCEL: RefCell<Option<(u64, Arc<AtomicBool>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Live executor tasks right now (spawned but not yet joined).
+/// Process-wide like the Phase 5 connection/db gauges.
+static EXECUTOR_LIVE_TASKS: AtomicU64 = AtomicU64::new(0);
+/// High-water mark for live executor tasks (monotonic per process).
+static EXECUTOR_PEAK_TASKS: AtomicU64 = AtomicU64::new(0);
+/// Outstanding blocking-bridge joins right now (test-visible gauge).
+static BRIDGE_DEPTH: AtomicU64 = AtomicU64::new(0);
+/// High-water mark for bridge depth (monotonic per process).
+static BRIDGE_PEAK: AtomicU64 = AtomicU64::new(0);
+/// Process anchor for the fallback monotonic clock (`timer_now_ms`).
+static TIMER_ANCHOR: LazyLock<std::time::Instant> =
+    LazyLock::new(std::time::Instant::now);
+
+/// Parse a `NOCT_WORKERS` value: a positive integer (`> 0`).
+/// Pure (no env access) so tests pin the loud-error shape without
+/// mutating the process environment. Loud, never silent: anything
+/// else is `Err` naming `NOCT_WORKERS` and the offending value.
+pub fn parse_noct_workers(raw: Option<&str>) -> std::result::Result<usize, String> {
+    match raw {
+        None => {
+            let n = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            Ok(n.min(64).max(1))
+        }
+        Some(text) => {
+            let trimmed = text.trim();
+            match trimmed.parse::<i128>() {
+                Ok(n) if n >= 1 && n <= usize::MAX as i128 => Ok(n as usize),
+                _ => Err(format!(
+                    "NOCT_WORKERS must be a positive integer, got `{text}`"
+                )),
+            }
+        }
+    }
+}
+
+/// Resolve the executor worker cap for this process: `NOCT_WORKERS`
+/// override when set (loud on bad values), else `available_parallelism`
+/// capped at 64 (INITIAL default per ADR-024 — Wave 2 measures and
+/// amends with evidence; the cap shape, not the value, is pinned here).
+pub fn executor_worker_count() -> std::result::Result<usize, String> {
+    parse_noct_workers(std::env::var("NOCT_WORKERS").ok().as_deref())
+}
+
+/// Resolve the blocking-bridge cap: worker count (same initial-default
+/// status — measured in Wave 2). Falls back to 4 only when the worker
+/// count itself is malformed (loud at the `spawn`/`await` site that
+/// observed it, never a silent default here).
+pub fn blocking_bridge_cap() -> usize {
+    executor_worker_count().unwrap_or(4)
+}
+
+/// Pure bridge admission check (no global access) so tests pin the
+/// queue-full shape: `Err` when `depth >= cap`, `Ok` otherwise.
+pub fn blocking_bridge_try_acquire(depth: usize, cap: usize) -> std::result::Result<(), String> {
+    if depth >= cap {
+        return Err(format!(
+            "blocking bridge queue full ({depth}/{cap} busy; await outstanding tasks before awaiting more)"
+        ));
+    }
+    Ok(())
+}
+
+/// Acquire one blocking-bridge slot, updating the test-visible depth
+/// gauge. Queue-full is a loud `Err` and acquires nothing (the task
+/// entry is retained for retry — never wedged, never silently grown).
+fn blocking_bridge_acquire() -> std::result::Result<(), String> {
+    let cap = blocking_bridge_cap();
+    let depth = BRIDGE_DEPTH.load(Ordering::Relaxed);
+    blocking_bridge_try_acquire(depth as usize, cap)?;
+    let now = BRIDGE_DEPTH.fetch_add(1, Ordering::Relaxed) + 1;
+    BRIDGE_PEAK.fetch_max(now, Ordering::Relaxed);
+    // A concurrent acquirer may have filled the last slot between the
+    // check and the increment; re-check and roll back rather than
+    // silently exceeding the cap.
+    if now > cap as u64 {
+        BRIDGE_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        return Err(format!(
+            "blocking bridge queue full ({depth}/{cap} busy; await outstanding tasks before awaiting more)"
+        ));
+    }
+    Ok(())
+}
+
+/// Release one blocking-bridge slot (pairs with a successful acquire).
+fn blocking_bridge_release() {
+    BRIDGE_DEPTH.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Currently outstanding blocking-bridge joins (test-visible gauge).
+pub fn bridge_depth() -> u64 {
+    BRIDGE_DEPTH.load(Ordering::Relaxed)
+}
+
+/// High-water mark for bridge depth (monotonic per process).
+pub fn bridge_peak() -> u64 {
+    BRIDGE_PEAK.load(Ordering::Relaxed)
+}
+
+/// Live executor tasks right now (test-visible gauge).
+pub fn live_executor_tasks() -> u64 {
+    EXECUTOR_LIVE_TASKS.load(Ordering::Relaxed)
+}
+
+/// High-water mark for live executor tasks (monotonic per process).
+pub fn peak_executor_tasks() -> u64 {
+    EXECUTOR_PEAK_TASKS.load(Ordering::Relaxed)
+}
+
+/// Cancel-polling interval for a blocking `sleep` inside a task: how
+/// often a sleeping worker re-reads its cancel flag. Small enough to
+/// keep cancel latency tight, large enough not to spin.
+const CANCEL_POLL_MS: u64 = 5;
+
+/// Monotonic milliseconds for the tickless timer heap.
+///
+/// Wave 0 contract: once the time track lands
+/// `stdlib/time/instant.nv::instant_now_ms()`, that is the clock this
+/// heap runs on (arbitrary epoch, `u64` millis, never backward within
+/// a process). Until then this process-anchored `Instant` upholds the
+/// same shape (monotonic, millis) with zero new dependencies.
+pub fn timer_now_ms() -> u64 {
+    TIMER_ANCHOR.elapsed().as_millis() as u64
+}
+
+/// The pinned cancelled-class value a cancelled worker reports:
+/// `Err("task {id} cancelled")` (exact string; composable with `?`).
+pub fn cancelled_value(id: u64) -> Value {
+    Value::Result(Err(Box::new(Value::String(format!(
+        "task {id} cancelled"
+    )))))
+}
+
+/// True when `v` is the pinned cancelled-class value above (used by
+/// `drain_tasks` to report un-awaited cancellations with exit 1 while
+/// `await` still hands the value to the awaiter for `?` composition).
+pub fn is_cancelled_value(v: &Value) -> bool {
+    match v {
+        Value::Result(Err(e)) => match e.as_ref() {
+            Value::String(s) => s.ends_with("cancelled"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Read the current worker's cancel flag (if any). `None` on `main`.
+fn current_task_cancel_flag() -> Option<(u64, Arc<AtomicBool>)> {
+    CURRENT_TASK_CANCEL.with(|c| c.borrow().clone())
+}
+
+/// A tickless timer heap: wake at the next expiry, no fixed tick.
+/// Entries are `(expiry_ms, sequence, task_id)`; the sequence keeps
+/// same-millisecond expiries FIFO. The clock is injected (`now_ms`)
+/// so tests pin ordering against a fake clock agreeing with the
+/// Wave 0 `instant_now_ms()` shape; `timer_now_ms()` is the process
+/// clock until that surface lands.
+///
+/// **No user surface yet, by construction.** A heap this shape only
+/// earns a `.nv`-reachable operation once something can act on a
+/// popped task id — the readiness thread that wakes suspended tasks
+/// (ADR-024's "Timers" bullet, still Proposed and not implemented).
+/// Routing the M4 blocking `sleep_builtin` through it instead would
+/// buy reachability at the cost of the at-least timing contract the
+/// deadline-based poll already guarantees, and would introduce
+/// process-global mutable timer state — ambient authority, which
+/// ADR-020/021 forbid. So it stays ready-and-unwired until Wave 2,
+/// rather than being surfaced by a fake operation nobody awaits.
+#[derive(Debug, Default)]
+pub struct TicklessTimerHeap {
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64, u64)>>,
+    next_seq: u64,
+}
+
+impl TicklessTimerHeap {
+    /// An empty heap.
+    pub fn new() -> Self {
+        TicklessTimerHeap {
+            heap: std::collections::BinaryHeap::new(),
+            next_seq: 0,
+        }
+    }
+
+    /// Schedule `task_id` to be woken no sooner than `expiry_ms`.
+    pub fn schedule(&mut self, expiry_ms: u64, task_id: u64) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.heap.push(std::cmp::Reverse((expiry_ms, seq, task_id)));
+    }
+
+    /// Milliseconds until the next expiry from `now_ms`, or `None`
+    /// when empty (the readiness owner sleeps until this delay — never
+    /// a fixed tick).
+    pub fn millis_until_next(&self, now_ms: u64) -> Option<u64> {
+        self.heap
+            .peek()
+            .map(|std::cmp::Reverse((expiry, _, _))| expiry.saturating_sub(now_ms))
+    }
+
+    /// Pop every entry due at or before `now_ms`, in expiry order.
+    pub fn pop_due(&mut self, now_ms: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        while let Some(std::cmp::Reverse((expiry, _, task))) = self.heap.peek().copied() {
+            if expiry > now_ms {
+                break;
+            }
+            self.heap.pop();
+            out.push(task);
+        }
+        out
+    }
+
+    /// Entries scheduled but not yet due.
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// True when nothing is scheduled.
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
 }
 
 // ── Dotenv loading (ADR-017, shared core) ────────────────────────────────────
@@ -381,6 +907,7 @@ impl Interpreter {
             root_scope: HashMap::new(),
             db: RefCell::new(DbRegistry::default()),
             json_docs: RefCell::new(JsonRegistry::default()),
+            rng: RefCell::new(RngRegistry::default()),
             tasks: Mutex::new(TaskRegistry::default()),
         }
     }
@@ -398,6 +925,7 @@ impl Interpreter {
             root_scope: self.root_scope.clone(),
             db: RefCell::new(DbRegistry::default()),
             json_docs: RefCell::new(JsonRegistry::default()),
+            rng: RefCell::new(RngRegistry::default()),
             tasks: Mutex::new(TaskRegistry::default()),
         }
     }
@@ -412,14 +940,36 @@ impl Interpreter {
         self.structs.clear();
         self.enums.clear();
         self.root_scope.clear();
-        self.db.borrow_mut().conns.clear();
+        // Reconcile the process-wide open-connection gauge with the
+        // registry being dropped here: programs that exit with open
+        // handles still close them (RAII), but only `db_close` calls
+        // decrement — without this, a legal program would read as a
+        // leak in the next run's accounting.
+        {
+            let mut db = self.db.borrow_mut();
+            let dropped = db.conns.len() as u64;
+            db.conns.clear();
+            if dropped > 0 {
+                INTERP_DB_OPEN.fetch_sub(dropped, Ordering::Relaxed);
+            }
+        }
         self.json_docs.borrow_mut().docs.clear();
+        // RNG handles restart every run so sequences replay exactly
+        // (the state derives from the seed, not the handle, but a
+        // fresh registry keeps cross-run accounting honest).
+        {
+            let mut rng = self.rng.borrow_mut();
+            rng.states.clear();
+            rng.next = 0;
+        }
         // A previous run always drains its tasks before returning, so
         // this is normally empty; reset deterministically regardless
-        // (handle ids restart at 1 every run).
+        // (handle ids restart at 1 every run; the cancel tombstones go
+        // with them — monotonicity is within a run, never across runs).
         {
             let mut reg = lock_tasks(&self.tasks);
             reg.tasks.clear();
+            reg.completed.clear();
             reg.next_id = 1;
         }
 
@@ -515,8 +1065,10 @@ impl Interpreter {
         // Phase 5/M4: calling a task spawns it on a new OS thread and
         // returns an opaque join-handle id (`Int`). The body runs on a
         // private interpreter — see `for_task` for what crosses threads.
+        // M5 (ADR-024): the spawn is worker-cap gated (loud past the
+        // cap); the `Ok` path is byte-for-byte the M4 behavior.
         if func.is_task {
-            return Ok(self.spawn_task(func, args));
+            return self.spawn_task(func, args);
         }
 
         // Build root scope from parameters, merged with global root_scope
@@ -539,15 +1091,54 @@ impl Interpreter {
         }
     }
 
-    // ── Task spawning / joining (Phase 5/M4) ────────────────────────────────
+    // ── Task spawning / joining (Phase 5/M4 + M5 executor core) ───────────────
 
     /// Spawn `func` on a new OS thread; return the opaque join-handle
     /// id. The worker owns a private interpreter (`for_task`) plus a
     /// fresh diagnostic sink — both cross back at `join`.
-    fn spawn_task(&self, func: Function, args: &[Value]) -> Value {
+    ///
+    /// M4 behavior is preserved exactly on the `Ok` path (monotonic
+    /// ids, cloned args, same body-value mapping). M5 adds: worker-cap
+    /// gating (loud past `NOCT_WORKERS`/default-64, loud on malformed
+    /// `NOCT_WORKERS`), a per-task cancel flag shared with the worker,
+    /// and the live-task gauge. No fire-and-forget: the handle must be
+    /// joined (via `await` or the scope drain).
+    fn spawn_task(
+        &self,
+        func: Function,
+        args: &[Value],
+    ) -> std::result::Result<Value, RuntimeError> {
+        let cap = match executor_worker_count() {
+            Ok(n) => n,
+            Err(msg) => return Err(RuntimeError::Panic(msg)),
+        };
+        // Reserve a pool slot before spawning (closes the check/spawn
+        // race between concurrent spawners; rolled back on refusal or
+        // spawn failure — never a silent over-cap spawn).
+        let reserved = EXECUTOR_LIVE_TASKS.fetch_add(1, Ordering::Relaxed) + 1;
+        EXECUTOR_PEAK_TASKS.fetch_max(reserved, Ordering::Relaxed);
+        if reserved > cap as u64 {
+            EXECUTOR_LIVE_TASKS.fetch_sub(1, Ordering::Relaxed);
+            return Err(RuntimeError::Panic(format!(
+                "task spawn refused: worker pool exhausted ({}/{cap} live; await outstanding tasks or raise NOCT_WORKERS)",
+                reserved - 1
+            )));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
         let worker = self.for_task();
         let owned_args: Vec<Value> = args.to_vec();
-        let handle = std::thread::spawn(move || {
+        // Ids are monotonic within a run and NEVER reused (reusing an
+        // id would alias a new task onto a dead scope's handle — the
+        // silent wrong-task failure the loud-errors discipline forbids).
+        let id = {
+            let mut reg = lock_tasks(&self.tasks);
+            let id = reg.next_id;
+            reg.next_id += 1;
+            id
+        };
+        let spawn = std::thread::Builder::new().spawn(move || {
+            CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = Some((id, worker_cancel)));
             let mut task_sink = DiagnosticSink::new();
             let mut param_map = worker.root_scope.clone();
             for ((param_name, _ty), value) in func.params.iter().zip(owned_args.iter()) {
@@ -556,49 +1147,145 @@ impl Interpreter {
             let mut scope = ScopeStack::new(param_map);
             let result = worker.eval_body(&func.body, &mut scope, &mut task_sink);
             // Same mapping as the sync tail of `eval_function`: returns
-            // and `?`-propagations are values; everything else fails.
-            let result = match result {
+            // and `?`-propagations are values; everything else fails —
+            // then the M5 exit-time cancel check: a flag set before the
+            // worker finished reports the pinned cancelled value instead
+            // of the body value (a flag set after the worker finished is
+            // a cancel-after-completion no-op and keeps the body value —
+            // the worker already returned by then).
+            let mut result = match result {
                 Ok(v) => Ok(v),
                 Err(RuntimeError::EarlyReturn(v)) => Ok(v),
                 Err(RuntimeError::UncaughtError(v)) => Ok(v),
                 Err(e) => Err(e),
             };
+            let flag_set = CURRENT_TASK_CANCEL.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|(_, f)| f.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+            });
+            if flag_set {
+                result = Ok(cancelled_value(id));
+            }
+            CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = None);
             TaskOutcome {
                 result,
                 diagnostics: task_sink.take(),
             }
         });
-        let mut reg = lock_tasks(&self.tasks);
-        let id = reg.next_id;
-        reg.next_id += 1;
-        reg.tasks.insert(id, handle);
-        Value::Int(id as i128)
+        let handle = match spawn {
+            Ok(h) => h,
+            Err(e) => {
+                EXECUTOR_LIVE_TASKS.fetch_sub(1, Ordering::Relaxed);
+                return Err(RuntimeError::Panic(format!(
+                    "task {id} failed to spawn (worker thread unavailable: {e})"
+                )));
+            }
+        };
+        {
+            let mut reg = lock_tasks(&self.tasks);
+            reg.tasks.insert(id, TaskEntry { handle, cancel });
+        }
+        Ok(Value::Int(id as i128))
     }
 
-    /// Join task `id`: block until it finishes, merge its diagnostics
-    /// into `sink`, and return its value. Double-await and unknown ids
-    /// fail loudly; a panicking worker thread fails the awaiter.
+    /// Request cancellation of task `id` (M5, ADR-024 R3).
+    ///
+    /// Cooperative at suspend points only — sets the flag and returns;
+    /// the worker observes it at its next suspend point (`sleep` waits,
+    /// including `sleep(0)`) or at task exit, then reports the pinned
+    /// `task {id} cancelled` value. Idempotent: cancelling twice, or
+    /// cancelling a completed-but-not-yet-drained task, is a no-op
+    /// success. Loud on unknown ids (never spawned, or from a previous
+    /// `run` whose tombstones were cleared). Never detaches: a
+    /// cancelled task is still joined (join-on-cancel).
+    ///
+    /// Reached from `.nv` through `task_cancel_builtin` (mirrored by
+    /// `stdlib/concurrency/task.nv::task_cancel`), which turns the
+    /// `Err` into the runtime's loud-panic discipline so a dropped
+    /// `Unit` return can never swallow the unknown-handle error.
+    pub fn task_cancel(&self, id: u64) -> std::result::Result<(), String> {
+        let reg = lock_tasks(&self.tasks);
+        if let Some(entry) = reg.tasks.get(&id) {
+            entry.cancel.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        if reg.completed.contains(&id) {
+            return Ok(());
+        }
+        Err(format!(
+            "cancel of unknown task handle {id} (never spawned, already awaited, or from a previous run)"
+        ))
+    }
+
+    /// Outstanding (spawned but not yet joined) tasks on this
+    /// interpreter. Test-visible; the process-wide live gauge is the
+    /// observability hook, this is the per-run leak check.
+    pub fn outstanding_tasks(&self) -> usize {
+        lock_tasks(&self.tasks).tasks.len()
+    }
+
+    /// Join task `id` through the bounded blocking bridge: block until
+    /// it finishes, merge its diagnostics into `sink`, and return its
+    /// value. Double-await and unknown ids fail loudly (M4, unchanged);
+    /// bridge queue-full fails loudly WITHOUT consuming the entry (the
+    /// awaiter retries after awaiting something else — never wedged);
+    /// the 30 s watchdog fails loudly on hangs (entry retained for the
+    /// drain); a panicking worker thread fails the awaiter. A cancelled
+    /// worker's pinned value returns here as `Ok` for `?` composition.
     fn join_task(
         &self,
         id: u64,
         sink: &mut DiagnosticSink,
     ) -> std::result::Result<Value, RuntimeError> {
-        let handle = match lock_tasks(&self.tasks).tasks.remove(&id) {
-            Some(h) => h,
-            None => {
+        {
+            let reg = lock_tasks(&self.tasks);
+            if !reg.tasks.contains_key(&id) {
                 return Err(RuntimeError::Panic(format!(
                     "await of unknown task handle {id} (already awaited, or never spawned)"
                 )));
             }
-        };
-        let outcome = match handle.join() {
+        }
+        if let Err(msg) = blocking_bridge_acquire() {
+            return Err(RuntimeError::Panic(msg));
+        }
+        let entry = lock_tasks(&self.tasks)
+            .tasks
+            .remove(&id)
+            .expect("task entry checked above");
+        // 30 s watchdog: poll `is_finished` so a hung worker becomes a
+        // loud failure instead of an eternal block. The entry is
+        // re-inserted on timeout so the drain still owns it.
+        let mut waited_ms: u64 = 0;
+        while !entry.handle.is_finished() {
+            if waited_ms >= 30_000 {
+                lock_tasks(&self.tasks).tasks.insert(id, entry);
+                blocking_bridge_release();
+                return Err(RuntimeError::Panic(format!(
+                    "task {id} did not complete within 30s (watchdog; scope drain still owns it)"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited_ms += 5;
+        }
+        let outcome = match entry.handle.join() {
             Ok(o) => o,
             Err(_) => {
+                blocking_bridge_release();
+                lock_tasks(&self.tasks).completed.insert(id);
+                EXECUTOR_LIVE_TASKS.fetch_sub(1, Ordering::Relaxed);
                 return Err(RuntimeError::Panic(format!(
                     "task {id} panicked (worker thread died)"
                 )));
             }
         };
+        blocking_bridge_release();
+        {
+            let mut reg = lock_tasks(&self.tasks);
+            reg.completed.insert(id);
+        }
+        EXECUTOR_LIVE_TASKS.fetch_sub(1, Ordering::Relaxed);
         for diag in outcome.diagnostics {
             sink.emit(diag);
         }
@@ -608,13 +1295,21 @@ impl Interpreter {
     /// Join every outstanding task (program-scope structured
     /// concurrency; called at the end of `run`). Un-awaited results
     /// are discarded, but diagnostics are merged and any task failure
-    /// is reported. Returns `0` when all tasks succeeded, `1`
-    /// otherwise.
+    /// is reported. Cancelled-but-un-awaited tasks report their
+    /// cancellation (exit 1) — join-on-cancel still joins. Returns `0`
+    /// when all tasks succeeded, `1` otherwise.
     fn drain_tasks(&self, sink: &mut DiagnosticSink) -> i32 {
         let ids: Vec<u64> = lock_tasks(&self.tasks).tasks.keys().copied().collect();
         let mut code = 0;
         for id in ids {
             match self.join_task(id, sink) {
+                Ok(v) if is_cancelled_value(&v) => {
+                    sink.emit(
+                        Diagnostic::error(format!("background task {id} cancelled"))
+                            .with_code("E1002"),
+                    );
+                    code = 1;
+                }
                 Ok(_) => {}
                 Err(RuntimeError::Panic(msg)) => {
                     sink.emit(
@@ -648,6 +1343,10 @@ impl Interpreter {
                 | "assert"
                 | "list_append_builtin"
                 | "sleep_builtin"
+                | "task_cancel_builtin"
+                | "time_mono_ms_builtin"
+                | "rng_seed_builtin"
+                | "rng_next_builtin"
                 | "run"
                 | "fs_read_text"
                 | "fs_write_text"
@@ -739,7 +1438,7 @@ impl Interpreter {
         &self,
         name: &str,
         args: &[Value],
-        sink: &mut DiagnosticSink,
+        _sink: &mut DiagnosticSink,
     ) -> Option<std::result::Result<Value, RuntimeError>> {
         match name {
             // Basic I/O
@@ -874,10 +1573,32 @@ impl Interpreter {
                         let conn = rusqlite::Connection::open(path).map_err(|e| {
                             Box::new(Value::String(format!("cannot open database `{path}`: {e}")))
                         })?;
+                        // Concurrent handlers share one database file
+                        // (Phase 5/M4 load shape): a busy timeout turns
+                        // lock contention into waiting, not flaky
+                        // `database is locked` errors. A genuine
+                        // timeout still surfaces as a loud `Err`.
+                        conn.busy_timeout(std::time::Duration::from_millis(5000))
+                            .map_err(|e| {
+                                Box::new(Value::String(format!(
+                                    "cannot set busy timeout on `{path}`: {e}"
+                                )))
+                            })?;
+                        // WAL journaling: readers never block on writers,
+                        // so concurrent handlers share the file without
+                        // serializing the whole load test through one
+                        // rollback-journal lock. (`:memory:` databases
+                        // report `memory` and are unaffected.)
+                        conn.execute_batch("PRAGMA journal_mode=WAL;").map_err(|e| {
+                            Box::new(Value::String(format!(
+                                "cannot set WAL mode on `{path}`: {e}"
+                            )))
+                        })?;
                         let mut registry = self.db.borrow_mut();
                         registry.next += 1;
                         let id = registry.next;
                         registry.conns.insert(id, conn);
+                        track_up(&INTERP_DB_OPEN, &INTERP_DB_PEAK);
                         Ok(Box::new(Value::Int(id as i128)))
                     })();
                     Some(Ok(Value::Result(result)))
@@ -953,7 +1674,10 @@ impl Interpreter {
                 Some(Value::Int(id)) => {
                     let removed = self.db.borrow_mut().conns.remove(&(*id as u64));
                     match removed {
-                        Some(_) => Some(Ok(Value::Result(Ok(Box::new(Value::Unit))))),
+                        Some(_) => {
+                            INTERP_DB_OPEN.fetch_sub(1, Ordering::Relaxed);
+                            Some(Ok(Value::Result(Ok(Box::new(Value::Unit)))))
+                        }
                         None => Some(Ok(Value::Result(Err(Box::new(Value::String(format!(
                             "unknown database handle `{id}` (was it closed?)"
                         ))))))),
@@ -1440,87 +2164,82 @@ impl Interpreter {
             "http_server_serve_loop" => match args.first() {
                 Some(Value::Int(server)) => {
                     let handle = *server as u64;
-                    let shutdown_flag;
-                    let listener_fd;
-                    {
+                    let (shutdown_flag, listener) = {
                         let registry = INTERP_SERVER_REGISTRY.lock().unwrap();
-                        if let Some(state) = registry.get(&handle) {
-                            shutdown_flag = Some(state.shutdown.clone());
-                            listener_fd = state.listener.try_clone().ok();
-                        } else {
-                            return Some(Ok(Value::Unit));
+                        match registry.get(&handle) {
+                            Some(state) => match state.listener.try_clone() {
+                                Ok(l) => (state.shutdown.clone(), l),
+                                Err(_) => return Some(Ok(Value::Unit)),
+                            },
+                            None => return Some(Ok(Value::Unit)),
                         }
-                    }
-                    let listener = match listener_fd {
-                        Some(l) => l,
-                        None => return Some(Ok(Value::Unit)),
                     };
                     listener.set_nonblocking(true).ok();
+                    // Phase 5/M4 production shape
+                    // (`docs/PHASE5_PRODUCTION.md` §2): one OS thread
+                    // per connection; the accept loop never blocks on
+                    // a handler. Each worker owns a private
+                    // interpreter (`for_task`: tables cloned, db/JSON
+                    // fresh) — a pool opened on the serving thread is
+                    // unknown here by design, and using it fails
+                    // loudly as `unknown database handle`.
+                    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
                     loop {
-                        if shutdown_flag
-                            .as_ref()
-                            .map(|f| f.load(Ordering::Relaxed))
-                            .unwrap_or(true)
-                        {
-                            return Some(Ok(Value::Unit));
+                        if shutdown_flag.load(Ordering::Relaxed) {
+                            break;
                         }
                         match listener.accept() {
-                            Ok((mut conn, _)) => {
-                                let mut buf = [0u8; 4096];
-                                if let Ok(n) = conn.read(&mut buf) {
-                                    let request_line = String::from_utf8_lossy(&buf[..n]);
-                                    if let Some((method, path, _)) =
-                                        parse_request_line(&request_line)
-                                    {
-                                        let mut matched_handler = None;
-                                        let registry = INTERP_SERVER_REGISTRY.lock().unwrap();
-                                        if let Some(state) = registry.get(&handle) {
-                                            for route in &state.routes {
-                                                if route.method == method
-                                                    && route.path_pattern == path
-                                                {
-                                                    matched_handler = Some(route.handler.clone());
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        drop(registry);
-                                        let resp = match matched_handler {
-                                            Some(handler_name) => {
-                                                // Handlers take the request BODY
-                                                // (see `http_server_route` docs),
-                                                // not the raw request text.
-                                                let raw = String::from_utf8_lossy(&buf[..n]).to_string();
-                                                let body_str = split_http_body(raw.as_bytes())
-                                                    .unwrap_or_default()
-                                                    .to_string();
-                                                let handler_args = [Value::String(body_str)];
-                                                let handler_result = self.eval_function(
-                                                    &handler_name,
-                                                    &handler_args,
-                                                    sink,
-                                                );
-                                                let body = match handler_result {
-                                                    Ok(Value::String(s)) => s,
-                                                    _ => "handler error".to_string(),
-                                                };
-                                                format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
-                                            }
-                                            None => "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found".to_string(),
-                                        };
-                                        conn.write_all(resp.as_bytes()).ok();
-                                    } else {
-                                        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
-                                        conn.write_all(resp.as_bytes()).ok();
+                            Ok((conn, _)) => {
+                                // Accepted sockets inherit the
+                                // listener's nonblocking mode: put the
+                                // connection back in blocking mode so the
+                                // wire layer's read timeouts apply (on a
+                                // nonblocking socket the timeout call
+                                // itself fails and every request would
+                                // die unread).
+                                let _ = conn.set_nonblocking(false);
+                                let routes = {
+                                    let registry = INTERP_SERVER_REGISTRY.lock().unwrap();
+                                    match registry.get(&handle) {
+                                        Some(state) => state.routes.clone(),
+                                        // Shut down mid-accept: stop
+                                        // taking work and drain below.
+                                        None => break,
                                     }
-                                }
+                                };
+                                let worker = self.for_task();
+                                // 8 MiB stacks: workers run arbitrary user
+                                // handlers, whose call depth matches what
+                                // `main` enjoys — a 2 MiB default would
+                                // turn deep (but valid) handler calls
+                                // into stack overflows.
+                                workers.push(
+                                    std::thread::Builder::new()
+                                        .stack_size(8 * 1024 * 1024)
+                                        .spawn(move || {
+                                            track_up(
+                                                &INTERP_CONN_THREADS,
+                                                &INTERP_CONN_PEAK,
+                                            );
+                                            serve_one_connection(worker, conn, &routes);
+                                            INTERP_CONN_THREADS
+                                                .fetch_sub(1, Ordering::Relaxed);
+                                        })
+                                        .expect("spawn connection worker"),
+                                );
                             }
                             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                 std::thread::sleep(std::time::Duration::from_millis(10));
                             }
-                            Err(_) => return Some(Ok(Value::Unit)),
+                            Err(_) => break,
                         }
                     }
+                    // DRAIN in-flight: already-accepted connections run
+                    // to response-completion before `serve` returns.
+                    for w in workers {
+                        w.join().ok();
+                    }
+                    Some(Ok(Value::Unit))
                 }
                 _ => Some(Ok(Value::Unit)),
             },
@@ -1577,13 +2296,123 @@ impl Interpreter {
             // Phase 5/M4: cooperative blocking sleep for tasks and
             // `main`. Real wall-clock block (this is the M4 floor —
             // a non-blocking timer comes with the async executor).
+            // M5 (ADR-024): at-least is preserved exactly (negative
+            // inputs still panic); `sleep(0)` YIELDS — `yield_now`
+            // plus a cancellation checkpoint — instead of spinning;
+            // longer sleeps poll the worker's cancel flag in small
+            // chunks so a cancelled sleep wakes early and unwinds to
+            // the pinned `task {id} cancelled` value at the worker
+            // boundary (composable with `?` at the awaiter).
             "sleep_builtin" => match args.first() {
                 Some(Value::Int(ms)) if *ms >= 0 => {
-                    std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
-                    Some(Ok(Value::Unit))
+                    if *ms == 0 {
+                        std::thread::yield_now();
+                        if let Some((id, flag)) = current_task_cancel_flag() {
+                            if flag.load(Ordering::Relaxed) {
+                                return Some(Err(RuntimeError::Panic(format!(
+                                    "task {id} cancelled"
+                                ))));
+                            }
+                        }
+                        Some(Ok(Value::Unit))
+                    } else {
+                        // Cancel-polling chunks, but a real DEADLINE is
+                        // what bounds the wait. Charging each chunk as
+                        // if it slept exactly its request accumulates
+                        // the overshoot: the OS timer granularity is
+                        // coarser than the poll interval (Windows
+                        // rounds a 5 ms sleep up to a scheduler tick),
+                        // so a naive `elapsed += chunk` counter made
+                        // `sleep_builtin(300)` cost ~440 ms and broke
+                        // the M4 overlap guarantee
+                        // (`tests/async_test.rs::tasks_overlap_in_wall_clock`).
+                        // M4 slept once and overshot at most once; the
+                        // deadline restores exactly that bound while
+                        // keeping the early-wake cancel checkpoint.
+                        let deadline = timer_now_ms().saturating_add(*ms as u64);
+                        loop {
+                            if let Some((id, flag)) = current_task_cancel_flag() {
+                                if flag.load(Ordering::Relaxed) {
+                                    return Some(Err(RuntimeError::Panic(format!(
+                                        "task {id} cancelled"
+                                    ))));
+                                }
+                            }
+                            let now = timer_now_ms();
+                            if now >= deadline {
+                                break;
+                            }
+                            let remaining = deadline - now;
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                remaining.min(CANCEL_POLL_MS),
+                            ));
+                        }
+                        Some(Ok(Value::Unit))
+                    }
                 }
                 _ => Some(Err(RuntimeError::Panic(
                     "sleep_builtin requires a non-negative Int (milliseconds)".to_string(),
+                ))),
+            },
+            // M5 (ADR-024): cooperative task cancellation, library-level
+            // and idempotent — the full contract lives on
+            // `Interpreter::task_cancel`. Unknown handles are a LOUD
+            // panic, matching `rng_next_builtin`'s unknown-handle
+            // refusal: a `Unit`-returning effect whose error the caller
+            // could drop must not be soft.
+            "task_cancel_builtin" => match args.first() {
+                Some(Value::Int(id)) => match self.task_cancel(*id as u64) {
+                    Ok(()) => Some(Ok(Value::Unit)),
+                    Err(msg) => Some(Err(RuntimeError::Panic(msg))),
+                },
+                _ => Some(Err(RuntimeError::Panic(
+                    "task_cancel_builtin: expected handle Int".to_string(),
+                ))),
+            },
+            // Phase 6/Wave 0 (ADR-020): monotonic milliseconds since
+            // an arbitrary process epoch (u64 range). Never goes
+            // backward within a process; no date/time interpretation
+            // at this layer (no wall-clock, no timezones — non-goals).
+            "time_mono_ms_builtin" => {
+                if !args.is_empty() {
+                    return Some(Err(RuntimeError::Panic(
+                        "time_mono_ms_builtin: expected no arguments".to_string(),
+                    )));
+                }
+                Some(Ok(Value::Int(mono_ms())))
+            }
+            // Phase 6/Wave 0 (ADR-021): explicit-seed RNG over the
+            // handle registry above. Values, not ambient authority:
+            // the caller threads the `Rng` handle; same seed replays
+            // the same sequence (acceptance bar). No global
+            // `random()`, no floats, no crypto claims (non-goals).
+            "rng_seed_builtin" => match args.first() {
+                Some(Value::Int(seed)) => {
+                    let mut registry = self.rng.borrow_mut();
+                    registry.next += 1;
+                    let id = registry.next;
+                    registry.states.insert(id, *seed as u64);
+                    Some(Ok(Value::Int(id as i128)))
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "rng_seed_builtin: expected seed Int".to_string(),
+                ))),
+            },
+            "rng_next_builtin" => match args.first() {
+                Some(Value::Int(id)) => {
+                    let mut registry = self.rng.borrow_mut();
+                    match registry.states.get_mut(&(*id as u64)) {
+                        Some(state) => {
+                            let value = rng_next_u64(state);
+                            Some(Ok(Value::Int(value as i128)))
+                        }
+                        None => Some(Err(RuntimeError::Panic(format!(
+                            "unknown rng handle `{id}` (was it seeded?)"
+                        )))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "rng_next_builtin: expected handle Int".to_string(),
                 ))),
             },
             // panic / assert
@@ -2621,6 +3450,17 @@ fn parse_json_params(text: &str) -> Result<Vec<rusqlite::types::Value>, String> 
             }
             if let Ok(int) = token.parse::<i64>() {
                 out.push(SqlValue::Integer(int));
+            } else if {
+                let digits = token.trim_start_matches('-');
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            } {
+                // Integer-shaped but outside `i64` (the language `Int`
+                // is `i128`): reject loudly instead of silently
+                // coercing through `f64` with precision loss
+                // (`docs/PHASE5_PRODUCTION.md` §4).
+                return Err(format!(
+                    "integer param `{token}` out of range (binds as i64)"
+                ));
             } else if let Ok(float) = token.parse::<f64>() {
                 out.push(SqlValue::Real(float));
             } else {
@@ -3120,6 +3960,7 @@ mod tests {
     use compiler::parser::parse;
     use compiler::resolver::resolve;
     use compiler::typeck::typecheck;
+    use std::io::{Read, Write};
     use std::path::Path;
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

@@ -1,0 +1,6 @@
+//! strings/push — push a char onto a string.
+ //!
+ //! Status: runnable (M3 foundation, stdlib/SPEC.md §5.9).
+ /// Push a char onto the end of a string. [+String] Native: yes (S3).
+ fn string_push(s: String, c: Char) -> String:
+     s + format_char(c)

@@ -82,9 +82,11 @@ fn runtime_native_dir() -> PathBuf {
 }
 
 fn usage() {
-    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release] [--frozen] [--emit-nir[=<path>]]");
+    eprintln!("usage: noct build <file.nv>... [-o <out.exe>] [--release] [--frozen] [--offline] [--index <dir>] [--emit-nir[=<path>]]");
     eprintln!("  multiple files concatenate in order, entry point last (tank libraries first)");
-    eprintln!("  --frozen: fail if nestpkg.lock is missing or stale (reproducible builds)");
+    eprintln!("  --frozen: fail if nestpkg.lock is missing or stale (reproducible builds; metadata-only)");
+    eprintln!("  --offline: never fetch; a dependency missing from the store is an error");
+    eprintln!("  --index <dir>: fetch a locked dependency missing from the store while building");
     eprintln!("  --emit-nir[=<path>]: write the NIR text dump (.nvir) and stop (no codegen/link)");
 }
 
@@ -166,6 +168,8 @@ pub fn run(args: &[String]) -> i32 {
     let mut out: Option<&str> = None;
     let mut release = false;
     let mut frozen = false;
+    let mut offline = false;
+    let mut index: Option<PathBuf> = None;
     // `Some(None)` = bare `--emit-nir`; `Some(Some(path))` = explicit path.
     let mut emit_nir: Option<Option<String>> = None;
     let mut it = args.iter().peekable();
@@ -179,7 +183,19 @@ pub fn run(args: &[String]) -> i32 {
                     return 1;
                 }
             },
+            "--index" => match it.next() {
+                Some(v) => index = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("noct build: --index needs a directory");
+                    usage();
+                    return 1;
+                }
+            },
             "--release" => release = true,
+            // Auto-fetch on a store miss is opt-OUT, not opt-in: the
+            // lock still decides WHAT is fetched, and `--frozen` /
+            // `--offline` take it away again.
+            "--offline" => offline = true,
             // `--emit-nir` writes the canonical text dump (NIR.md §7.1) and
             // stops: no staging, no codegen, no link. Bare = derive the name
             // from the entry file's stem; `=path` writes exactly there.
@@ -212,11 +228,22 @@ pub fn run(args: &[String]) -> i32 {
         usage();
         return 1;
     }
-    if frozen {
-        if let Err(message) = check_frozen() {
-            eprintln!("noct build: {message}");
-            return 1;
-        }
+    // The package gate. `--frozen` is metadata-only by contract, so it
+    // runs the lock check and stops; otherwise the store is checked,
+    // every tree is verified, and `--index` may fill a miss.
+    let gate = crate::registry::Gate {
+        frozen,
+        offline,
+        index,
+    };
+    let gate_result = if frozen {
+        check_frozen()
+    } else {
+        crate::registry::require_package_current(Path::new("."), &gate)
+    };
+    if let Err(message) = gate_result {
+        eprintln!("noct build: {message}");
+        return 1;
     }
 
     // ── 1. Frontend → NIR (same front door as `run-vm`) ────────────────

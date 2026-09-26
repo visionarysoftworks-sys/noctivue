@@ -11,6 +11,7 @@ pub mod backends;
 pub mod borrowck;
 pub mod diagnostics;
 pub mod hir;
+pub mod http_wire;
 pub mod lexer;
 pub mod modules;
 pub mod nir;

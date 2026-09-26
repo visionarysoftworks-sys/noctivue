@@ -1,0 +1,3 @@
+// Fetched-cache copy — must LOSE to the vendored tree.
+export fn which() -> String:
+    42

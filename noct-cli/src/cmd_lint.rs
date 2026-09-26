@@ -120,7 +120,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        let warnings = lint_file(&source, style_mode);
+        let warnings = lint_file(file, &source, style_mode);
         all.push((file.clone(), source, warnings));
     }
     let warnings: usize = all.iter().map(|(_, _, ws)| ws.len()).sum();
@@ -222,7 +222,7 @@ fn print_json(all: &[(String, String, Vec<Warning>)]) {
 /// rules (the parser returns a partial tree; reporting syntax is
 /// `diagnostics`' job, not lint's). L-003 runs only when
 /// `include_style` is set (default-off style rule).
-fn lint_file(source: &str, include_style: bool) -> Vec<Warning> {
+fn lint_file(path: &str, source: &str, include_style: bool) -> Vec<Warning> {
     let mut sink = compiler::diagnostics::DiagnosticSink::new();
     let tokens = compiler::lexer::lex(source, &mut sink);
     let program = compiler::parser::parse(&tokens, &mut sink);
@@ -230,7 +230,7 @@ fn lint_file(source: &str, include_style: bool) -> Vec<Warning> {
     let mut out = Vec::new();
     let variants = collect_variant_names(&program);
     check_program(&program, &variants, source, &mut out);
-    check_unused_imports(&program, source, &mut out);
+    check_unused_imports(&program, source, &graph_import_exports(path, &program), &mut out);
     if include_style {
         check_missing_docs(&program, source, &mut out);
     }
@@ -414,7 +414,12 @@ fn check_match(m: &MatchStmt, variants: &HashSet<String>, source: &str, out: &mu
 /// names, struct-literal type names, and generic bounds. NOT
 /// references: patterns (they bind), member-field names, argument
 /// labels, and declarations. Shadowing errs toward silence.
-fn check_unused_imports(program: &Program, source: &str, out: &mut Vec<Warning>) {
+fn check_unused_imports(
+    program: &Program,
+    source: &str,
+    import_exports: &[Vec<String>],
+    out: &mut Vec<Warning>,
+) {
     if program.imports.is_empty() {
         return;
     }
@@ -422,7 +427,7 @@ fn check_unused_imports(program: &Program, source: &str, out: &mut Vec<Warning>)
     for item in &program.items {
         collect_item_refs(item, &mut refs);
     }
-    for import in &program.imports {
+    for (import, exports) in program.imports.iter().zip(import_exports.iter()) {
         let bound = import
             .alias
             .clone()
@@ -430,10 +435,47 @@ fn check_unused_imports(program: &Program, source: &str, out: &mut Vec<Warning>)
         if bound.is_empty() || bound == "_" {
             continue;
         }
-        if !refs.contains(&bound) {
-            out.push(warn_l002(&bound, line_of(source, import.span.start)));
+        if refs.contains(&bound) {
+            continue;
         }
+        // Flattened module imports (`import m` with no alias) expose
+        // the target's exports directly: any referenced export marks
+        // the import used, so working imports are never flagged.
+        if exports.iter().any(|e| refs.contains(e)) {
+            continue;
+        }
+        out.push(warn_l002(&bound, line_of(source, import.span.start)));
     }
+}
+
+/// Resolve each import of `program` against the on-disk module graph
+/// rooted at `path`, returning the target file's exported item names
+/// per import (empty when unresolvable — the textual check above
+/// then applies unchanged). Import errors stay the compiler's job;
+/// lint only borrows resolution info.
+fn graph_import_exports(path: &str, program: &Program) -> Vec<Vec<String>> {
+    let empty: Vec<Vec<String>> = program.imports.iter().map(|_| Vec::new()).collect();
+    let canonical = match Path::new(path).canonicalize() {
+        Ok(p) => p,
+        Err(_) => return empty,
+    };
+    let graph = match compiler::modules::ModuleGraph::load(std::slice::from_ref(&canonical)) {
+        Ok(g) => g,
+        Err(_) => return empty,
+    };
+    let Some(importer) = graph.files.iter().find(|f| f.path == canonical) else {
+        return empty;
+    };
+    program
+        .imports
+        .iter()
+        .map(|import| {
+            graph
+                .resolve_import_decl(importer, import)
+                .map(|(target, _)| graph.exported_names(&target))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn collect_item_refs(item: &Item, refs: &mut HashSet<String>) {

@@ -14,6 +14,11 @@ serde_json = "1.0"
 thiserror = "1.0"
 lsp-types = "0.97"
 url = "2.5"
+# Phase 5/M4: the NIR VM executes the `db_*` host-IO builtins with
+# interpreter-identical semantics, so it needs the same SQLite linkage
+# the interpreter uses (bundled build, no system dependency — the exact
+# version already locked for `interp`).
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 cranelift-codegen = "0.135.1"
 cranelift-frontend = "0.135.1"
 cranelift-module = "0.135.1"

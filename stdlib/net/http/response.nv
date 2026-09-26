@@ -13,6 +13,22 @@ fn http_response(status: Int, body: String) -> HttpResponse:
         body: body
     }
 
+/// Build a status-aware response with custom headers.
+/// The handler returning this value answers with exactly `status`,
+/// `headers` verbatim (in order), and `body`: e.g. a 201 Created
+/// with a Location header. `Content-Length`/`Connection` must not be
+/// supplied (the wire layer owns framing and skips them loudly);
+/// `status` must be 100..=599 and names/values must be framing-clean,
+/// else the server answers 500 for the handler's bug — never a
+/// half-framed response.
+fn http_response_with_headers(status: Int, headers: [[String]], body: String) -> HttpResponse:
+    HttpResponse {
+        status: status,
+        reason: http_reason_phrase(status),
+        headers: headers,
+        body: body
+    }
+
 /// Map a status code to its reason phrase (RFC 7230 §3.1.2).
 fn http_reason_phrase(status: Int) -> String:
     match status:
@@ -27,6 +43,7 @@ fn http_reason_phrase(status: Int) -> String:
         403: "Forbidden"
         404: "Not Found"
         405: "Method Not Allowed"
+        413: "Payload Too Large"
         500: "Internal Server Error"
         501: "Not Implemented"
         502: "Bad Gateway"

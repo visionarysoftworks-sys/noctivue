@@ -1,0 +1,5 @@
+// Extracted-tree copy: lives in the content store only, reached through
+// `points/stored_only-1.0.0.point`. There is no committed `vendor/`
+// twin, so this fixture proves the store is searched at all.
+export fn greeting() -> String:
+    "store"

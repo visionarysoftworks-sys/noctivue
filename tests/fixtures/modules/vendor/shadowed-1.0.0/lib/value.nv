@@ -1,0 +1,3 @@
+// Vendored copy (committed) — must WIN over the fetched cache.
+export fn which() -> String:
+    "vendor"

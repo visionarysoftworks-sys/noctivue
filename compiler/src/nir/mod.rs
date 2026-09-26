@@ -17,3 +17,5 @@ pub use types::*;
 
 #[cfg(test)]
 mod vm_tests;
+#[cfg(test)]
+mod vm_hostio_tests;

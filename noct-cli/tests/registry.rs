@@ -28,6 +28,9 @@ fn run_cli_in_keys(dir: &Path, keys: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(dir)
         .env("NOCT_KEYS", keys)
+        // Fetched content goes to the GLOBAL store; pin it per test so
+        // the suite never touches the developer's real one.
+        .env("NOCT_STORE", store_of(dir))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -43,6 +46,40 @@ fn run_cli_in_keys(dir: &Path, keys: &Path, args: &[&str]) -> Output {
             "TIMEOUT (>{CASE_TIMEOUT_SECS}s): `noct {}` hung",
             args.join(" ")
         ),
+    }
+}
+
+fn store_of(dir: &Path) -> PathBuf {
+    dir.parent().unwrap_or(dir).join("store")
+}
+
+/// The store's tree for one locked package, via its by-name pointer.
+fn stored_tree(dir: &Path, name: &str, version: &str) -> PathBuf {
+    let point = store_of(dir)
+        .join("points")
+        .join(format!("{name}-{version}.point"));
+    let relative = std::fs::read_to_string(&point)
+        .unwrap_or_else(|e| panic!("read {}: {e}", point.display()));
+    store_of(dir).join(relative.trim())
+}
+
+/// Clear read-only flags recursively (a deterrent, not a boundary — a
+/// test plays the local editor to prove the hash catches it).
+fn make_writable_recursive(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                make_writable_recursive(&entry.path());
+            }
+        }
+    }
+    let mut perms = meta.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 }
 
@@ -145,10 +182,25 @@ fn registry_add_resolves_locks_fetches() {
     assert!(lock.contains("version: 1.4.0"), "got:\n{lock}");
     assert!(lock.contains("signed_by: key:4242"), "got:\n{lock}");
     assert!(lock.contains("tier: native"), "got:\n{lock}");
-    assert!(dir.join(".noct/cache/leaf-1.4.0.pkg").exists());
+    assert!(dir.join(".noct/cache/leaf-1.4.0.pkg").exists() == false);
     assert_eq!(
-        std::fs::read_to_string(dir.join(".noct/packages/leaf-1.4.0/lib/main.nv")).unwrap(),
+        std::fs::read_to_string(stored_tree(&dir, "leaf", "1.4.0").join("lib/main.nv")).unwrap(),
         "hi"
+    );
+    // The lock is the mapping; the bytes are global and keyed by it.
+    let store = store_of(&dir);
+    assert!(store.join("archives").is_dir(), "archive half must be kept");
+    assert!(store.join("trees").is_dir(), "tree half must be kept");
+    assert!(
+        store.join("index").join(format!(
+            "{}.record",
+            stored_tree(&dir, "leaf", "1.4.0")
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        ))
+        .is_file(),
+        "the store must record the tree hash it verified"
     );
     // Idempotent re-run: TOFU silent the second time.
     let out = run_cli_in_keys(&dir, &keys, &["add", "leaf", "--index", &idx]);
@@ -263,18 +315,26 @@ fn registry_add_conflicts_are_loud() {
 // ── Phase 4 exit-criterion: fail-closed tamper proof ────────────────────────
 
 #[test]
-fn registry_cached_tarball_tamper_fails_closed_on_use() {
-    // Adversarial proof: flip ONE byte of the cached `.pkg` tarball and
-    // prove the install path (`noct run`, via
-    // `require_package_current` → `check_cache_current`) FAILS CLOSED —
-    // non-zero exit with an integrity error naming the package — rather
-    // than running/installing the tampered bytes.
+fn registry_archive_tamper_fails_closed_whenever_the_archive_is_read() {
+    // Adversarial proof, stated in the two halves the store model
+    // actually has:
     //
-    // Verification already existed (`registry::check_cache_current`
-    // hash re-check on every build-touching-the-cache; no new
-    // production code was needed for this proof).
+    // 1. The ARCHIVE is the unit of transfer, hashed ONCE at fetch. A
+    //    build does not re-read it, so flipping a byte in it does not
+    //    change what compiles — the extracted tree is what the build
+    //    verifies, and it is untouched. (Asserted here so the model is
+    //    pinned, not assumed: the win that buys this is not paying a
+    //    re-hash per build.)
+    // 2. The moment anything DOES read the archive, it is re-hashed
+    //    against the lock and the tamper fails closed. `noct vendor` is
+    //    that reader: with the archive tampered and the tree removed,
+    //    it must refuse and must not commit anything.
+    //
+    // The extracted TREE has its own, sharper regression test in
+    // `tests/store.rs` (`a_hand_edited_extracted_tree_must_not_compile`)
+    // — that is the blocker this store exists to fix.
     let (base, dir, keys) = scratch();
-    let root = build_index(&base, &[("leaf", "1.4.0", &[], &[("lib.nv", "hi")])]);
+    let root = build_index(&base, &[("leaf", "1.4.0", &[], &[("lib/main.nv", "hi")])]);
     write_app(&dir);
     std::fs::write(dir.join("main.nv"), "main():\n    println(\"hi\")\n").unwrap();
     let idx = index_arg(&root);
@@ -294,40 +354,54 @@ fn registry_cached_tarball_tamper_fails_closed_on_use() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Flip exactly one byte in the middle of the cached tarball.
-    let cache = dir.join(".noct/cache/leaf-1.4.0.pkg");
-    let mut bytes = std::fs::read(&cache).expect("read cached pkg");
-    assert!(!bytes.is_empty(), "cached pkg must be non-empty");
+    // Flip exactly one byte in the middle of the stored archive.
+    let tree = stored_tree(&dir, "leaf", "1.4.0");
+    let hex = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let archive = store_of(&dir).join("archives").join(format!("{hex}.pkg"));
+    make_writable_recursive(&archive);
+    let mut bytes = std::fs::read(&archive).expect("read stored archive");
+    assert!(!bytes.is_empty(), "stored archive must be non-empty");
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0xFF;
-    std::fs::write(&cache, &bytes).expect("write tampered pkg");
+    std::fs::write(&archive, &bytes).expect("write tampered archive");
 
-    // The next use must fail closed, naming the package.
+    // 1. The build still runs, off the verified tree — and the tampered
+    //    archive is NOT what it read.
     let out = run_cli_in_keys(&dir, &keys, &["run", "main.nv"]);
     assert_eq!(
         out.status.code(),
+        Some(0),
+        "the verified tree is what compiles. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 2. Remove the tree so the archive is the only copy left, and let a
+    //    reader try to use it: that must fail closed, naming the
+    //    package and the mismatch, with nothing vendored.
+    make_writable_recursive(&tree);
+    std::fs::remove_dir_all(&tree).unwrap();
+    let out = run_cli_in_keys(&dir, &keys, &["vendor"]);
+    assert_eq!(
+        out.status.code(),
         Some(1),
-        "tampered cache must fail closed (non-zero exit)"
+        "reading a tampered archive must fail closed (non-zero exit)"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("leaf"),
+        stderr.contains("leaf@1.4.0"),
         "integrity error must name the package, got:\n{stderr}"
     );
     assert!(
-        stderr.contains("hash mismatch") || stderr.contains("not current"),
-        "integrity error must cite the hash/integrity failure, got:\n{stderr}"
+        stderr.contains("hash mismatch"),
+        "integrity error must cite the hash failure, got:\n{stderr}"
     );
     assert!(
         !stderr.contains("panicked") && !stderr.contains("panic"),
         "must fail cleanly, never panic, got:\n{stderr}"
     );
-    // Fail-closed means no healing and no run: stdout must not contain
-    // the program's output.
-    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("hi\n") || out.status.code() != Some(0),
-        "tampered bytes must not execute"
+        !dir.join("vendor/leaf-1.4.0/lib/main.nv").exists(),
+        "tampered bytes must never land in vendor/"
     );
     cleanup(&base);
 }

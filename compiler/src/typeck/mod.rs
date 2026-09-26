@@ -102,6 +102,28 @@ impl<'s> TypeChecker<'s> {
         // Phase 5/M4: cooperative blocking sleep (milliseconds).
         tc.fn_sigs
             .insert("sleep_builtin".to_string(), (vec![Ty::Int], Ty::Unit));
+        // Phase 6/M5 (ADR-024): cooperative task cancellation over the
+        // same opaque `Int` handle `await` takes. Statement-shaped
+        // (Unit) like `sleep_builtin` — the flag write is the whole
+        // effect and the target's outcome arrives at its own `await` as
+        // the pinned `task {id} cancelled` value. Idempotent by
+        // contract; an unknown handle is a loud runtime failure, not a
+        // soft `None` the caller could ignore.
+        tc.fn_sigs
+            .insert("task_cancel_builtin".to_string(), (vec![Ty::Int], Ty::Unit));
+        // Phase 6/Wave 0 (ADR-020): monotonic millis since a
+        // process-wide arbitrary epoch. Durations between reads are
+        // the contract; wall-clock interpretation is a non-goal.
+        tc.fn_sigs
+            .insert("time_mono_ms_builtin".to_string(), (vec![], Ty::Int));
+        // Phase 6/Wave 0 (ADR-021): explicit-seed RNG. The builtin
+        // pair threads an opaque handle (Int) — a plain Int keeps the
+        // signature exact without inventing a value type the runtime
+        // does not have yet (`Rng` in `.nv` is a struct wrapper).
+        tc.fn_sigs
+            .insert("rng_seed_builtin".to_string(), (vec![Ty::Int], Ty::Int));
+        tc.fn_sigs
+            .insert("rng_next_builtin".to_string(), (vec![Ty::Int], Ty::Int));
         // Phase 5/M4 (ADR-018): list growth for derived decoding.
         // `Unknown` is compatible with every element type, so one
         // signature serves all `T` without generics.

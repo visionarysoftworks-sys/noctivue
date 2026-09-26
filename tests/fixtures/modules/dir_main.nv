@@ -1,0 +1,6 @@
+// @skip-test (module-graph fixture: resolves only through ModuleGraph linkage, covered by modules::tests)
+import dirpkg
+
+main():
+    println(dirpkg.pkg_hello())
+    println(pkg_hello())

@@ -1,1 +1,52 @@
+//! numbers/random — explicit-seed pseudo-random values.
+//!
+//! Status: runnable (Phase 6/Wave 0, ADR-021). Values, not ambient
+//! authority: the caller creates an `Rng` from a seed and threads
+//! the handle, so the same seed ALWAYS replays the same sequence
+//! (the acceptance bar) and a test failure is reproducible by
+//! construction.
+//!
+//! Deliberately absent (ADR-021 non-goals): a global `random()` with
+//! no seed, float distributions, and any cryptographic claim —
+//! crypto-grade randomness is a Phase 6 crypto concern, audited
+//! separately.
+//!
+//! Plain `fn` (no `export`): stdlib is distributed by the pre-import
+//! concat model (stdlib/SPEC.md §1), same as `net/http/*` and
+//! `db/*`.
 
+/// A seeded random source (opaque handle — never forge one).
+Rng:
+    id: Int
+
+/// Create a seeded source. The same seed replays the same sequence
+/// on every backend; sequential seeds diverge immediately.
+fn rng_seed(seed: Int) -> Rng:
+    Rng { id: rng_seed_builtin(seed) }
+
+/// Next raw value from `r` (advances the source; `Int` range).
+fn rng_next_raw(r: Rng) -> Int:
+    rng_next_builtin(r.id)
+
+/// Next value in `lo..=hi` inclusive. Panics when `lo > hi` — an
+/// inverted range is a caller bug, not user input (E1).
+fn rng_next_between(r: Rng, lo: Int, hi: Int) -> Int:
+    if lo > hi:
+        panic("rng_next_between: lo > hi")
+    else:
+        let span = hi - lo + 1
+        if span <= 0:
+            panic("rng_next_between: range overflows Int")
+        else:
+            lo + int_mod(rng_next_builtin(r.id), span)
+
+/// `v` reduced into `0..m` (absolute value, so negative draws land
+/// in range too). Internal helper.
+fn int_mod(v: Int, m: Int) -> Int:
+    if m <= 0:
+        panic("int_mod: m must be positive")
+    else:
+        var a = v
+        if a < 0:
+            a = 0 - a
+        a - a / m * m

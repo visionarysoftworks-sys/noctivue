@@ -1,0 +1,6 @@
+// Legacy in-tree tree (the pre-store `.noct/packages/` layout). It must
+// NOT be searched: an unverified in-tree tree is what this change stops
+// compiling. Covered by modules::tests
+// (`legacy_in_tree_packages_are_no_longer_searched`).
+export fn which() -> String:
+    "legacy"

@@ -1,1 +1,22 @@
+//! time/instant — monotonic clock reading.
+//!
+//! Status: runnable (Phase 6/Wave 0, ADR-020). Monotonic
+//! milliseconds since a process-wide arbitrary epoch: the contract
+//! is the DURATION BETWEEN READS, never a wall-clock date. This is
+//! the one time primitive Phase 6 needs for rate limiting,
+//! deadlines, sliding windows, and OTel timestamps.
+//!
+//! No timezone, calendar, or date interpretation here — those need
+//! a tz database and are explicitly a non-goal (ADR-020).
+//! Milliseconds since a process-wide arbitrary epoch (monotonic:
+//! never decreases within a process). Values are non-negative and
+//! fit `Int` comfortably; only differences between two readings are
+//! meaningful.
+//!
+//! Plain `fn` (no `export`): stdlib is distributed by the pre-import
+//! concat model (stdlib/SPEC.md §1), where the whole file is a root
+//! and `export` markers are not part of the surface — same as
+//! `net/http/*` and `db/*`.
 
+fn instant_now_ms() -> Int:
+    time_mono_ms_builtin()

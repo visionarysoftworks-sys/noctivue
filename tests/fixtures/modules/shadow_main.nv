@@ -1,0 +1,6 @@
+// @skip-test (module-graph fixture: resolves only through ModuleGraph linkage, covered by modules::tests)
+import support::shadow as api
+
+main():
+    let b = api.make()
+    println(api.unbox(b))

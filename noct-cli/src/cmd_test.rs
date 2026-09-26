@@ -16,7 +16,11 @@
 //! smokes whose callees resolve only in the concatenated run).
 //!
 //! Usage:
-//!   noct test [filter]
+//!   noct test [filter] [--offline] [--frozen] [--index <dir>]
+//!
+//! The dependency flags are the same three `build`/`run` take, and they
+//! are threaded into every per-file run so a project test never fetches
+//! what the project-level gate already refused to fetch.
 
 use std::path::Path;
 
@@ -24,7 +28,36 @@ use compiler::diagnostics::DiagnosticSink;
 
 /// Entry point called from `main.rs`.
 pub fn run(args: &[String]) -> i32 {
-    let filter = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let mut gate = crate::registry::Gate::default();
+    let mut positional: Vec<&str> = Vec::new();
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--offline" => gate.offline = true,
+            "--frozen" | "--locked" => gate.frozen = true,
+            "--index" => match it.next() {
+                Some(v) => gate.index = Some(Path::new(v).to_path_buf()),
+                None => {
+                    eprintln!("noct test: --index needs a directory");
+                    return 1;
+                }
+            },
+            "-h" | "--help" => {
+                eprintln!("usage: noct test [filter] [--frozen] [--offline] [--index <dir>]");
+                eprintln!("  --frozen: metadata-only; the lock is checked, the store is not read");
+                eprintln!("  --offline: never fetch; a missing dependency is an error");
+                eprintln!("  --index <dir>: fetch a locked dependency missing from the store");
+                return 0;
+            }
+            // An unrecognised flag is an error, never a filter string.
+            other if other.starts_with('-') => {
+                eprintln!("noct test: unknown flag `{other}`");
+                return 1;
+            }
+            other => positional.push(other),
+        }
+    }
+    let filter = positional.first().copied();
 
     let fixture_dir = Path::new("tests/fixtures");
     if fixture_dir.exists() {
@@ -32,11 +65,11 @@ pub fn run(args: &[String]) -> i32 {
     }
     if Path::new("nestpkg.nvpm").exists() {
         // Same package gate as build/run (P-003 §6).
-        if let Err(message) = crate::registry::require_package_current(Path::new(".")) {
+        if let Err(message) = crate::registry::require_package_current(Path::new("."), &gate) {
             eprintln!("noct test: {message}");
             return 1;
         }
-        return run_project_mode(filter);
+        return run_project_mode(filter, &gate);
     }
     eprintln!("error: tests/fixtures/ not found (run from the workspace root)");
     eprintln!("       nor nestpkg.nvpm (run from a project created by `noct create`)");
@@ -46,8 +79,9 @@ pub fn run(args: &[String]) -> i32 {
 /// Project mode: execute every `tests/**/*.nv` through the `run`
 /// pipeline; pass = exit 0. Reuses `cmd_run::run` verbatim (same
 /// semantics as `noct run file`, including its diagnostics) so test
-/// execution can never drift from real execution.
-fn run_project_mode(filter: Option<&str>) -> i32 {
+/// execution can never drift from real execution — which is also why
+/// the dependency flags travel with it.
+fn run_project_mode(filter: Option<&str>, gate: &crate::registry::Gate) -> i32 {
     let mut tests = Vec::new();
     collect_fixtures_rec(Path::new("tests"), &mut tests);
     tests.sort();
@@ -71,8 +105,7 @@ fn run_project_mode(filter: Option<&str>) -> i32 {
             skip += 1;
             continue;
         }
-        let arg = path_str.clone();
-        let code = crate::cmd_run::run(std::slice::from_ref(&arg));
+        let code = run_test_file(&path_str, gate);
         if code == 0 {
             println!("PASS  {path_str}");
             pass += 1;
@@ -84,6 +117,26 @@ fn run_project_mode(filter: Option<&str>) -> i32 {
 
     println!("\n{pass} passed, {fail} failed, {skip} skipped");
     if fail > 0 { 1 } else { 0 }
+}
+
+/// One test file through the real `run` pipeline, with the gate's
+/// dependency flags re-attached. The gate itself has already run once
+/// for the project, so this is the cheap (fingerprint) check, not a
+/// refetch — but the flags must still be here, or `--offline` would
+/// silently become a no-op in project mode.
+fn run_test_file(path: &str, gate: &crate::registry::Gate) -> i32 {
+    let mut args: Vec<String> = vec![path.to_string()];
+    if gate.frozen {
+        args.push("--frozen".to_string());
+    }
+    if gate.offline {
+        args.push("--offline".to_string());
+    }
+    if let Some(index) = &gate.index {
+        args.push("--index".to_string());
+        args.push(index.to_string_lossy().into_owned());
+    }
+    crate::cmd_run::run(&args)
 }
 
 fn run_workspace_mode(filter: Option<&str>) -> i32 {

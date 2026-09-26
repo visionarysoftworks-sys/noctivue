@@ -74,6 +74,14 @@ pub struct RtRefs {
     pub str_from_float: FuncRef,
     pub str_from_bool: FuncRef,
     pub str_concat: FuncRef,
+    pub sleep_ms: FuncRef,
+    pub fs_exists: FuncRef,
+    pub io_write: FuncRef,
+    pub io_writeln: FuncRef,
+    pub env_set: FuncRef,
+    pub log_emit: FuncRef,
+    pub http_server_register: FuncRef,
+    pub http_server_shutdown: FuncRef,
     pub checked_sdiv: FuncRef,
     pub checked_udiv: FuncRef,
     pub checked_srem: FuncRef,
@@ -394,6 +402,51 @@ pub fn lower_instr(
             call(builder, ctx.rt.print, &[s]);
         }
 
+        // Phase 5/M4 host-IO scalar subset: each builtin is one runtime
+        // call with header-pointer (String), I64 (Int), or I8 (Bool)
+        // operands — the same one-call shape as `Print` above.
+        // Negative sleep is trapped inside the runtime (which owns the
+        // message, like `checked_sdiv` owns division-by-zero), so no
+        // extra codegen here either.
+        Instr::Sleep { ms } => {
+            let m = ctx.get(builder, *ms);
+            call(builder, ctx.rt.sleep_ms, &[m]);
+        }
+        Instr::FsExists { dst, path } => {
+            let p = ctx.get(builder, *path);
+            let v = call_one(builder, ctx.rt.fs_exists, &[p]);
+            ctx.set(builder, *dst, v);
+        }
+        Instr::IoWrite { src } => {
+            let s = ctx.get(builder, *src);
+            call(builder, ctx.rt.io_write, &[s]);
+        }
+        Instr::IoWriteLn { src } => {
+            let s = ctx.get(builder, *src);
+            call(builder, ctx.rt.io_writeln, &[s]);
+        }
+        Instr::EnvSet { name, value } => {
+            let n = ctx.get(builder, *name);
+            let v = ctx.get(builder, *value);
+            call(builder, ctx.rt.env_set, &[n, v]);
+        }
+        Instr::LogEmit { level, message } => {
+            let l = ctx.get(builder, *level);
+            let m = ctx.get(builder, *message);
+            call(builder, ctx.rt.log_emit, &[l, m]);
+        }
+        Instr::HttpServerRegister { server, method, path, handler } => {
+            let s = ctx.get(builder, *server);
+            let m = ctx.get(builder, *method);
+            let p = ctx.get(builder, *path);
+            let h = ctx.get(builder, *handler);
+            call(builder, ctx.rt.http_server_register, &[s, m, p, h]);
+        }
+        Instr::HttpServerShutdown { server } => {
+            let s = ctx.get(builder, *server);
+            call(builder, ctx.rt.http_server_shutdown, &[s]);
+        }
+
         Instr::Return { val } => {
             // The native entry returns nothing by construction (driver's
             // entry convention): validate the value's binding (so a
@@ -424,8 +477,20 @@ pub fn lower_instr(
             }
         }
 
-        // Everything else belongs to a later step.
-        Instr::StackAlloc { .. } | Instr::Load { .. } | Instr::Store { .. }
+        // Everything else belongs to a later step — including the
+        // VM-only host-IO builtins (aggregate Result/Option/List
+        // returns have no native representation yet, and
+        // `HttpServerServeLoop` needs callbacks into program code):
+        // the driver's `is_supported` pre-check rejects them with a
+        // clean `UnsupportedInstr` naming the instruction, never a
+        // silently-skipped call.
+        Instr::HttpSend { .. } | Instr::HttpServerListen { .. } | Instr::HttpServerServeLoop { .. }
+        | Instr::DbOpen { .. } | Instr::DbExec { .. } | Instr::DbQuery { .. } | Instr::DbClose { .. }
+        | Instr::TimeMonoMs { .. } | Instr::RngSeed { .. } | Instr::RngNext { .. }
+        | Instr::TaskCancel { .. }
+        | Instr::FsRead { .. } | Instr::FsWrite { .. } | Instr::FsModifiedMillis { .. }
+        | Instr::EnvGet { .. } | Instr::ConfigGet { .. } | Instr::DotenvLoad { .. }
+        | Instr::StackAlloc { .. } | Instr::Load { .. } | Instr::Store { .. }
         | Instr::StructNew { .. } | Instr::FieldGet { .. }
         | Instr::FieldSet { .. } | Instr::ListLen { .. } | Instr::ListIndex { .. }
         | Instr::EnumTag { .. } | Instr::EnumPayload { .. } | Instr::EnumNew { .. }

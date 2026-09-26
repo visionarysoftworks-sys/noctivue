@@ -112,6 +112,108 @@ pub enum Instr {
     /// `print %val` — print a value (returns Unit)
     Print { val: ValueId },
 
+    // ── Host I/O (Phase 5/M4 stdlib builtins) ─────────────────────────────
+    //
+    // One instruction per interpreter builtin: lowering maps the builtin
+    // call to its instruction (see `lowering.rs`'s Call dispatch), the VM
+    // executes it with interpreter-identical semantics (see `vm.rs`), and
+    // the Cranelift backend lowers the scalar-shaped subset to
+    // `runtime-native` imports (see `backends/cranelift/{abi,driver,lower}.rs`).
+    //
+    // Scalar subset (Bool/Int/Unit/String only — representable in
+    // native code today): Sleep, FsExists, IoWrite, IoWriteLn, EnvSet,
+    // LogEmit, HttpServerRegister, HttpServerShutdown. Everything else
+    // returns Result/Option/List, which have no native representation
+    // yet (Step 3 boundary): the VM executes those, native fails
+    // loudly with `UnsupportedInstr` naming the instruction.
+    /// `sleep %ms` — block the calling thread for `%ms` milliseconds.
+    /// Returns Unit via a trailing `Const Unit` (same statement shape as
+    /// `Print`). Negative input traps (mirrors the interpreter's panic).
+    Sleep { ms: ValueId },
+    /// `%dst = fs_exists %path` — `Bool`: does `%path` exist.
+    FsExists { dst: ValueId, path: ValueId },
+    /// `io_write %src` — write a string to stdout, no newline.
+    IoWrite { src: ValueId },
+    /// `io_writeln %src` — write a string to stdout plus a newline.
+    IoWriteLn { src: ValueId },
+    /// `env_set %name, %val` — set a process environment variable.
+    EnvSet { name: ValueId, value: ValueId },
+    /// `log_emit %level, %msg` — one `[LEVEL] msg` line to stderr.
+    LogEmit { level: ValueId, message: ValueId },
+    /// `http_server_register %server, %method, %path, %handler` —
+    /// register a method+path route (handler is a function NAME string,
+    /// resolved at serve time).
+    HttpServerRegister { server: ValueId, method: ValueId, path: ValueId, handler: ValueId },
+    /// `http_server_shutdown %server` — stop the server, release the port.
+    HttpServerShutdown { server: ValueId },
+    /// `%dst = http_send %method, %url, %headers, %body` — blocking
+    /// plaintext-HTTP client over TCP. VM-only (returns
+    /// `Result<String, String>`).
+    HttpSend { dst: ValueId, method: ValueId, url: ValueId, headers: ValueId, body: ValueId },
+    /// `%dst = http_server_listen %port` — bind `0.0.0.0:%port`. VM-only
+    /// (returns `Result<Int, String>`).
+    HttpServerListen { dst: ValueId, port: ValueId },
+    /// `http_server_serve_loop %server` — blocking accept loop that
+    /// dispatches to registered Noctivue handlers. VM-only (handler
+    /// callbacks into program code have no native equivalent yet).
+    HttpServerServeLoop { server: ValueId },
+    /// `%dst = db_open %path` — open a SQLite database. VM-only
+    /// (returns `Result<Int, String>`; native has no Result
+    /// representation and no SQLite linkage yet).
+    DbOpen { dst: ValueId, path: ValueId },
+    /// `%dst = db_exec %handle, %sql, %params` — run DDL/DML, returning
+    /// the changed-row count. VM-only.
+    DbExec { dst: ValueId, handle: ValueId, sql: ValueId, params: ValueId },
+    /// `%dst = db_query %handle, %sql, %params` — run a query, returning
+    /// one JSON-array string per row. VM-only.
+    DbQuery { dst: ValueId, handle: ValueId, sql: ValueId, params: ValueId },
+    /// `%dst = db_close %handle` — close a database connection. VM-only.
+    DbClose { dst: ValueId, handle: ValueId },
+    /// `%dst = fs_read %path` — read a UTF-8 text file. VM-only
+    /// (returns `Result<String, String>`).
+    FsRead { dst: ValueId, path: ValueId },
+    /// `%dst = fs_write %path, %contents` — write a UTF-8 text file.
+    /// VM-only (returns `Result<Unit, String>`).
+    FsWrite { dst: ValueId, path: ValueId, contents: ValueId },
+    /// `%dst = fs_modified_millis %path` — file mtime as millis since
+    /// the Unix epoch. VM-only (returns `Result<Int, String>`).
+    FsModifiedMillis { dst: ValueId, path: ValueId },
+    /// `%dst = env_get %name` — process environment lookup. VM-only
+    /// (returns `Option<String>`).
+    EnvGet { dst: ValueId, name: ValueId },
+    /// `%dst = config_get %path, %key` — read a `key=value` file. VM-only
+    /// (returns `Result<String, String>`).
+    ConfigGet { dst: ValueId, path: ValueId, key: ValueId },
+    /// `%dst = dotenv_load %path` — load a `KEY=VALUE` file into the
+    /// process environment (process wins). VM-only (returns
+    /// `Result<Int, String>`).
+    DotenvLoad { dst: ValueId, path: ValueId },
+    /// `%dst = time_mono_ms` — monotonic millis since an arbitrary
+    /// process epoch (Phase 6/Wave 0, ADR-020). Scalar `Int` (u64
+    /// range): never goes backward within a process; no wall-clock,
+    /// no timezones at this layer.
+    TimeMonoMs { dst: ValueId },
+    /// `%dst = rng_seed %seed` — allocate an explicit-seed RNG handle
+    /// (Phase 6/Wave 0, ADR-021). Scalar `Int` handle into the VM's
+    /// RNG registry (db-registry shape); same seed replays the same
+    /// sequence.
+    RngSeed { dst: ValueId, seed: ValueId },
+    /// `%dst = rng_next %handle` — advance the RNG and return its next
+    /// value (Phase 6/Wave 0, ADR-021). Scalar `Int`; unknown handles
+    /// trap loudly (never a silent default).
+    RngNext { dst: ValueId, handle: ValueId },
+    /// `task_cancel %handle` — request cooperative cancellation of the
+    /// task `%handle` names (Phase 6/M5, ADR-024). Statement shape: no
+    /// `dst`, Unit via a trailing `Const Unit` (same as `Sleep`).
+    /// Idempotent; the target observes the flag at its next suspend
+    /// point and the `await` that joins it yields the pinned
+    /// `task {id} cancelled` value. VM-only: the VM spawns no tasks, so
+    /// it owns no task registry and every handle is the never-spawned
+    /// case — the arm raises a loud `VmError` rather than a silent
+    /// success (the interpreter is the task-capable backend, see
+    /// CONCURRENCY.md §7).
+    TaskCancel { handle: ValueId },
+
     // ── Control Flow (Terminators) ──────────────────────────────────────────
     /// `branch target` — unconditional jump
     Branch { target: BlockId },
@@ -199,6 +301,31 @@ impl fmt::Display for Instr {
             Instr::Call { dst, func, args, ret_ty } => write!(f, "{} = call {}({}) : {}", dst, func, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
             Instr::CallIndirect { dst, func_ptr, args, ret_ty } => write!(f, "{} = call_indirect {}({}) : {}", dst, func_ptr, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
             Instr::Print { val } => write!(f, "print {}", val),
+            Instr::Sleep { ms } => write!(f, "sleep {}", ms),
+            Instr::FsExists { dst, path } => write!(f, "{} = fs_exists {}", dst, path),
+            Instr::IoWrite { src } => write!(f, "io_write {}", src),
+            Instr::IoWriteLn { src } => write!(f, "io_writeln {}", src),
+            Instr::EnvSet { name, value } => write!(f, "env_set {}, {}", name, value),
+            Instr::LogEmit { level, message } => write!(f, "log_emit {}, {}", level, message),
+            Instr::HttpServerRegister { server, method, path, handler } => write!(f, "http_server_register {}, {}, {}, {}", server, method, path, handler),
+            Instr::HttpServerShutdown { server } => write!(f, "http_server_shutdown {}", server),
+            Instr::HttpSend { dst, method, url, headers, body } => write!(f, "{} = http_send {}, {}, {}, {}", dst, method, url, headers, body),
+            Instr::HttpServerListen { dst, port } => write!(f, "{} = http_server_listen {}", dst, port),
+            Instr::HttpServerServeLoop { server } => write!(f, "http_server_serve_loop {}", server),
+            Instr::DbOpen { dst, path } => write!(f, "{} = db_open {}", dst, path),
+            Instr::DbExec { dst, handle, sql, params } => write!(f, "{} = db_exec {}, {}, {}", dst, handle, sql, params),
+            Instr::DbQuery { dst, handle, sql, params } => write!(f, "{} = db_query {}, {}, {}", dst, handle, sql, params),
+            Instr::DbClose { dst, handle } => write!(f, "{} = db_close {}", dst, handle),
+            Instr::FsRead { dst, path } => write!(f, "{} = fs_read {}", dst, path),
+            Instr::FsWrite { dst, path, contents } => write!(f, "{} = fs_write {}, {}", dst, path, contents),
+            Instr::FsModifiedMillis { dst, path } => write!(f, "{} = fs_modified_millis {}", dst, path),
+            Instr::EnvGet { dst, name } => write!(f, "{} = env_get {}", dst, name),
+            Instr::ConfigGet { dst, path, key } => write!(f, "{} = config_get {}, {}", dst, path, key),
+            Instr::DotenvLoad { dst, path } => write!(f, "{} = dotenv_load {}", dst, path),
+            Instr::TimeMonoMs { dst } => write!(f, "{} = time_mono_ms", dst),
+            Instr::RngSeed { dst, seed } => write!(f, "{} = rng_seed {}", dst, seed),
+            Instr::RngNext { dst, handle } => write!(f, "{} = rng_next {}", dst, handle),
+            Instr::TaskCancel { handle } => write!(f, "task_cancel {}", handle),
             Instr::Branch { target } => write!(f, "branch {}", target),
             Instr::CondBranch { cond, then_block, else_block } => write!(f, "cond_branch {}, {}, {}", cond, then_block, else_block),
             Instr::Switch { val, cases, default } => write!(f, "switch {} [{}] default {}", val, cases.iter().map(|(tag, blk)| format!("{} -> {}", tag, blk)).collect::<Vec<_>>().join(", "), default),

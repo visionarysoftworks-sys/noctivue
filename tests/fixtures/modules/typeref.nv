@@ -1,0 +1,11 @@
+// @skip-test (module-graph fixture: resolves only through ModuleGraph linkage, covered by modules::tests)
+import support::types as t
+
+fn show(c: t::Config) -> t::Config:
+    c
+
+main():
+    let c = t.make_config("x")
+    let d: t::Config = t::Config { name: "y" }
+    println(show(c).name)
+    println(show(d).name)

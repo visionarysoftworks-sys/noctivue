@@ -1,0 +1,2 @@
+export fn pkg_hello() -> String:
+    "pkg ok"

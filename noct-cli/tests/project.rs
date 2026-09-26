@@ -242,17 +242,48 @@ fn build_frozen_stale_lock_fails() {
 }
 
 #[test]
-fn build_without_frozen_ignores_stale_lock() {
-    // Same stale setup as above, WITHOUT the flag: no new failure —
-    // the build proceeds to codegen (proves the gate is opt-in).
+fn build_without_frozen_still_refuses_a_stale_lock() {
+    // Same stale setup as above, WITHOUT the flag. `--frozen` used to be
+    // the only thing that checked the lock, which made `build` the odd
+    // one out: `run` and `test` have always refused a stale lock, and
+    // the store makes the lock load-bearing for `build` too (it is what
+    // says which content the build may read). So the gate is no longer
+    // opt-in — and the error names `noct add`, because only re-resolving
+    // can fix a stale lock. `--frozen` remains metadata-only: it checks
+    // the same thing without ever reading the store.
     let shop = shop_with_path_dep();
     make_stale(&shop);
     let out = run_build_in(&shop, &["build", "lib/main.nv"]);
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "stale lock without --frozen must still build. stdout:\n{}\nstderr:\n{}",
+        Some(1),
+        "a stale lock must fail the build. stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sibling"), "must name the package, got:\n{stderr}");
+    assert!(
+        stderr.contains("noct add"),
+        "a stale lock is re-resolved, never fetched:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("auto-fetching"),
+        "auto-fetch must never repair a stale lock:\n{stderr}"
+    );
+    cleanup(&shop);
+}
+
+#[test]
+fn build_without_frozen_builds_a_current_project() {
+    // The other half of the pair above: with a current lock and no
+    // registry dependency, the gate is silent and the build proceeds.
+    let shop = shop_with_path_dep();
+    let out = run_build_in(&shop, &["build", "lib/main.nv"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a current project must build. stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(

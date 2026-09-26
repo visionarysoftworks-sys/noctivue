@@ -20,6 +20,24 @@
 //! anything that is not a live handle fails loudly, as does awaiting
 //! the same handle twice. Tasks still running when `main` returns
 //! are joined before the process exits (no fire-and-forget).
+//!
+//! Cancellation is cooperative and library-level (CONCURRENCY.md §6,
+//! ADR-024): `task_cancel` only sets a flag, which the target reads at
+//! its next `sleep` or at its exit — it never preempts a running
+//! computation. A cancelled task is still joined; the `await` that
+//! joins it yields the pinned `Err("task {id} cancelled")` value, so a
+//! caller can match on it or propagate it with `?`:
+//!
+//! ```nv
+//! task poll():
+//!     sleep(5000)
+//!
+//! fn main():
+//!     let h = poll()
+//!     task_cancel(h)
+//!     let v = await h
+//!     println("stopped early: {v}")
+//! ```
 
 /// Sleep the calling thread for `ms` milliseconds (non-negative).
 /// This is a cooperative BLOCKING sleep — the M4 floor, not a timer:
@@ -28,3 +46,11 @@
 /// Negative inputs panic.
 fn sleep(ms: Int) -> Unit:
     sleep_builtin(ms)
+
+/// Request cancellation of the task `handle` names. Idempotent:
+/// cancelling twice, or cancelling a task that has already finished,
+/// succeeds. A handle that was never spawned — or one already
+/// awaited — fails loudly rather than quietly doing nothing, because
+/// this returns `Unit` and a soft error would be dropped.
+fn task_cancel(handle: Int) -> Unit:
+    task_cancel_builtin(handle)

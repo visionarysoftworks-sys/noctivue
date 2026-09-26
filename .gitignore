@@ -21,6 +21,22 @@ Thumbs.db
 *.nvir
 *.nvc
 
+# In-tree Noctivue build outputs. Per docs/TOOLCHAIN.md §3, `.noct/`
+# holds ONLY build outputs — fetched dependency content graduates to
+# the global content-addressed store, and the committed offline escape
+# hatch is `vendor/` (deliberately NOT ignored).
+.noct/
+# ...except the module-graph fixture that simulates a fetched cache
+# tree so vendor-vs-cache precedence stays tested.
+!tests/fixtures/modules/.noct/
+
+# Local SQLite files (reference app + scratch databases create these
+# at runtime; the checked-in arteries never include live data)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
 # Native toolchain outputs — never commit binaries (removed a batch of
 # accidentally-pushed debug_*.exe/.pdb in the past; this rule exists so
 # it cannot recur). Scratch single-file debug scripts (debug_*.rs) and

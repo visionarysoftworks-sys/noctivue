@@ -3,8 +3,8 @@
 //! loading/error states, reusable components, conditional rendering,
 //! iteration, styling/themes, and both compact and expanded syntax.
 
-import http
-import json
+import std::http
+import std::json
 
 // ---- Data model (concise struct style) ----------------------------------
 

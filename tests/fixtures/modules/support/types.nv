@@ -1,0 +1,5 @@
+export struct Config:
+    name: String
+
+export fn make_config(n: String) -> Config:
+    Config { name: n }

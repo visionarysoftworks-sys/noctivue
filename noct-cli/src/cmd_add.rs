@@ -362,11 +362,13 @@ fn add_registry(
         }
     };
 
-    // Fetch + verify everything BEFORE writing anything.
-    let project = Path::new(".");
+    // Fetch + verify everything BEFORE writing anything. The store is
+    // global and shared, so a project that already has a verified copy
+    // of a package pays nothing for the second project that needs it.
+    let store = crate::store::Store::open();
     let keys = crate::registry::key_dir();
     for locked in &resolved {
-        if let Err(e) = fetch_locked(locked, &index, project, &keys, rotate_key) {
+        if let Err(e) = fetch_locked(locked, &index, &store, &keys, rotate_key) {
             eprintln!("noct add: {e}");
             return 1;
         }

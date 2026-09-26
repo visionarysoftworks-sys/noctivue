@@ -94,11 +94,13 @@ pub const NOCTIVUE_RT_HTTP_SERVER_SERVE: &str = "noctivue_rt_http_server_serve";
 pub const NOCTIVUE_DASHBOARD_ECHO: &str = "noctivue_dashboard_echo";
 pub const NOCTIVUE_DASHBOARD_ARITH: &str = "noctivue_dashboard_arith";
 
-// Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+// New: [+Char] and [+String] runtime symbols.
+pub const NOCTIVUE_RT_CHAR_GT: &str = "noctivue_rt_char_gt";
+pub const NOCTIVUE_RT_CHAR_LE: &str = "noctivue_rt_char_le";
+pub const NOCTIVUE_RT_STRING_PUSH: &str = "noctivue_rt_string_push";
+pub const NOCTIVUE_RT_STRING_POP: &str = "noctivue_rt_string_pop";
 pub const NOCTIVUE_RT_STRING_EQ: &str = "noctivue_rt_string_eq";
-pub const NOCTIVUE_RT_FLOAT_LE: &str = "noctivue_rt_float_le";
 pub const NOCTIVUE_RT_CHAR_EQ: &str = "noctivue_rt_char_eq";
-pub const NOCTIVUE_RT_CHAR_LT: &str = "noctivue_rt_char_lt";
 
 use cranelift_codegen::ir::types as clif_types;
 use cranelift_codegen::ir::Type as ClifType;
@@ -108,6 +110,14 @@ use cranelift_codegen::ir::Type as ClifType;
 /// adding a runtime function is one row here plus one field on each of
 /// the driver's `RtIds` / lowerer's `RtRefs` structs — the compiler
 /// rejects a mismatch (no silent drift between declaration and use).
+///
+/// LINK RULE (2026-09-17): every row here MUST have a matching
+/// `#[no_mangle]` definition in `runtime-native`, whether or not any
+/// lowering currently calls it — the object file carries all declared
+/// imports as undefined symbols and MSVC link fails the whole binary
+/// when even one is missing (observed: deleting `string_eq`/`char_eq`
+/// broke every native test). Add and remove rows only together with
+/// their runtime definitions, never one side alone.
 pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
     (NOCTIVUE_RT_PRINT, &[clif_types::I64], &[]),
     (
@@ -227,15 +237,10 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
         &[clif_types::I64, clif_types::I64],
         &[clif_types::I64],
     ),
-    // Native runtime helpers for [+String]/[+Float]/[+Char] twins.
+    // Phase 3, Step 4: string/char comparison FFI.
     (
         NOCTIVUE_RT_STRING_EQ,
         &[clif_types::I64, clif_types::I64],
-        &[clif_types::I64],
-    ),
-    (
-        NOCTIVUE_RT_FLOAT_LE,
-        &[clif_types::F64, clif_types::F64],
         &[clif_types::I64],
     ),
     (
@@ -243,9 +248,26 @@ pub const RUNTIME_IMPORTS: &[(&str, &[ClifType], &[ClifType])] = &[
         &[clif_types::I64, clif_types::I64],
         &[clif_types::I64],
     ),
+    // New: [+Char] twins.
     (
-        NOCTIVUE_RT_CHAR_LT,
+        NOCTIVUE_RT_CHAR_GT,
         &[clif_types::I64, clif_types::I64],
+        &[clif_types::I8],
+    ),
+    (
+        NOCTIVUE_RT_CHAR_LE,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I8],
+    ),
+    // New: [+String] twins.
+    (
+        NOCTIVUE_RT_STRING_PUSH,
+        &[clif_types::I64, clif_types::I64],
+        &[clif_types::I64],
+    ),
+    (
+        NOCTIVUE_RT_STRING_POP,
+        &[clif_types::I64],
         &[clif_types::I64],
     ),
 ];

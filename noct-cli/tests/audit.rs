@@ -94,3 +94,105 @@ fn audit_needs_a_lockfile() {
     );
     cleanup(&base);
 }
+
+// ── Advisory-database cases (`--advisories <file>`) ──────────────────────────
+
+fn setup_sibling_project(dir: &Path) {
+    std::fs::create_dir_all(dir.join("sibling")).unwrap();
+    std::fs::write(dir.join("nestpkg.nvpm"), APP_MANIFEST).unwrap();
+    std::fs::write(dir.join("sibling").join("nestpkg.nvpm"), SIBLING_MANIFEST).unwrap();
+    assert_eq!(
+        run_cli_in(&dir, &["add", "sibling", "--path", "sibling"]).status.code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn audit_with_empty_db_is_clean() {
+    let (base, dir) = scratch(false);
+    setup_sibling_project(&dir);
+    let db = dir.join("advisories.db");
+    std::fs::write(&db, "").unwrap();
+    let db_arg = db.to_str().unwrap().to_string();
+    let out = run_cli_in(&dir, &["audit", "--advisories", &db_arg]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("vulns"), "got:\n{stdout}");
+    assert!(stdout.contains("clean"), "got:\n{stdout}");
+    assert!(stdout.contains("sibling"), "got:\n{stdout}");
+    cleanup(&base);
+}
+
+#[test]
+fn audit_reports_matching_advisory() {
+    let (base, dir) = scratch(false);
+    setup_sibling_project(&dir);
+    let db = dir.join("advisories.db");
+    std::fs::write(
+        &db,
+        "sibling|0.3.5|RUSTSEC-2026-0001|high|test vulnerability in sibling\n",
+    )
+    .unwrap();
+    let db_arg = db.to_str().unwrap().to_string();
+    let out = run_cli_in(&dir, &["audit", "--advisories", &db_arg]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("vulns"), "got:\n{stdout}");
+    assert!(stdout.contains("RUSTSEC-2026-0001(high)"), "got:\n{stdout}");
+    cleanup(&base);
+}
+
+#[test]
+fn audit_non_matching_version_is_clean() {
+    let (base, dir) = scratch(false);
+    setup_sibling_project(&dir);
+    let db = dir.join("advisories.db");
+    std::fs::write(
+        &db,
+        "sibling|=0.3.6|RUSTSEC-2026-0001|high|does not apply to locked 0.3.5\n",
+    )
+    .unwrap();
+    let db_arg = db.to_str().unwrap().to_string();
+    let out = run_cli_in(&dir, &["audit", "--advisories", &db_arg]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("clean"), "got:\n{stdout}");
+    assert!(
+        !stdout.contains("RUSTSEC-2026-0001"),
+        "non-matching advisory must not be reported, got:\n{stdout}"
+    );
+    cleanup(&base);
+}
+
+#[test]
+fn audit_malformed_db_fails_loudly() {
+    let (base, dir) = scratch(false);
+    setup_sibling_project(&dir);
+    let db = dir.join("advisories.db");
+    std::fs::write(
+        &db,
+        "sibling|0.3.5|RUSTSEC-2026-0001|bogus|bad severity spelling\n",
+    )
+    .unwrap();
+    let db_arg = db.to_str().unwrap().to_string();
+    let out = run_cli_in(&dir, &["audit", "--advisories", &db_arg]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("line 1"), "got:\n{stderr}");
+    assert!(stderr.contains("severity"), "got:\n{stderr}");
+    cleanup(&base);
+}
+
+#[test]
+fn audit_missing_db_is_not_an_error() {
+    let (base, dir) = scratch(false);
+    setup_sibling_project(&dir);
+    let missing = dir.join("does-not-exist.db");
+    assert!(!missing.exists());
+    let missing_arg = missing.to_str().unwrap().to_string();
+    let out = run_cli_in(&dir, &["audit", "--advisories", &missing_arg]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("clean"), "got:\n{stdout}");
+    cleanup(&base);
+}

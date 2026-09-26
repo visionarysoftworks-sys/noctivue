@@ -476,6 +476,48 @@ fn doc_get_index(doc: JsonDoc, index: Int) -> Result<String, String>
   same §7 gates; `serializer.nv` (`json_serialize_builtin`
   surface) stays as-is.
 
+### 5.15 `time/instant.nv` + `numbers/random.nv` — RUNNABLE (Phase 6/Wave 0, ADR-020/021)
+
+Two single-purpose modules promoted from `reserved` on 2026-09-26.
+Both are plain `fn` (no `export`) per the §1 concat model, and both
+wrap exactly one builtin each:
+
+```nv
+fn instant_now_ms() -> Int:            // time/instant.nv
+    time_mono_ms_builtin()
+
+Rng:                                    // numbers/random.nv
+    id: Int
+fn rng_seed(seed: Int) -> Rng
+fn rng_next_raw(r: Rng) -> Int
+fn rng_next_between(r: Rng, lo: Int, hi: Int) -> Int
+```
+
+- `time_mono_ms_builtin` — monotonic millis since a process-wide
+  arbitrary epoch. Never decreases within a process; no wall-clock,
+  date, or timezone interpretation (ADR-020 non-goals, so
+  `time/clock.nv`, `datetime.nv`, and `timezone.nv` stay byte-empty
+  reserved stubs).
+- `rng_seed_builtin(seed) -> Int` allocates an opaque handle;
+  `rng_next_builtin(handle) -> Int` advances it. The `Rng` struct is
+  the `.nv`-level value callers thread, so randomness is a value and
+  never ambient authority. `rng_next_between` panics loudly on an
+  inverted range (`lo > hi`) — a caller bug, not user input. No
+  global `random()`, no float distributions, no OS entropy, no crypto
+  claim (ADR-021 non-goals).
+- Both builtins are `Int`-shaped and therefore VM-parity clean
+  (`Instr::TimeMonoMs` / `RngSeed` / `RngNext`); `noct build` still
+  fails loud on them (Cranelift `is_supported`).
+- **Known boundary:** threading the `Rng` *struct* through a call is
+  interp-only (the VM's struct-returning call lowers to
+  `FuncId::UNRESOLVED`, a pre-existing Step-3 aggregate gap). The
+  `Rng`-struct path is covered interp-side; the builtin path is
+  pinned on both runtimes. Stated in `tests/clock_rng.rs` rather than
+  hidden.
+- Gates: `tests/clock_rng.rs` 10/10 (builtin level, `.nv` wrapper
+  level, and cross-backend replay), plus the §7 per-file
+  `diagnostics`/`lint`/`fmt --check` gates.
+
 ## 6. File states (normative)
 
 Every file under `stdlib/` MUST be in exactly one state:
@@ -563,6 +605,10 @@ reserved (M4/M5, untouched by this spec): concurrency/{atomic,channel,mutex,sync
                an ownership story first), fs/*, io/*,
               net/* (+http/*), env/*, process/*, time/*, numbers/*,
               encoding/*, result/result.nv extras beyond §5.5
+              (`time/instant.nv` + `numbers/random.nv` promoted RUNNABLE
+               2026-09-26 by §5.15 — the rest of `time/*` and `numbers/*`
+               stay reserved: wall-clock/calendar/timezone need a tz
+               database, `clock.nv` is still the byte-empty stub)
 ```
 
 No `sdk/` or `developer/` directory may exist under `stdlib/` (decided
@@ -839,6 +885,14 @@ phase lands, never pre-scaffolded.
   Recorded gaps (not fixed): nominal-generic field types,
   `()` value term, `use` statements; async pool multiplexing
   waits on the async runtime.
+- 2026-09-06: [+Char] ops added: char_gt, char_le with Native: yes (S3) tags per S3 convention; recorded in core/compare.nv §5.3 alongside existing char_eq.
+- 2026-09-06: [+String] ops added: string_eq, string_pop with Native: yes (S3) tags; string_push with needs-builtin: string-push pending C5 builtin (P-001); recorded in strings/string.nv and strings/pop.nv.
+- 2026-09-06: S3‑tag enforcement L-002 confirmed — all public stdlib fns now require exactly one S3 tag (Native: yes/loop/needs-builtin: X/spec-only); missing tags trigger lint warning; verified repo-wide with 0 new fires.
+- 2026-09-06: ADR-017 rename tracking — any future rename of a stdlib module or public API must be recorded in this amendment log per ADR-017, with a summary of the change, the rationale, and the effective version; this log is the authoritative source for rename decisions; no rename is valid without an amendment entry.
+- 2026-09-26 (phase 5, EXECUTED — HTTP server production shape per docs/PHASE5_PRODUCTION.md section 2, both run and run-vm): shared wire layer compiler/src/http_wire.rs (8 KiB header cap, 1 MiB body cap, bounded reader, 413/400/404/500 mappings); per-connection OS threads with drain-on-stop; accepted sockets reset to blocking; handler non-String/unknown/panic answers 500; response.nv gains 413 Payload Too Large; db_open sets 5 s busy_timeout + WAL (both runtimes); integer-shaped params outside i64 are a loud out-of-range Err; live/peak connection + db hooks with run()/Drop reconcile; reference CRUD app + 16x128x2 load harness in tests/http_load.rs. No section 6 items touched.
+- 2026-09-26 (phase 6/wave 1, EXECUTED — status-aware handler returns): handlers may return an HttpResponse struct value (status/reason/headers/body, the existing request.nv shape) or a plain String for 200 as before; new http_response_with_headers(status, headers, body) constructor; wire reason_phrase extended (201/204/301/302/304/401/403/405/501/502/503, mirroring response.nv); unknown/non-String/Err/panic still 500. Status-aware CLIENT (HttpSendFull) and connection caps (HttpServerSetLimits) explicitly deferred: they need new Instr + lowering + Cranelift entries owned by the backend track — no interp-only builtins per the mirror rule; follow-up spec recorded in the wave record. 11/11 http_load, 19/19 parity, 169 compiler lib green.
+- 2026-09-26 (phase 6/wave 0, EXECUTED — monotonic clock + explicit-seed RNG; recorded retroactively by the integration audit, which found the promotion landed with no log entry): `time/instant.nv` and `numbers/random.nv` promoted `reserved` -> `runnable` per ADR-020/021, both wrappers only (new §5.15). New builtins `time_mono_ms_builtin` (0-arg -> Int) and `rng_seed_builtin`/`rng_next_builtin` (Int -> Int), interpreter + NIR VM arms with one byte-identical SplitMix64 step, typeck signatures registered, Cranelift loud-reject via `is_supported`. `time/clock.nv` is STILL a byte-empty reserved stub — the wall-clock/date/timezone non-goals of ADR-020 are untouched, and §9 is annotated accordingly. RENAME/DEVIATION recorded per ADR-017: ADR-021's papered surface (`rng_seed_u64(seed) -> Rng`, `rng_next(Rng) -> RngOut { value, state }`) shipped as handle-in/Int-out builtins plus an `.nv`-level `Rng` struct wrapper; reason and the interp-only boundary for the `Rng`-struct path are in DECISIONS.md ADR-021's implementation amendment. Gates: `tests/clock_rng.rs` 10/10.
+- 2026-09-26 (integration audit, DOC-ONLY — `testing/property.nv` unblock condition corrected, no code change): the reserved header said it unblocks "when random generation (numbers/random.nv) and the M5 harness land". `numbers/random.nv` is now runnable (§5.15), so only the M5 harness leg remains. The file stays `reserved` with zero items — property generation is NOT implemented.
 
 ## 10. Amendment log (future-proof)
 

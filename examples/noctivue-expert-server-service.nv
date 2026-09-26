@@ -4,11 +4,11 @@
 /// configuration, typed request/response models, centralized validation,
 /// deterministic routing, observability, and failure containment.
 
-import noctivue.io
-import std.http
-import std.json
-import std.time
-import std.log
+import std::io
+import std::http
+import std::json
+import std::time
+import std::log
 
 const SERVICE_NAME = "noctivue-api"
 const SERVICE_VERSION = "1.0.0"

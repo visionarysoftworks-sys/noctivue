@@ -1,0 +1,5 @@
+// @skip-test (module-graph fixture: MUST NOT resolve — modules::tests asserts E0101)
+import legacy_only::value as v
+
+main():
+    println(v.which())

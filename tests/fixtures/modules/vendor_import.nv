@@ -1,0 +1,5 @@
+// @skip-test (module-graph fixture: resolves only through ModuleGraph linkage, covered by modules::tests)
+import vendored_pkg::greet as g
+
+main():
+    println(g.greeting())

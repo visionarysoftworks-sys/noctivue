@@ -1,0 +1,2 @@
+export fn greeting() -> String:
+    "vendored ok"

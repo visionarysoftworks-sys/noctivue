@@ -1,0 +1,12 @@
+//! strings/pop — pop a char from a string.
+ //!
+ //! Status: runnable (M3 foundation, stdlib/SPEC.md §5.9).
+ /// Remove and return the last char of a string, or return the string unchanged if empty.
+ /// [+String] Native: yes (S3).
+ fn string_pop(s: String) -> (String, Option<Char>):
+     if s.length == 0:
+         (s, None)
+     else:
+         var last = s[s.length - 1]
+         var new_s = s[.. s.length - 1]
+         (new_s, Some(last))
