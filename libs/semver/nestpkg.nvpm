@@ -1,0 +1,4 @@
+package:
+    name: semver
+    version: 0.1.0
+    description: Strict SemVer version parsing, ordering, and caret/exact requirement matching.

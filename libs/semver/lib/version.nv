@@ -1,0 +1,153 @@
+//! semver/version — strict `MAJOR.MINOR.PATCH` versions and ordering.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `panic`/`assert`, so it runs on `run` today and
+//! stays portable to `run-vm`/`build` later.
+//!
+//! The accepted shape is deliberately the strict one the package
+//! manager already requires in `nestpkg.nvpm` (P-003 §2): exactly three
+//! dot-separated numeric fields, digits only, no leading zeros, no
+//! pre-release or build metadata. A version this module rejects is one
+//! the manifest parser rejects, so a dependency's declared version and
+//! its declared requirement can never disagree about what is spellable.
+//!
+//! Fields are scanned by index range rather than sliced into strings:
+//! the language has neither a slice expression nor a `char -> String`
+//! conversion, so materialising "1", "2", "3" would need machinery
+//! this library should not grow.
+//!
+//! Digit scanning lives in `digits` (same library, internal).
+
+import digits
+
+/// A parsed version. Exported because callers hold it across module
+/// boundaries; constructed with the named-field literal form.
+export struct Version:
+    major: Int
+    minor: Int
+    patch: Int
+
+// ── internals (defined before use, and `export`ed for linking) ─────────────
+//
+// Both helpers are `export` only because the linker drops private items
+// of dependency files (rule 1 in `libs/README.md`, compiler/src/modules.rs):
+// when this package is consumed, its `lib/*.nv` are dependencies, so a
+// private helper called by an exported function would vanish and fail
+// resolution. Application code should not import them. They are defined
+// above their callers because the resolver is single-pass.
+/// INTERNAL — index of the first `.` at or after `start`, or -1.
+export fn index_of_dot(s: String, start: Int) -> Int:
+    var i = start; var found = 0 - 1
+    while i < s.length:
+        if s[i] == '.' && found < 0:
+            found = i
+        i = i + 1
+    found
+
+/// INTERNAL — value of the field `s[start..end)`, validating digits,
+/// emptiness, and leading zeros. `end <= start` means an empty field,
+/// which is an error (so `1..3` and `.1.2` are both rejected rather than
+/// read as 0).
+export fn field_value(s: String, start: Int, end: Int) -> Result<Int, String>:
+    if end <= start:
+        Err("empty field in version: {s}")
+    else:
+        if s[start] == '0' && end - start > 1:
+            Err("leading zero (expected strict MAJOR.MINOR.PATCH): {s}")
+        else:
+            var acc = 0; var i = start; var bad = false
+            while i < end:
+                let d = digit_value(s[i])
+                if d < 0:
+                    bad = true
+                else:
+                    acc = acc * 10 + d
+                i = i + 1
+            if bad:
+                Err("non-digit in version field: {s}")
+            else:
+                Ok(acc)
+
+// ── public API ──────────────────────────────────────────────────────────────
+/// Parse a strict `MAJOR.MINOR.PATCH` version.
+///
+/// Rejects (as `Err`, never a silent guess): a wrong field count, a
+/// non-digit char, an empty field, and leading zeros (`01.0.0`) — the
+/// last because `01` and `1` must not be two spellings of one version.
+/// Pre-release and build metadata are also rejected (v0.1.0 scope).
+export fn parse_version(s: String) -> Result<Version, String>:
+    parse_version_from(s, 0)
+
+/// Parse a strict `MAJOR.MINOR.PATCH` version starting at `start`.
+///
+/// Exists so a requirement can drop a leading `=` without slicing: the
+/// language has no slice expression and no `char -> String`
+/// conversion, so re-materialising the tail would need machinery this
+/// library should not grow.
+export fn parse_version_from(s: String, start: Int) -> Result<Version, String>:
+    if start >= s.length:
+        Err("empty version")
+    else:
+        let first_dot = index_of_dot(s, start)
+        if first_dot < 0:
+            Err("not MAJOR.MINOR.PATCH: {s}")
+        else:
+            let second_dot = index_of_dot(s, first_dot + 1)
+            if second_dot < 0:
+                Err("not MAJOR.MINOR.PATCH: {s}")
+            else:
+                if index_of_dot(s, second_dot + 1) >= 0:
+                    Err("too many fields (expected MAJOR.MINOR.PATCH): {s}")
+                else:
+                    // Field ranges are absolute [start, end) index pairs,
+                    // not lengths: minor spans first_dot+1 .. second_dot.
+                    let major = field_value(s, start, first_dot)?
+                    let minor = field_value(s, first_dot + 1, second_dot)?
+                    let patch = field_value(s, second_dot + 1, s.length)?
+                    Ok(Version { major: major, minor: minor, patch: patch })
+
+/// Canonical rendering — the exact inverse of [`parse_version`].
+export fn version_to_string(v: Version) -> String:
+    "{v.major}.{v.minor}.{v.patch}"
+
+/// Total order: -1 when `a < b`, 0 when equal, 1 when `a > b`.
+export fn version_cmp(a: Version, b: Version) -> Int:
+    if a.major != b.major:
+        if a.major < b.major:
+            0 - 1
+        else:
+            1
+    else:
+        if a.minor != b.minor:
+            if a.minor < b.minor:
+                0 - 1
+            else:
+                1
+        else:
+            if a.patch < b.patch:
+                0 - 1
+            else:
+                if a.patch > b.patch:
+                    1
+                else:
+                    0
+
+/// `a == b`.
+export fn version_eq(a: Version, b: Version) -> Bool:
+    version_cmp(a, b) == 0
+
+/// `a < b`.
+export fn version_lt(a: Version, b: Version) -> Bool:
+    version_cmp(a, b) < 0
+
+/// `a <= b`.
+export fn version_lte(a: Version, b: Version) -> Bool:
+    version_cmp(a, b) <= 0
+
+/// `a > b`.
+export fn version_gt(a: Version, b: Version) -> Bool:
+    version_cmp(a, b) > 0
+
+/// `a >= b`.
+export fn version_gte(a: Version, b: Version) -> Bool:
+    version_cmp(a, b) >= 0

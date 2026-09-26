@@ -1,0 +1,51 @@
+//! semver/digits — internal digit scanning helpers.
+//!
+//! INTERNAL module (native tier, v0.1.0): these names carry `export`
+//! only because the linker drops private items of dependencies —
+//! `version.nv` and `requirement.nv` (same library) call them, so they
+//! must survive linking. Application code should import `version` or
+//! `requirement`, never this module directly.
+//!
+//! Why a hand-written digit scanner: the language has no `char -> Int`
+//! conversion today, and `to_int` is `run`-only (not portable to
+//! `run-vm`/`build`, per the portability rule in `libs/README.md`).
+//! Matching the ten digit literals keeps this module pure and total:
+//! every call returns a value, so no error channel is needed.
+
+/// Value of an ASCII digit char, or -1 when `c` is not a digit.
+export fn digit_value(c: Char) -> Int:
+    if c == '0':
+        0
+    else:
+        if c == '1':
+            1
+        else:
+            if c == '2':
+                2
+            else:
+                if c == '3':
+                    3
+                else:
+                    if c == '4':
+                        4
+                    else:
+                        if c == '5':
+                            5
+                        else:
+                            if c == '6':
+                                6
+                            else:
+                                if c == '7':
+                                    7
+                                else:
+                                    if c == '8':
+                                        8
+                                    else:
+                                        if c == '9':
+                                            9
+                                        else:
+                                            0 - 1
+
+/// True when `c` is an ASCII digit.
+export fn is_digit(c: Char) -> Bool:
+    digit_value(c) >= 0

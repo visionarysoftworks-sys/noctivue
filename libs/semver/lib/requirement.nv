@@ -1,0 +1,109 @@
+//! semver/requirement — version requirements with P-003 caret/exact
+//! semantics.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`.
+//!
+//! The two spellings are exactly the ones `nestpkg.nvpm` accepts
+//! (P-003 §3), and they mean exactly what they mean there:
+//!
+//! - `1.2.3`  — caret: `>=1.2.3, <2.0.0`; for a `0.x` base the minor
+//!   is the ceiling (`^0.2.3` is `>=0.2.3, <0.3.0`); for `0.0.x` the
+//!   patch is (`^0.0.3` is exactly `0.0.3`). This mirrors the
+//!   `req_satisfied` implementation in the `nestpkg` crate, so a
+//!   requirement means one thing across the library and the toolchain.
+//! - `=1.2.3` — exact pin.
+//!
+//! Compound ranges (`>=1.0, <2.0`) are deliberately NOT accepted: v1 of
+//! the manifest grammar treats them as a loud error rather than a
+//! misparse, and a requirement helper that quietly accepted more than
+//! the manifest would let a dependency mean something its own manifest
+//! cannot express.
+//!
+//! `Version` and the version helpers are item-imported rather than
+//! module-imported: a type name reached through a bare module import
+//! does not land in scope the way a function name does, and item imports
+//! are used flat with no rewrite (MODULES.md §§2, 4.1) — which matters
+//! because a dependency file never gets the qualified-access rewrite.
+
+import version::Version
+import version::parse_version
+import version::parse_version_from
+import version::version_eq
+import version::version_gte
+import version::version_lt
+import version::version_to_string
+
+/// A parsed requirement, constructed with the named-field literal form.
+export struct Requirement:
+    base: Version
+    /// True for the `=1.2.3` exact-pin spelling.
+    exact: Bool
+
+// ── internals (defined before use, and `export`ed for linking) ─────────────
+//
+// `export` only because the linker drops private items of dependency
+// files (rule 1 in `libs/README.md`); defined above its caller because
+// the resolver is single-pass. INTERNAL — not for application code.
+/// INTERNAL — true when `s` carries range punctuation, the sign the
+/// caller used a range rather than a bare caret/exact requirement.
+/// Detected before parsing so the error names the real problem instead
+/// of surfacing as a confusing version-parse failure on `>=1.0`.
+export fn has_range_syntax(s: String) -> Bool:
+    var i = 0; var found = false
+    while i < s.length:
+        let c = s[i]
+        if c == '>' || c == '<' || c == '^' || c == '~' || c == ',' || c == ' ':
+            found = true
+        i = i + 1
+    found
+
+// ── public API ──────────────────────────────────────────────────────────────
+/// Parse a requirement: `1.2.3` (caret) or `=1.2.3` (exact).
+export fn parse_requirement(s: String) -> Result<Requirement, String>:
+    if s.length == 0:
+        Err("empty requirement")
+    else:
+        if has_range_syntax(s):
+            Err("compound ranges are not supported (use `1.2.3` for caret or `=1.2.3` for exact): {s}")
+        else:
+            if s[0] == '=':
+                let pinned = parse_version_from(s, 1)?
+                Ok(Requirement { base: pinned, exact: true })
+            else:
+                let base = parse_version(s)?; Ok(Requirement { base: base, exact: false })
+
+/// Canonical rendering of a requirement.
+export fn requirement_to_string(r: Requirement) -> String:
+    if r.exact:
+        "={version_to_string(r.base)}"
+    else:
+        version_to_string(r.base)
+
+/// Does `v` satisfy `r`?
+export fn req_satisfied(r: Requirement, v: Version) -> Bool:
+    if r.exact:
+        version_eq(r.base, v)
+    else:
+        caret_allows(r.base, v)
+
+/// The upper bound a caret requirement admits, as a comparable version.
+/// A `0.x` base caps the minor, a `0.0.x` base caps the patch, and
+/// anything else caps the major.
+export fn caret_upper_bound(r: Version) -> Version:
+    if r.major > 0:
+        Version { major: r.major + 1, minor: 0, patch: 0 }
+    else:
+        if r.minor > 0:
+            Version { major: 0, minor: r.minor + 1, patch: 0 }
+        else:
+            Version { major: 0, minor: 0, patch: r.patch + 1 }
+
+/// True when `v` falls in `base .. upper` for the caret bound.
+export fn caret_allows(base: Version, v: Version) -> Bool:
+    version_gte(v, base) && version_lt(v, caret_upper_bound(base))
+
+/// Convenience: parse `s` as a requirement and test `version_s` against
+/// it in one call — the shape most callers actually want.
+export fn satisfies_text(requirement_s: String, version_s: String) -> Result<Bool, String>:
+    let r = parse_requirement(requirement_s)?; let v = parse_version(version_s)?
+    Ok(req_satisfied(r, v))
