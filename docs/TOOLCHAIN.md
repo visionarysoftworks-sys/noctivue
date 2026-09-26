@@ -61,6 +61,20 @@ cross-cutting concern rather than a single command.
   other four tiers and must be individually opted into; they are not
   eligible to be pulled in transitively without the top-level project
   also declaring that opt-in.
+- **Dependency content store (end-state, Proposed — M5+):** derived
+  lives with the project, fetched lives global, and the lock is the
+  mapping between them. `nestpkg.lock` (root), `.noct/build/`
+  outputs, and resolution metadata stay in-tree; tarball bytes and
+  unpacked sources graduate to a global content-addressed store
+  (`~/.noctivue`, XDG-aware, `NOCT_STORE` override) keyed by the
+  `content: sha256:…` hashes the lock already records. Both halves
+  are kept — archive (unit of verification and transfer) and
+  extracted tree (unit of compilation) — shared across projects
+  instead of duplicated per project. Archives hash once at fetch;
+  trees unpack atomically and read-only; `--frozen` stays
+  metadata-only. `vendor/` remains the committed offline escape
+  hatch. Until the move, in-tree `.noct/cache/` +
+  `.noct/packages/` is the standing layout.
 
 ## 4. Formatter
 

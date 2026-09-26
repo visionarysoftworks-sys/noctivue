@@ -139,7 +139,10 @@ fn main() {
     let grammar = Grammar {
         scope_name: "source.noctivue".to_string(),
         name: "Noctivue".to_string(),
-        file_types: vec!["nv".to_string()],
+        // `.nv` is source; `.nvir` (portable interface + IR text) and
+        // `.nvc` (build artifact) ride the same grammar (STYLE_GUIDE §6.7)
+        // so dumps highlight and artifacts keep the file identity.
+        file_types: vec!["nv".to_string(), "nvir".to_string(), "nvc".to_string()],
         patterns,
     };
 

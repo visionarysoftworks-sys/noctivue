@@ -2,7 +2,9 @@
   "scopeName": "source.noctivue",
   "name": "Noctivue",
   "fileTypes": [
-    "nv"
+    "nv",
+    "nvir",
+    "nvc"
   ],
   "patterns": [
     {

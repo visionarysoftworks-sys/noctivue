@@ -271,6 +271,11 @@ developer using only public tooling.
   reference app using only public docs and `noct create` templates,
   mirroring Phase 4's "second developer" bar but for a production
   service rather than a single package.
+- Fetched dependency content lives in a global content-addressed
+  store (hash-keyed, read-only, atomic placement — TOOLCHAIN.md §3)
+  instead of per-project `.noct/cache/` + `.noct/packages/`;
+  in-tree `.noct/` holds only build outputs. `vendor/` still builds
+  offline, and a manual `noct clean` reclaims the store.
 
 ## 9. Phase 7 — M6: Multi-Target Compilation & Interop Expansion
 

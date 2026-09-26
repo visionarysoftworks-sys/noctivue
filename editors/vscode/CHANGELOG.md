@@ -3,6 +3,17 @@
 These notes describe the local development releases of the Noctivue
 VS Code extension.
 
+## 0.0.12
+
+### Added
+
+- `.nvir` / `.nvc` ride the `noctivue` language outright (same
+  grammar, same file identity — `fileTypes` now `nv, nvir, nvc`,
+  generated from `compiler/src/tools/gen_syntax_highlighting.rs`).
+  Server tweak: artifacts get hover/completion/symbols but no
+  diagnostics (STYLE_GUIDE.md §6.7). Requires a freshly built
+  server binary.
+
 ## 0.0.11
 
 ### Fixed

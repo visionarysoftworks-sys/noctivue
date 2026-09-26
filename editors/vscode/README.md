@@ -1,9 +1,10 @@
 # Noctivue for VS Code
 
-Language support for [Noctivue](https://github.com/noctivue/noctivue) (`.nv` files)
-plus `nestpkg` manifests (`nestpkg.nvpm`, `*.nvpm`, `nestpkg.lock`):
-syntax highlighting, a matching dark theme, snippets, file icons, and a
-Language Server Protocol (LSP) integration — all in this one extension.
+Language support for [Noctivue](https://github.com/noctivue/noctivue) (`.nv` source,
+`.nvir` interface/IR, `.nvc` build artifacts) plus `nestpkg` manifests
+(`nestpkg.nvpm`, `*.nvpm`, `nestpkg.lock`): syntax highlighting, a matching
+dark theme, snippets, file icons, and a Language Server Protocol (LSP)
+integration — all in this one extension.
 
 ## Features
 

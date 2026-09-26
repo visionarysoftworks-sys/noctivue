@@ -227,6 +227,14 @@ impl ServerState {
             self.publish_diagnostics(uri, nestpkg::diagnostics_for_uri(uri, text));
             return;
         }
+        if is_artifact_uri(uri) {
+            // Build artifacts ride the `.nv` language (hover, completion,
+            // symbols all work on dumps) but never get diagnostics:
+            // they are generated, so error squiggles would be noise
+            // (STYLE_GUIDE.md §6.7).
+            self.publish_diagnostics(uri, Vec::new());
+            return;
+        }
         let result = analyze_file(uri.to_string(), text);
         let diagnostics: Vec<Diagnostic> = result
             .diagnostics
@@ -536,6 +544,17 @@ fn full_range(text: &str) -> Range {
     Range::new(Position::new(0, 0), position_at(text, text.len()))
 }
 
+/// Build artifacts (`.nvc`) and IR dumps (`.nvir`) share the `.nv`
+/// language outright — same grammar, same analysis path — with exactly
+/// one tweak: no diagnostics (see `analyze_and_publish`). Query
+/// parameters are ignored the same way, so `?v=2`-style URIs route
+/// identically.
+fn is_artifact_uri(uri: &Uri) -> bool {
+    let s = uri.as_str();
+    let path = s.split('?').next().unwrap_or(s);
+    path.ends_with(".nvir") || path.ends_with(".nvc")
+}
+
 fn occurrences(text: &str, word: &str) -> Vec<Range> {
     if word.is_empty() { return Vec::new(); }
     text.match_indices(word).filter(|(offset, _)| {
@@ -733,4 +752,28 @@ fn main() -> Result<()> {
     let result = server.run();
     io_threads.join().unwrap();
     result
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    fn uri(path: &str) -> Uri {
+        path.parse().unwrap()
+    }
+
+    #[test]
+    fn artifacts_route_quietly_but_stay_on_the_nv_path() {
+        assert!(is_artifact_uri(&uri("file:///pkg/app.nvir")));
+        assert!(is_artifact_uri(&uri("file:///pkg/app.nvc")));
+        // Query strings must not change routing.
+        assert!(is_artifact_uri(&uri("file:///pkg/app.nvc?v=2")));
+        // Everything else is untouched: manifests, locks, sources,
+        // and lookalike suffixes that must NOT match.
+        assert!(!is_artifact_uri(&uri("file:///p/nestpkg.nvpm")));
+        assert!(!is_artifact_uri(&uri("file:///p/nestpkg.lock")));
+        assert!(!is_artifact_uri(&uri("file:///p/main.nv")));
+        assert!(!is_artifact_uri(&uri("file:///p/nvc.rs")));
+        assert!(!is_artifact_uri(&uri("file:///p/anvir.nv")));
+    }
 }

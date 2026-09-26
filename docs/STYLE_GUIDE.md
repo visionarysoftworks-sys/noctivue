@@ -70,15 +70,24 @@ or `nv` (short) consistently rather than inventing per-editor variants.
 
 ```text
 Manifest:   nestpkg.nvpm   (custom Noctivue-flavored syntax, exact filename)
-Lockfile:   nestpkg.lock   (generated, checked in — no editor identity)
+Lockfile:   nestpkg.lock   (generated, checked in — read-only servicing, §6.7)
 Env file:   *.nv.env       (dotenv-compatible KEY=VALUE)
 ```
 
-Editors associate `nestpkg.nvpm` by exact filename (highlighting
-approximates the `noctivue` grammar until a dedicated injection grammar
-exists). `nestpkg.lock`, being generated, gets none of the `.nv`
-identity per §6.7. `*.nv.env` files end in `.env` so existing
-dotenv tooling highlights them with no Noctivue-specific work.
+Editors associate `nestpkg.nvpm` by exact filename. Manifest and
+lockfile are served by the dedicated `nestpkg` language — same
+extension and same language-server binary as `noctivue` (one
+official everything, TOOLCHAIN.md §1): the manifest gets
+diagnostics, hover, completions, outline, and canonical formatting,
+while the lockfile, being generated, gets a read-only posture
+(parse diagnostics; never hand-edited). Neither carries the `.nv`
+source identity (no `.nv` grammar, no source-view surfacing, §6.7).
+The registry index stores each published version's own manifest as
+`manifest.nvpm` — same schema, same parser, server-side data with
+no editor identity. `*.nv.env` files end in `.env` so existing
+dotenv tooling highlights them with no Noctivue-specific work; no
+Noctivue language is associated with them (and bare `*.env` is
+never claimed).
 
 ### 6.2 File Identity Requirement
 
@@ -144,10 +153,44 @@ definition contribution once the project is public).
 ### 6.7 Generated/Internal Files
 
 `.nv` represents human-written Noctivue source code specifically.
-Generated/internal artifacts (e.g., `.nvir` for a serialized NIR
-artifact, if it becomes useful) **MUST NOT** visually compete with
-`.nv` in editors/file browsers — e.g., they should not share the same
-icon or be surfaced in the same "source files" view by default.
+Generated/internal artifacts **MUST NOT** visually compete with
+`.nv` in editors/file browsers — in practice this is satisfied by
+posture (no diagnostics, never surfaced as source, never packed),
+not by a distinct icon: both artifact kinds below ride the
+`noctivue` language outright (same grammar, same file identity),
+with exactly one tweak — the language server publishes no
+diagnostics for them, since error squiggles on generated files
+would be noise.
+
+```text
+.nvc    build artifact — the compiled distribution output. This is
+        what ships instead of source: no plaintext logic to copy,
+        and something signatures/integrity can attach to. That
+        raises the bar (deterrence + no source leakage), it does
+        not make reverse engineering impossible — native code
+        disassembles and bytecode decompiles, so the docs MUST
+        never promise immunity. Think Flutter's `app.so`: one
+        compiled module per target, found in build outputs and
+        used at package/run time, never committed, never packed
+        into source tarballs. No producer in the tree yet
+        (`noct build` goes through the cargo piggyback and emits
+        platform executables); reserved for the direct backend.
+.nvir   portable interface + IR. Near term: human-inspectable IR
+        dumps and incremental-build cache (the `rustc --emit-mir`
+        role). Long term: the compiled module interface — public
+        signatures and types without implementations — that closed
+        `.nvc` distribution depends on: consumers cannot compile
+        against a closed package they cannot see into, so the
+        interface half is what makes the artifact half usable.
+        Also the portable execution format for the managed/VM tier,
+        against `.nvc`'s platform-native one.
+```
+
+Both extensions are gitignored; neither has a producer or consumer
+in the toolchain today. `nestpkg.lock` is the worked example of
+the read-only posture: generated, but checked in and
+human-readable, so it shares the `nestpkg` language read-only
+instead of going unserviced.
 
 ### 6.8 Documentation Placement
 

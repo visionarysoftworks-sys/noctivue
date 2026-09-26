@@ -217,3 +217,60 @@ state-machine, implementation detail". What Phase 2 *does* establish:
   written in user code today. Needs a String method-call story (M3
   string helpers, FFI.md §7), not just new builtins. Owned by whoever
   takes M3 strings.
+
+## 7. Serialization: `.nvir` dumps and interfaces (Proposed)
+
+`.nvir` is the portable interface + IR artifact (STYLE_GUIDE.md
+§6.7): text-first, human-inspectable, versioned. It grows in two
+stages; neither stage changes the §4 instruction set.
+
+### 7.1 Stage 1 — IR dumps (`noct build --emit-nir`)
+
+A dump is the existing canonical textual form (`Instr`'s `Display`,
+the §4 inventory's single source of truth) under a module header:
+
+```text
+nvir_version: 1
+package: <name> <version>
+imports: <resolved module paths, in order>
+types: <struct/enum definitions, in order>
+functions: <signature (params, return type, mode tag) then blocks>
+```
+
+Text because dumps are debugged and diffed (backend and
+differential work is the first consumer). A binary encoding arrives
+only on measured need — never by accident. Dumping a program that
+uses not-yet-lowerable builtins (§6: everything beyond `print`)
+fails loudly at lowering time, same discipline as the VM's
+`UNRESOLVED` errors; a partial dump is never silently emitted.
+
+### 7.2 Stage 2 — compiled module interface
+
+The interface is the public API only (exported functions with
+signatures + mode tags, exported types, doc comments) — the
+`.d.ts` / `.cmi` / `.swiftmodule` role: it lets consumers compile
+*against* a closed `.nvc` package they cannot see into. Each
+interface carries the content hash of the `.nvc` it was extracted
+with; a consumer whose interface hash disagrees with the artifact
+fails loudly instead of linking against drift. The interface
+records the generics strategy (§6, still Open) rather than solving
+it — whichever way monomorphization lands, the interface states
+which one it assumes.
+
+### 7.3 Non-conflation rule
+
+VM bytecode encoding is **not** NIR serialization
+(EXECUTION_GUIDE.md's decoupling warning applies verbatim): if a
+bytecode VM ever wants a compact form, that is a separate format
+decision with its own extension, not a second meaning loaded onto
+`.nvir`. Likewise `.nvir` is never the distribution artifact —
+that is `.nvc` (DEPLOYMENT.md §8); `.nvir` is the inspection
+format, the cache key, and the interface half of closed
+distribution.
+
+### 7.4 Editor posture
+
+`.nvir` rides the `noctivue` language (same grammar — IR text
+highlights usefully) with diagnostics silenced: IR is generated,
+so `.nv` analysis on it would be false positives
+(STYLE_GUIDE.md §6.7).

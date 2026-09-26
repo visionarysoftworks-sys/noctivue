@@ -1,8 +1,8 @@
 {
   "name": "noctivue",
   "displayName": "Noctivue",
-  "description": "Language support for Noctivue (.nv files) + nestpkg manifests (nestpkg.nvpm / nestpkg.lock) - syntax highlighting, LSP, Outline",
-  "version": "0.0.11",
+  "description": "Language support for Noctivue (.nv source, .nvir interface/IR, .nvc build artifacts) + nestpkg manifests (nestpkg.nvpm / nestpkg.lock) - syntax highlighting, LSP, Outline",
+  "version": "0.0.12",
   "publisher": "noctivue",
   "engines": {
     "vscode": "^1.80.0"
@@ -37,7 +37,9 @@
           "nv"
         ],
         "extensions": [
-          ".nv"
+          ".nv",
+          ".nvir",
+          ".nvc"
         ],
         "configuration": "./language-configuration.json",
         "icon": {
