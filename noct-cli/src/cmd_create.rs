@@ -14,6 +14,7 @@
 //! ```text
 //! <name>/
 //! ├── nestpkg.nvpm      (canonical `serialize_manifest` output)
+//! ├── .gitignore        (toolchain state, build output, `*.nv.env` secrets)
 //! ├── lib/
 //! │   └── main.nv       (valid, immediately runnable)
 //! ├── tests/
@@ -28,6 +29,11 @@
 //! established by `add`/`build`, never invented empty). No
 //! dependencies are added (`add` owns that). The standard library
 //! needs no manifest entry (it is not a third-party dependency).
+//!
+//! The `.gitignore` is part of the scaffold on purpose: `nestpkg.lock`
+//! and `vendor/` stay tracked (reproducibility and the offline
+//! hatch), while fetched bytes, build output, and `*.nv.env` secrets
+//! never should be (ADR-017, DEPLOYMENT.md §§1/4).
 //!
 //! Usage:
 //!   noct create <project-name> [--dir <path>] [--force]
@@ -146,6 +152,7 @@ fn scaffold(name: &str, root: &std::path::Path) -> Result<usize, String> {
     };
     let files: &[(&str, String)] = &[
         ("nestpkg.nvpm", serialize_manifest(&manifest)),
+        (".gitignore", gitignore_source()),
         ("lib/main.nv", main_source(name)),
         ("tests/main_test.nv", test_source(name)),
         ("docs/overview.md", docs_source(name)),
@@ -205,6 +212,46 @@ fn test_source(name: &str) -> String {
     format!(
         "//! Smoke test for {name} (run: noct run tests/main_test.nv).\n\nfn double(x: Int) -> Int:\n    x * 2\n\nmain():\n    assert(double(21) == 42, \"double works\"); println(\"tests ok\")\n"
     )
+}
+
+/// The scaffolded `.gitignore`.
+///
+/// Written on the first commit rather than deferred to a setup step,
+/// because getting it wrong is how secrets and vendored bytes reach a
+/// remote: ADR-017 committed to shipping this guidance with the env-file
+/// feature, and a template the author never has to think about is the
+/// only version that reliably exists.
+///
+/// What is deliberately NOT ignored:
+/// - `nestpkg.lock` — the checked-in lockfile is the reproducibility
+///   contract (TOOLCHAIN.md §3, DEPLOYMENT.md §1). Ignoring it would
+///   silently trade reproducible builds for a cleaner status line.
+/// - `vendor/` — the committed offline/air-gapped escape hatch
+///   (`noct vendor`), which is meant to be checked in on purpose.
+///
+/// Note for the eventual global-store move (ADR-026): `.noct/` stays
+/// ignored either way, because it is toolchain-owned derived state —
+/// only its *contents* change (build outputs stay in-tree, fetched
+/// bytes graduate to the global store).
+fn gitignore_source() -> String {
+    let mut out = String::new();
+    out.push_str("# Noctivue toolchain state: fetched dependency bytes, build\n");
+    out.push_str("# outputs, and resolver caches. All reproducible from\n");
+    out.push_str("# `nestpkg.nvpm` + `nestpkg.lock`; never commit it.\n");
+    out.push_str(".noct/\n");
+    out.push('\n');
+    out.push_str("# Build artifacts: native executables and compiled/IR output\n");
+    out.push_str("# (STYLE_GUIDE.md 6.7 — generated, not source).\n");
+    out.push_str("*.exe\n");
+    out.push_str("*.nvc\n");
+    out.push_str("*.nvir\n");
+    out.push('\n');
+    out.push_str("# Secrets: `*.nv.env` files hold local credentials. `noct run`\n");
+    out.push_str("# auto-loads them (process env always wins), so they belong in\n");
+    out.push_str("# your environment or a secret store — never in the repository\n");
+    out.push_str("# (ADR-017, DEPLOYMENT.md 4).\n");
+    out.push_str("*.nv.env\n");
+    out
 }
 
 fn docs_source(name: &str) -> String {

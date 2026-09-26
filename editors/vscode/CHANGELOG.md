@@ -3,6 +3,19 @@
 These notes describe the local development releases of the Noctivue
 VS Code extension.
 
+## 0.0.13
+
+### Added
+
+- `noctivue.excludeFetchedDependencies` (default on) keeps `.noct/`
+  out of the Explorer, search, and the file watcher, via
+  `configurationDefaults` plus a merge-not-replace sync at activation.
+  A dependency's sources are not the user's code: letting the server
+  analyze them produces diagnostics that read as the user's own, and
+  watching a multi-megabyte tree churns the workspace for nothing.
+  Unrelated user excludes are preserved; a read-only workspace logs a
+  warning instead of failing activation.
+
 ## 0.0.12
 
 ### Added

@@ -1,8 +1,8 @@
-{
+﻿{
   "name": "noctivue",
   "displayName": "Noctivue",
   "description": "Language support for Noctivue (.nv source, .nvir interface/IR, .nvc build artifacts) + nestpkg manifests (nestpkg.nvpm / nestpkg.lock) - syntax highlighting, LSP, Outline",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "publisher": "noctivue",
   "engines": {
     "vscode": "^1.80.0"
@@ -29,6 +29,19 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configurationDefaults": {
+      ".noct/**": {
+        "files.exclude": {
+          ".noct": true
+        },
+        "search.exclude": {
+          ".noct": true
+        },
+        "files.watcherExclude": {
+          ".noct/**": true
+        }
+      }
+    },
     "languages": [
       {
         "id": "noctivue",
@@ -110,6 +123,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable workspace-aware semantic tokens, symbols, references, rename, formatting, and signature help"
+        },
+        "noctivue.excludeFetchedDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep .noct/ (fetched dependency trees, caches, build output) out of the Explorer, search, and file watching, so dependency sources are not indexed or diagnosed as your own. Turn off to manage .noct excludes yourself"
         }
       }
     }

@@ -16,6 +16,20 @@ let client: LanguageClient;
 export function activate(context: vscode.ExtensionContext) {
   console.log('Noctivue extension activated');
 
+  // Keep `.noct/` (fetched dependency trees, resolver caches, build
+  // output) out of the Explorer, search, and the file watcher. Two
+  // reasons, both practical: a dependency's sources are not the user's
+  // code, so letting the server analyze and report on them produces
+  // diagnostics that look like the user's own; and watching a
+  // multi-megabyte tree churns the workspace for no benefit.
+  //
+  // `configurationDefaults` already ships these keys, so a fresh
+  // workspace is correct with zero code here. This block only makes the
+  // setting enforceable: turning it OFF removes the keys so the user can
+  // manage `.noct` visibility themselves, and turning it back ON
+  // restores them.
+  void applyFetchedDependencyExcludes();
+
   // Get server path from configuration or use bundled
   const config = vscode.workspace.getConfiguration('noctivue');
   const serverPath = config.get<string>('lsp.serverPath', '');
@@ -123,4 +137,60 @@ export function deactivate(): Thenable<void> | undefined {
     return undefined;
   }
   return client.stop();
+}
+
+/**
+ * Sync the `files.exclude` / `search.exclude` / `files.watcherExclude`
+ * entries for `.noct` with the `noctivue.excludeFetchedDependencies`
+ * setting.
+ *
+ * Each section is merged rather than replaced, so unrelated user excludes
+ * (node_modules, .venv, target) survive. Writes go to the Workspace
+ * target: they are derived from a setting, so they belong to the
+ * workspace rather than the user's global profile. Nothing is written
+ * when the effective value already matches, so a normal activation is a
+ * no-op and a user who hand-edited these keys is only overridden if they
+ * leave the setting enabled.
+ */
+async function applyFetchedDependencyExcludes(): Promise<void> {
+  const wanted = vscode.workspace
+    .getConfiguration('noctivue')
+    .get<boolean>('excludeFetchedDependencies', true);
+
+  const sections: Array<[string, string, Record<string, boolean>]> = [
+    // [configuration section, key within it, entries to enforce]
+    ['files', 'exclude', { '.noct': true }],
+    ['search', 'exclude', { '.noct': true }],
+    ['files', 'watcherExclude', { '.noct/**': true }]
+  ];
+
+  for (const [section, key, entries] of sections) {
+    const config = vscode.workspace.getConfiguration(section);
+    const current = config.get<Record<string, boolean>>(key, {});
+    const differs = Object.entries(entries).some(
+      ([pattern, value]) => Boolean(current?.[pattern]) !== value
+    );
+    const hasAny = Object.keys(entries).some((pattern) => pattern in (current ?? {}));
+    if (wanted && !differs) {
+      continue;
+    }
+    if (!wanted && !hasAny) {
+      continue;
+    }
+    const next = { ...(current ?? {}) };
+    for (const [pattern, value] of Object.entries(entries)) {
+      if (value) {
+        next[pattern] = true;
+      } else {
+        delete next[pattern];
+      }
+    }
+    try {
+      await config.update(key, next, vscode.ConfigurationTarget.Workspace);
+    } catch (error) {
+      // A read-only or untrusted workspace must not break activation;
+      // the exclusion is an optimization, not a correctness requirement.
+      console.warn(`Noctivue: could not update ${section}.${key}: ${error}`);
+    }
+  }
 }

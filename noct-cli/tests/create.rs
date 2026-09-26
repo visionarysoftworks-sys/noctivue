@@ -88,10 +88,61 @@ fn create_generates_canonical_tree_byte_exact() {
         read(&dir, "hello_world/README.md"),
         "# hello_world\n\nCreated with `noct create`.\n\nRun it:\n\n    noct run lib/main.nv\n"
     );
+    assert_eq!(
+        read(&dir, "hello_world/.gitignore"),
+        "# Noctivue toolchain state: fetched dependency bytes, build\n\
+         # outputs, and resolver caches. All reproducible from\n\
+         # `nestpkg.nvpm` + `nestpkg.lock`; never commit it.\n\
+         .noct/\n\
+         \n\
+         # Build artifacts: native executables and compiled/IR output\n\
+         # (STYLE_GUIDE.md 6.7 — generated, not source).\n\
+         *.exe\n\
+         *.nvc\n\
+         *.nvir\n\
+         \n\
+         # Secrets: `*.nv.env` files hold local credentials. `noct run`\n\
+         # auto-loads them (process env always wins), so they belong in\n\
+         # your environment or a secret store — never in the repository\n\
+         # (ADR-017, DEPLOYMENT.md 4).\n\
+         *.nv.env\n"
+    );
     // No lockfile (established by add/build, never invented empty),
     // no target/platform extras (minimal stays minimal).
     assert!(!root.join("nestpkg.lock").exists());
     assert!(!root.join("windows").exists());
+    cleanup(&dir);
+}
+
+/// The `.gitignore` must ignore the right things AND, just as
+/// importantly, must not ignore the two things that are supposed to be
+/// committed: the lockfile (the reproducibility contract, TOOLCHAIN.md
+/// §3 / DEPLOYMENT.md §1) and `vendor/` (the committed offline hatch).
+/// A `.gitignore` that over-reaches is its own kind of bug: it silently
+/// trades reproducible builds for a tidy status line.
+#[test]
+fn scaffolded_gitignore_keeps_the_lockfile_and_vendor_tracked() {
+    let dir = scratch_dir();
+    assert_eq!(run_cli_in(&dir, &["create", "demo_app"]).status.code(), Some(0));
+    let ignore = read(&dir, "demo_app/.gitignore");
+
+    let patterns: Vec<&str> = ignore
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    for expected in [".noct/", "*.exe", "*.nvc", "*.nvir", "*.nv.env"] {
+        assert!(
+            patterns.contains(&expected),
+            "`.gitignore` must ignore `{expected}`, got:\n{ignore}"
+        );
+    }
+    for must_track in ["nestpkg.lock", "vendor", "nestpkg.nvpm", "lib"] {
+        assert!(
+            !patterns.contains(&must_track),
+            "`.gitignore` must NOT ignore `{must_track}` (it is meant to be committed):\n{ignore}"
+        );
+    }
     cleanup(&dir);
 }
 
