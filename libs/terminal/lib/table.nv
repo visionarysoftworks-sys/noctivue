@@ -1,0 +1,140 @@
+//! terminal/table — box-drawing tables as a pure function.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`.
+//!
+//! Layout only: this module never emits a color of its own. Style a cell
+//! with `style_text` from `style`, and the width maths still lines up
+//! because column widths are measured with [`visible_width`], which
+//! ignores escape sequences.
+//!
+//! ```text
+//! print(render_table(
+//!     ["name", "qty"],
+//!     [["apple", "3"], ["fig", "12"]],
+//!     ["left", "right"]))
+//! ```
+//!
+//! Short rows are padded with empty cells rather than rejected, and a row
+//! longer than the header row simply grows the table: a table that
+//! truncates a caller's data is worse than one that is a column wider
+//! than expected.
+//!
+//! ## Why widths are recomputed per column
+//!
+//! Lists are fixed-size today (no push, no concat — NIR.md §6), so this
+//! module cannot build a widths list and passes the header/row data down
+//! instead, measuring each column where it is used. That is O(columns x
+//! rows) per line, which is irrelevant at CLI table sizes and keeps the
+//! package free of a data structure the language cannot express yet.
+
+import style::visible_width
+
+// ── internals (defined before use) ──────────────────────────────────────────
+/// INTERNAL — `""` when the alignment list is shorter than the column
+/// index, so alignment is optional per column and defaults to left.
+export fn align_at(aligns: [String], col: Int) -> String:
+    if col < aligns.length:
+        aligns[col]
+    else:
+        "left"
+
+/// INTERNAL — the `c`-th cell of a cell list, or `""` when the list is
+/// short (which is how a ragged row is tolerated).
+export fn cell_or_empty(cells: [String], c: Int) -> String:
+    if c < cells.length:
+        cells[c]
+    else:
+        ""
+
+/// INTERNAL — `n` spaces, for padding.
+export fn spaces(n: Int) -> String:
+    var out = ""; var i = 0
+    while i < n:
+        out = out + " "; i = i + 1
+    out
+
+/// INTERNAL — `text` padded to `width` visible columns per `align`
+/// (`"left"`, `"right"`, `"center"`; anything else is treated as left).
+/// Measures visible width, so a styled cell still pads correctly.
+export fn pad(text: String, width: Int, align: String) -> String:
+    let w: Int = visible_width(text); var left = 0; var right = 0
+    if width > w:
+        if align == "right":
+            left = width - w
+        else:
+            if align == "center":
+                left = (width - w) / 2; right = width - w - left
+            else:
+                right = width - w
+    spaces(left) + text + spaces(right)
+
+/// INTERNAL — the widest visible width across the header cell and every
+/// row's cell in `col`.
+export fn column_width(headers: [String], rows: [[String]], col: Int) -> Int:
+    var widest: Int = 0
+    if col < headers.length:
+        widest = visible_width(headers[col])
+    var r = 0
+    while r < rows.length:
+        let w: Int = visible_width(cell_or_empty(rows[r], col))
+        if w > widest:
+            widest = w
+        r = r + 1
+    widest
+
+/// INTERNAL — a horizontal rule: `left`, then per column `width + 2`
+/// segments joined by `mid`, closed by `right`.
+export fn rule(cols: Int, headers: [String], rows: [[String]], left: String, mid: String, right: String) -> String:
+    var out = left; var c = 0
+    while c < cols:
+        if c > 0:
+            out = out + mid
+        let w: Int = column_width(headers, rows, c); out = out + repeat_char("─", w + 2)
+        c = c + 1
+    out + right
+
+/// INTERNAL — `ch` repeated `n` times (the language has no string repeat).
+export fn repeat_char(ch: String, n: Int) -> String:
+    var out = ""; var i = 0
+    while i < n:
+        out = out + ch; i = i + 1
+    out
+
+/// INTERNAL — one `│ cell │ cell │` line.
+export fn render_line(cells: [String], cols: Int, headers: [String], rows: [[String]], aligns: [String]) -> String:
+    var out = "│"; var c = 0
+    while c < cols:
+        let w: Int = column_width(headers, rows, c)
+        out = out + " " + pad(cell_or_empty(cells, c), w, align_at(aligns, c)) + " │"; c = c + 1
+    out
+
+// ── public API ──────────────────────────────────────────────────────────────
+/// How many columns the table will draw: the header row's width, or the
+/// widest row when there is no header.
+export fn column_count(headers: [String], rows: [[String]]) -> Int:
+    var cols: Int = headers.length; var r = 0
+    while r < rows.length:
+        if rows[r].length > cols:
+            cols = rows[r].length
+        r = r + 1
+    cols
+
+/// Render a table.
+///
+/// `aligns` holds one of `"left"`, `"right"`, or `"center"` per column and
+/// may be shorter than the column count (the rest default to left). An
+/// empty table renders as `""` rather than an empty box, so a caller can
+/// print the result unconditionally. The result ends with a newline.
+export fn render_table(headers: [String], rows: [[String]], aligns: [String]) -> String:
+    let cols: Int = column_count(headers, rows)
+    if cols == 0:
+        ""
+    else:
+        var out = ""
+        if headers.length > 0:
+            out = out + render_line(headers, cols, headers, rows, aligns) + "\n"
+            out = out + rule(cols, headers, rows, "├", "┼", "┤") + "\n"
+        var r = 0
+        while r < rows.length:
+            out = out + render_line(rows[r], cols, headers, rows, aligns) + "\n"; r = r + 1
+        out + rule(cols, headers, rows, "└", "┴", "┘") + "\n"

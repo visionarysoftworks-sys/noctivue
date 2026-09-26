@@ -1,0 +1,208 @@
+//! Smoke test for terminal (run: noct run tests/terminal_test.nv,
+//! or project mode: noct test from libs/terminal).
+//!
+//! Every rendering assertion is byte-exact: an escape sequence off by one
+//! character, or a table border off by one dash, is exactly the kind of
+//! regression that is invisible in a screenshot and obvious in a diff.
+//!
+//! The types are item-imported (`import style::Style`) and annotated flat
+//! rather than qualified (`style.Style`) because a module-qualified type
+//! does not parse in a type position today — see MODULES.md §4.1 and the
+//! open item recorded with it. Module-qualified *calls* are fine and are
+//! used throughout.
+
+import style
+import table
+import spinner
+import progress
+import style::Style
+import style::Color
+import spinner::Spinner
+
+// ── style ───────────────────────────────────────────────────────────────────
+/// INTERNAL-ish helper for the non-ASCII checks below.
+fn bold_style() -> Style:
+    style.with_bold(style.plain())
+
+fn check_style_basics():
+    // A plain style must cost nothing: no escape, no reset, no bytes.
+    assert(style.sgr(style.plain()) == "", "plain sgr is empty")
+    assert(style.style_text("x", style.plain()) == "x", "plain style is identity")
+    let bold: Style = style.with_bold(style.plain())
+    assert(style.sgr(bold) == "\u{1b}[1m", "bold is SGR 1")
+    assert(style.style_text("x", bold) == "\u{1b}[1mx\u{1b}[0m", "bold wraps and resets")
+    assert(style.reset() == "\u{1b}[0m", "reset is SGR 0")
+
+fn check_style_attributes_compose():
+    let base: Style = style.plain(); let c: Color = style.color(255, 0, 0)
+    let danger: Style = style.with_fg(style.with_bold(base), c)
+    assert(style.sgr(danger) == "\u{1b}[1;38;2;255;0;0m", "attributes join with ';' in a fixed order")
+    // Builders do not mutate: the base is still plain afterwards.
+    assert(style.sgr(base) == "", "builders return a new style")
+    let all: Style = style.with_underline(style.with_italic(style.with_dim(style.with_bold(base))))
+    assert(style.sgr(all) == "\u{1b}[1;2;3;4m", "every attribute joins in order")
+    let on_bg: Style = style.with_bg(base, style.color(0, 0, 0))
+    assert(style.sgr(on_bg) == "\u{1b}[48;2;0;0;0m", "background is 48;2")
+
+fn check_color_clamping_and_names():
+    let c: Color = style.color(300, -5, 10); assert(c.r == 255, "high component clamps to 255")
+    assert(c.g == 0, "low component clamps to 0")
+    assert(c.b == 10, "in-range component is untouched")
+    match style.color_named("red"):
+        Some(named): assert(named.r == 205 && named.g == 49, "named red is canonical RGB")
+        None: assert(false, "red is a known name")
+    match style.color_named("chartreuse"):
+        Some(_): assert(false, "unknown name must not resolve")
+        None: assert(true, "unknown name is None")
+
+fn check_strip_and_width():
+    let bold: Style = with_bold(plain()); let painted: String = style.style_text("hi", bold)
+    assert(style.strip_ansi(painted) == "hi", "strip removes the sequence")
+    assert(style.visible_width(painted) == 2, "styled text measures as its plain width")
+    let fancy: Style = with_fg(bold, color(1, 2, 3))
+    assert(style.visible_width(style.style_text("abcd", fancy)) == 4, "longer sequences strip too")
+    // An escape that does not begin a CSI sequence loses the escape byte but
+    // keeps the character after it.
+    assert(style.strip_ansi("a\u{1b}Zb") == "aZb", "non-CSI escape keeps its successor")
+    assert(style.strip_ansi("plain") == "plain", "plain text is unchanged")
+
+fn check_non_ascii_is_safe_and_counted_in_characters():
+    // `String.length` is bytes (3) while `s[i]` indexes characters, so a
+    // naive `while i < s.length` walk panics here. These assertions are the
+    // regression guard for that: the walk must be budgeted by bytes.
+    let boxy: String = "│x│"
+    assert(boxy.length == 7, "length is bytes (3+1+3), not chars")
+    assert(style.visible_width(boxy) == 3, "box-drawing chars count as one column each")
+    assert(style.strip_ansi(boxy) == boxy, "non-ASCII survives stripping")
+    assert(style.visible_width(style.style_text(boxy, bold_style())) == 3, "styled non-ASCII width")
+    assert(style.strip_ansi(style.style_text(boxy, bold_style())) == boxy, "styled non-ASCII strips")
+    // Mixed content, including a multi-byte char next to an escape.
+    assert(style.visible_width("\u{1b}[1mhéllo wörld\u{1b}[0m") == 11, "accented text counts chars")
+    // Empty and escape-only inputs.
+    assert(style.visible_width("") == 0, "empty is zero columns")
+    assert(style.visible_width(style.style_text("", bold_style())) == 0, "empty styled is zero")
+
+// ── table ───────────────────────────────────────────────────────────────────
+fn check_table_layout_is_byte_exact():
+    let out: String = table.render_table(["name", "qty"], [["apple", "3"], ["fig", "12"]], ["left", "right"])
+    let expected: String = "│ name  │ qty │\n├───────┼─────┤\n│ apple │   3 │\n│ fig   │  12 │\n└───────┴─────┘\n"
+    assert(out == expected, "table bytes:\n{out}")
+
+fn check_table_alignment():
+    let centered: String = table.render_table(["h"], [["ab"]], ["center"])
+    // width 2 == content width, so centering is a no-op here; widen it.
+    // With an odd leftover column `pad` puts the extra space on the RIGHT
+    // (left = (width - w) / 2 floors), so "h" in a 2-wide column is "h ".
+    let wide: String = table.render_table(["h", "x"], [["ab", "y"]], ["center", "right"])
+    assert(
+    wide == "│ h  │ x │\n├────┼───┤\n│ ab │ y │\n└────┴───┘\n",
+    "center + right:\n{wide}",
+)
+    // Single column sized by the widest cell ("ab"), so the narrower
+    // header still pads — centered, with the leftover space on the right.
+    assert(
+    centered == "│ h  │\n├────┤\n│ ab │\n└────┘\n",
+    "header pads to the column:\n{centered}",
+)
+    // Alignment may be omitted per column: only column 0 is right-aligned,
+    // column 1 falls back to left (so its pad lands on the right).
+    let defaulted: String = table.render_table(["a", "b"], [["1", "22"]], ["right"])
+    assert(
+    defaulted == "│ a │ b  │\n├───┼────┤\n│ 1 │ 22 │\n└───┴────┘\n",
+    "default left:\n{defaulted}",
+)
+
+fn check_table_edges():
+    // No headers: rows then a bottom rule only.
+    let headless: String = table.render_table([], [["a", "bb"]], ["left", "left"])
+    assert(
+    headless == "│ a │ bb │\n└───┴────┘\n",
+    "headless table:\n{headless}",
+)
+    // A short row is padded, not rejected.
+    let ragged: String = table.render_table(["a", "b", "c"], [["1"]], ["left", "left", "left"])
+    assert(
+    ragged == "│ a │ b │ c │\n├───┼───┼───┤\n│ 1 │   │   │\n└───┴───┴───┘\n",
+    "ragged row:\n{ragged}",
+)
+    // A row wider than the header grows the table; the header's missing
+    // second cell renders as blank padding.
+    let wide_row: String = table.render_table(["a"], [["1", "22"]], ["left", "left"])
+    assert(
+    wide_row == "│ a │    │\n├───┼────┤\n│ 1 │ 22 │\n└───┴────┘\n",
+    "wide row:\n{wide_row}",
+)
+    // Nothing to draw: no empty box.
+    assert(table.render_table([], [], []) == "", "empty table is empty string")
+
+fn check_table_measures_styled_cells():
+    // The load-bearing claim: a colored cell still lines up, because widths
+    // are measured on the stripped text.
+    let bold: Style = style.with_bold(style.plain())
+    let painted: String = table.render_table(["x"], [[style.style_text("ab", bold)]], ["left"])
+    assert(
+    painted == "│ x  │\n├────┤\n│ \u{1b}[1mab\u{1b}[0m │\n└────┘\n",
+    "styled cell keeps column alignment:\n{painted}",
+)
+
+// ── spinner ─────────────────────────────────────────────────────────────────
+fn check_spinner_advances_and_wraps():
+    let frames: [String] = spinner.spinner_frames(); assert(frames.length == 10, "ten frames")
+    var s: Spinner = spinner.new_spinner(); assert(s.index == 0, "starts at frame zero")
+    assert(spinner.spinner_frame(s) == frames[0], "frame zero"); var i = 0
+    while i < 9:
+        s = spinner.spinner_tick(s); i = i + 1
+    assert(s.index == 9, "nine ticks reach the last frame"); s = spinner.spinner_tick(s)
+    assert(s.index == 0, "tenth tick wraps to zero")
+    // Out-of-range indexes draw the first frame rather than trapping.
+    assert(spinner.spinner_frame(Spinner { index: 99 }) == frames[0], "index past end wraps")
+    assert(spinner.spinner_frame(Spinner { index: 0 - 1 }) == frames[0], "negative index wraps")
+    assert(spinner.spinner_line(s, "working") == "{frames[0]} working", "frame plus label")
+
+// ── progress ────────────────────────────────────────────────────────────────
+fn check_bar_geometry():
+    match progress.render_bar(1, 4, 8):
+        Ok(bar): assert(bar == "[██░░░░░░]", "half full: {bar}")
+        Err(e): assert(false, "unexpected error: {e}")
+    match progress.render_bar(0, 4, 4):
+        Ok(bar): assert(bar == "[░░░░]", "empty: {bar}")
+        Err(e): assert(false, "unexpected error: {e}")
+    match progress.render_bar(4, 4, 4):
+        Ok(bar): assert(bar == "[████]", "full: {bar}")
+        Err(e): assert(false, "unexpected error: {e}")
+    // Over- and under-reporting clamp instead of overflowing or going negative.
+    match progress.render_bar(99, 4, 4):
+        Ok(bar): assert(bar == "[████]", "over-report clamps to full")
+        Err(e): assert(false, "unexpected error: {e}")
+    match progress.render_bar(0 - 1, 4, 4):
+        Ok(bar): assert(bar == "[░░░░]", "under-report clamps to empty")
+        Err(e): assert(false, "unexpected error: {e}")
+
+fn check_bar_rejects_impossible_input():
+    match progress.render_bar(1, 0, 8):
+        Ok(_): assert(false, "total 0 must be an error, not a full bar")
+        Err(e): assert(e == "progress: total must be greater than zero", "total error names the cause")
+    match progress.render_bar(1, 4, 0):
+        Ok(_): assert(false, "width 0 must be an error")
+        Err(e): assert(e == "progress: width must be greater than zero", "width error names the cause")
+    match progress.render_percent(1, 0):
+        Ok(_): assert(false, "percent of 0 must be an error")
+        Err(_): assert(true, "percent rejects total 0")
+
+fn check_percent():
+    match progress.render_percent(3, 10):
+        Ok(pct): assert(pct == "30%", "30 percent: {pct}")
+        Err(e): assert(false, "unexpected error: {e}")
+    match progress.render_percent(10, 10):
+        Ok(pct): assert(pct == "100%", "full percent")
+        Err(e): assert(false, "unexpected error: {e}")
+    match progress.render_bar_with_percent(3, 10, 10):
+        Ok(both): assert(both == "[███░░░░░░░] 30%", "bar with percent: {both}")
+        Err(e): assert(false, "unexpected error: {e}")
+
+fn main():
+    check_style_basics(); check_style_attributes_compose(); check_color_clamping_and_names()
+    check_strip_and_width(); check_non_ascii_is_safe_and_counted_in_characters()
+    check_table_layout_is_byte_exact(); check_table_alignment(); check_table_edges()
+    check_table_measures_styled_cells(); check_spinner_advances_and_wraps(); check_bar_geometry()
+    check_bar_rejects_impossible_input(); check_percent(); println("terminal tests passed")

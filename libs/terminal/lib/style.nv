@@ -1,0 +1,278 @@
+//! terminal/style — colors and text attributes as composable values.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `print`/`println`/`assert`, so it runs on `run` today
+//! and stays portable to `run-vm`/`build` later. Nothing here touches a
+//! TTY, reads the environment, or sleeps: a style is a value, and
+//! rendering it is a pure function of that value, which is what makes
+//! every function in this package testable in a plain assert test.
+//!
+//! Composing styles is by value, not by mutation:
+//!
+//! ```text
+//! let danger: Style = with_fg(with_bold(plain()), color(220, 40, 40))
+//! print(style_text("DANGER", danger))
+//! ```
+//!
+//! ## Why truecolor only
+//!
+//! Colors are RGB and always emitted as SGR `38;2;r;g;b` (and `48;2;…` for
+//! backgrounds). The 16-color SGR forms (`30`–`37`, `90`–`97`) are
+//! deliberately NOT emitted: which RGB a terminal shows for "color 1" is
+//! the *terminal's* policy, so honoring it is the terminal's job. Emitting
+//! explicit RGB states exactly what color was asked for and renders
+//! identically on every terminal that supports truecolor. `color_named`
+//! maps the 16 conventional names to their canonical RGB so callers can
+//! still ask for "red" without hardcoding components.
+
+/// An RGB color. Components are clamped to 0-255 by [`color`].
+export struct Color:
+    r: Int
+    g: Int
+    b: Int
+
+/// A text style. Composable by value: the `with_*` functions return a new
+/// style and never mutate their argument, so a base style can be shared
+/// and specialized freely.
+export struct Style:
+    fg: Option<Color>
+    bg: Option<Color>
+    bold: Bool
+    dim: Bool
+    italic: Bool
+    underline: Bool
+
+// ── internals (defined before use; `export`ed because the linker drops
+// private items of dependency files — see rule 1 in libs/README.md) ─────────
+/// INTERNAL — the ASCII escape byte. The lexer supports `\u{…}`, so
+/// emitting a real escape needs no builtin and no `to_int`.
+export fn esc() -> String:
+    "\u{1b}"
+
+/// INTERNAL — true when `c` is a CSI final byte (0x40-0x7E), which is
+/// where an ANSI control sequence ends. Compared lexicographically
+/// because the language has no `char -> Int`.
+export fn is_csi_final(c: String) -> Bool:
+    c >= "@" && c <= "~"
+
+/// INTERNAL — append one SGR parameter, inserting the `;` separator only
+/// when the list is non-empty (so a style with no attributes produces no
+/// trailing separator).
+export fn join_param(acc: String, code: String) -> String:
+    if acc == "":
+        code
+    else:
+        acc + ";" + code
+
+/// INTERNAL — clamp a color component into 0-255.
+export fn clamp_byte(v: Int) -> Int:
+    if v < 0:
+        0
+    else:
+        if v > 255:
+            255
+        else:
+            v
+
+/// INTERNAL — SGR parameters for a foreground color, or `""` for none.
+export fn fg_params(c: Option<Color>) -> String:
+    match c:
+        Some(col): "38;2;{col.r};{col.g};{col.b}"
+        None: ""
+
+/// INTERNAL — SGR parameters for a background color, or `""` for none.
+export fn bg_params(c: Option<Color>) -> String:
+    match c:
+        Some(col): "48;2;{col.r};{col.g};{col.b}"
+        None: ""
+
+// ── construction ────────────────────────────────────────────────────────────
+/// Build a `Style` from all six fields. Every `with_*` function funnels
+/// through here, so adding an attribute later touches one place.
+export fn make_style(fg: Option<Color>, bg: Option<Color>, bold: Bool, dim: Bool, italic: Bool, underline: Bool) -> Style:
+    Style { fg: fg, bg: bg, bold: bold, dim: dim, italic: italic, underline: underline }
+
+/// No attributes, no colors — renders as the identity (see
+/// [`style_text`]).
+export fn plain() -> Style:
+    make_style(None, None, false, false, false, false)
+
+/// An RGB color, with components clamped into 0-255.
+export fn color(r: Int, g: Int, b: Int) -> Color:
+    Color { r: clamp_byte(r), g: clamp_byte(g), b: clamp_byte(b) }
+
+/// The 16 conventional color names as canonical RGB, or `None` for an
+/// unknown name. Names are lowercase with underscores: `bright_black`,
+/// `bright_red`, and so on.
+export fn color_named(name: String) -> Option<Color>:
+    if name == "black":
+        Some(color(0, 0, 0))
+    else:
+        if name == "red":
+            Some(color(205, 49, 49))
+        else:
+            if name == "green":
+                Some(color(13, 188, 121))
+            else:
+                if name == "yellow":
+                    Some(color(229, 229, 16))
+                else:
+                    if name == "blue":
+                        Some(color(36, 114, 200))
+                    else:
+                        if name == "magenta":
+                            Some(color(188, 63, 188))
+                        else:
+                            if name == "cyan":
+                                Some(color(17, 168, 205))
+                            else:
+                                if name == "white":
+                                    Some(color(229, 229, 229))
+                                else:
+                                    if name == "bright_black":
+                                        Some(color(102, 102, 102))
+                                    else:
+                                        if name == "bright_red":
+                                            Some(color(241, 76, 76))
+                                        else:
+                                            if name == "bright_green":
+                                                Some(color(35, 209, 139))
+                                            else:
+                                                if name == "bright_yellow":
+                                                    Some(color(245, 245, 67))
+                                                else:
+                                                    if name == "bright_blue":
+                                                        Some(color(59, 142, 234))
+                                                    else:
+                                                        if name == "bright_magenta":
+                                                            Some(color(214, 112, 214))
+                                                        else:
+                                                            if name == "bright_cyan":
+                                                                Some(color(41, 184, 219))
+                                                            else:
+                                                                if name == "bright_white":
+                                                                    Some(color(255, 255, 255))
+                                                                else:
+                                                                    None
+
+/// `s` with a foreground color.
+export fn with_fg(s: Style, c: Color) -> Style:
+    make_style(Some(c), s.bg, s.bold, s.dim, s.italic, s.underline)
+
+/// `s` with a background color.
+export fn with_bg(s: Style, c: Color) -> Style:
+    make_style(s.fg, Some(c), s.bold, s.dim, s.italic, s.underline)
+
+/// `s` with bold.
+export fn with_bold(s: Style) -> Style:
+    make_style(s.fg, s.bg, true, s.dim, s.italic, s.underline)
+
+/// `s` with dim.
+export fn with_dim(s: Style) -> Style:
+    make_style(s.fg, s.bg, s.bold, true, s.italic, s.underline)
+
+/// `s` with italic.
+export fn with_italic(s: Style) -> Style:
+    make_style(s.fg, s.bg, s.bold, s.dim, true, s.underline)
+
+/// `s` with underline.
+export fn with_underline(s: Style) -> Style:
+    make_style(s.fg, s.bg, s.bold, s.dim, s.italic, true)
+
+// ── rendering ───────────────────────────────────────────────────────────────
+/// The SGR escape prefix for `s`, or `""` when `s` is [`plain`]. A style
+/// with no attributes emits nothing at all, so decorating with `plain()`
+/// costs zero bytes on the wire.
+export fn sgr(s: Style) -> String:
+    var params = ""
+    if s.bold:
+        params = join_param(params, "1")
+    if s.dim:
+        params = join_param(params, "2")
+    if s.italic:
+        params = join_param(params, "3")
+    if s.underline:
+        params = join_param(params, "4")
+    let f: String = fg_params(s.fg)
+    if f != "":
+        params = join_param(params, f)
+    let b: String = bg_params(s.bg)
+    if b != "":
+        params = join_param(params, b)
+    if params == "":
+        ""
+    else:
+        esc() + "[" + params + "m"
+
+/// The reset sequence (`ESC[0m`).
+export fn reset() -> String:
+    esc() + "[0m"
+
+/// `text` wrapped in `s`'s escape and a reset. Returns `text` unchanged
+/// when `s` is plain, so a caller can decorate unconditionally.
+export fn style_text(text: String, s: Style) -> String:
+    let prefix: String = sgr(s)
+    if prefix == "":
+        text
+    else:
+        prefix + text + reset()
+
+/// INTERNAL — the character at index `i`, as a string.
+///
+/// This package walks strings with an index, and the language's two string
+/// accessors disagree about what an index means: `String.length` is a BYTE
+/// length (UTF-8) while `s[i]` indexes CHARACTERS and panics when `i` is
+/// past the character count. So the obvious `while i < s.length` walk
+/// overruns and panics on any non-ASCII string. Every walk here therefore
+/// budgets the loop by bytes *consumed* (see [`strip_ansi`]) instead of by
+/// `length`, which keeps the char index inside the string and needs no
+/// stdlib helper — the stdlib's bounds-safe `string_char_at` is not
+/// reachable from a first-party library.
+export fn char_at(s: String, i: Int) -> String:
+    "{s[i]}"
+
+/// Remove ANSI control sequences from `s`, returning the plain text.
+///
+/// Handles CSI sequences (ESC `[` parameters final-byte 0x40-0x7E). An ESC
+/// that does NOT begin a CSI sequence is dropped and the character after it
+/// is kept, so text that merely contains an escape byte loses the escape
+/// rather than swallowing a real character.
+export fn strip_ansi(s: String) -> String:
+    let e: String = esc(); var out = ""; var i = 0
+    // Bytes still unconsumed. Decrementing by each character's byte width
+    // keeps this exactly aligned with the string's byte length, so `i` walks
+    // the character count and never indexes past the end.
+    var budget: Int = s.length
+    var in_escape = false; var after_esc = false
+    while budget > 0:
+        let c: String = char_at(s, i); budget = budget - c.length
+        if in_escape:
+            if is_csi_final(c):
+                in_escape = false
+        else:
+            if after_esc:
+                after_esc = false
+                if c == "[":
+                    in_escape = true
+                else:
+                    out = out + c
+            else:
+                if c == e:
+                    after_esc = true
+                else:
+                    out = out + c
+        i = i + 1
+    out
+
+/// How many columns `s` occupies once escape sequences are removed.
+///
+/// Counts CHARACTERS, not bytes (see [`char_at`]) and not terminal cells.
+/// Character counting is right for ASCII and for the box-drawing characters
+/// this package's tables use. It is wrong only for double-width text —
+/// CJK and emoji occupy two cells per character — and correcting that needs
+/// a wcwidth table, deliberately out of v0.1.0 (see `docs/overview.md`).
+export fn visible_width(s: String) -> Int:
+    let plain: String = strip_ansi(s); var n = 0; var i = 0; var budget: Int = plain.length
+    while budget > 0:
+        let c: String = char_at(plain, i); budget = budget - c.length; n = n + 1; i = i + 1
+    n

@@ -1,0 +1,60 @@
+//! terminal/spinner — a spinner as a value, advanced by the caller.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`.
+//!
+//! There is no loop and no sleeping here, and that is the design: `sleep`
+//! is `run`-only and a spinner that drives its own animation cannot be
+//! tested without a TTY and a clock. A spinner here is an index into a
+//! frame list; the caller decides when to advance it and when to redraw.
+//! That makes it a pure value, so a test can tick it ten times and assert
+//! the wraparound without waiting for anything.
+//!
+//! ```text
+//! var s: Spinner = new_spinner()
+//! print(style_text(spinner_frame(s), with_fg(plain(), color(120, 200, 255))))
+//! s = spinner_tick(s)
+//! ```
+//!
+//! `style_text` is the caller's to apply: this module never emits color.
+
+/// A spinner's position in the frame list. Construct with
+/// [`new_spinner`]; advance with [`spinner_tick`].
+export struct Spinner:
+    index: Int
+
+/// The default ten-frame braille spinner.
+export fn spinner_frames() -> [String]:
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+/// A spinner at frame zero.
+export fn new_spinner() -> Spinner:
+    Spinner { index: 0 }
+
+/// The next frame, wrapping at the end of the list. An index outside the
+/// list (including a negative one) wraps forward rather than trapping, so a
+/// deserialized or hand-built spinner still draws something.
+export fn spinner_tick(s: Spinner) -> Spinner:
+    let frames: [String] = spinner_frames(); var next: Int = s.index + 1
+    if next >= frames.length:
+        next = 0
+    if next < 0:
+        next = 0
+    Spinner { index: next }
+
+/// The current frame's character, or the first frame for an out-of-range
+/// index.
+export fn spinner_frame(s: Spinner) -> String:
+    let frames: [String] = spinner_frames()
+    if s.index < 0:
+        frames[0]
+    else:
+        if s.index >= frames.length:
+            frames[0]
+        else:
+            frames[s.index]
+
+/// A frame plus a label, e.g. `"⠙ working"`. The label is not padded: the
+/// caller owns its width (and it must use `visible_width` if the label
+/// carries color).
+export fn spinner_line(s: Spinner, label: String) -> String:
+    spinner_frame(s) + " " + label

@@ -1,0 +1,69 @@
+//! terminal/progress — progress bars and percentages as pure strings.
+//!
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`.
+//!
+//! Like `spinner`, a bar here is a value computed on demand: no loop, no
+//! clock, no TTY. The caller redraws when it wants to and decides whether
+//! to use `\r` (carriage return) to overwrite the line — this module emits
+//! no control characters other than the visible glyphs, so a caller can
+//! print a bar, a log line, or nothing at all.
+//!
+//! ```text
+//! match render_bar(3, 10, 20):
+//!     Ok(bar): print("\r{bar}")
+//!     Err(e): print(e)
+//! ```
+//!
+//! Invalid input is an `Err`, never a silently clamped bar: a progress bar
+//! that draws 100% for `total: 0` is a lie a caller cannot detect.
+
+/// INTERNAL — `ch` repeated `n` times (defined here rather than imported
+/// so this module has no dependencies at all).
+export fn repeat(ch: String, n: Int) -> String:
+    var out = ""; var i = 0
+    while i < n:
+        out = out + ch; i = i + 1
+    out
+
+/// INTERNAL — how many cells of `width` are filled for `done`/`total`,
+/// clamped into 0..width so an over-reported `done` cannot overflow the
+/// bar.
+export fn filled_cells(done: Int, total: Int, width: Int) -> Int:
+    let clamped_done: Int = if_neg(done); var filled: Int = clamped_done * width / total
+    if filled < 0:
+        filled = 0
+    if filled > width:
+        filled = width
+    filled
+
+/// INTERNAL — `done` clamped to 0..total.
+export fn if_neg(done: Int) -> Int:
+    if done < 0:
+        0
+    else:
+        done
+
+/// A bar of exactly `width` cells for `done` of `total`, e.g.
+/// `"[██████░░░░░░░░░░░░░░]"`. `Err` when `total <= 0` or `width <= 0`.
+export fn render_bar(done: Int, total: Int, width: Int) -> Result<String, String>:
+    if total <= 0:
+        Err("progress: total must be greater than zero")
+    else:
+        if width <= 0:
+            Err("progress: width must be greater than zero")
+        else:
+            let filled: Int = filled_cells(done, total, width)
+            Ok("[" + repeat("█", filled) + repeat("░", width - filled) + "]")
+
+/// `done` of `total` as a whole-number percentage string, e.g. `"30%"`.
+/// `Err` when `total <= 0`.
+export fn render_percent(done: Int, total: Int) -> Result<String, String>:
+    if total <= 0:
+        Err("progress: total must be greater than zero")
+    else:
+        let clamped: Int = if_neg(done); Ok("{clamped * 100 / total}%")
+
+/// A bar with its percentage appended, e.g. `"[██████░░░░░░░░░░░░░░] 30%"`.
+export fn render_bar_with_percent(done: Int, total: Int, width: Int) -> Result<String, String>:
+    let bar: String = render_bar(done, total, width)?
+    let pct: String = render_percent(done, total)?; Ok(bar + " " + pct)
