@@ -28,8 +28,28 @@
 
 use compiler::diagnostics::DiagnosticSink;
 use compiler::nir::instr::Instr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
+
+/// One task-spawning test at a time.
+///
+/// The M5 executor's live-task gauge is PROCESS-WIDE (the same gauge
+/// `tests/http_load.rs` reads) and `spawn_task` refuses loudly past
+/// `executor_worker_count()` — by design, so a program cannot
+/// oversubscribe. A test binary that runs its cases in parallel
+/// threads therefore shares one budget, and a binary with more
+/// concurrent spawners than the machine has workers would see
+/// `task spawn refused: worker pool exhausted` from whichever case
+/// lost the race. Serializing the spawning cases keeps each program
+/// inside the cap without touching the process environment (setting
+/// `NOCT_WORKERS` from a parallel test would be a data race on the
+/// environment for a limit that is not what these tests are about).
+fn spawn_slot() -> MutexGuard<'static, ()> {
+    static SLOT: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = SLOT.get_or_init(|| Mutex::new(()));
+    lock.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ── Harness (mirrors tests/async_test.rs) ─────────────────────────────────────
 
@@ -120,7 +140,7 @@ fn read(path: &PathBuf) -> String {
 /// A Windows path as a Noctivue string literal (`\` is not an escape in
 /// `.nv`, but the source is read verbatim — the doubled form is what
 /// the existing task tests use, and it round-trips through the lexer).
-fn path_literal(path: &PathBuf) -> String {
+fn path_literal(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\")
 }
 
@@ -140,6 +160,7 @@ fn path_literal(path: &PathBuf) -> String {
 /// here means the cancel did not shorten the wait, which is worth 5 s.
 #[test]
 fn cancel_stops_the_task_at_its_suspend_point() {
+    let _slot = spawn_slot();
     let marker = scratch("stops-marker");
     let out = scratch("stops-out");
     let module = check(
@@ -181,6 +202,7 @@ fn main():
 /// tombstone), never an error and never a rewritten value.
 #[test]
 fn cancel_after_completion_is_a_no_op() {
+    let _slot = spawn_slot();
     let out = scratch("after-out");
     let module = check(
         &format!(
@@ -206,6 +228,7 @@ fn main():
 /// live entry, sets the same flag, and returns.
 #[test]
 fn cancel_is_idempotent() {
+    let _slot = spawn_slot();
     let out = scratch("idempotent-out");
     let module = check(
         &format!(
@@ -246,6 +269,7 @@ fn cancel_of_an_unknown_handle_fails_loudly() {
 /// untouched. Handles are per-task values, not a shared switch.
 #[test]
 fn cancelling_one_task_leaves_its_sibling_alone() {
+    let _slot = spawn_slot();
     let out = scratch("sibling-out");
     let module = check(
         &format!(
@@ -280,6 +304,7 @@ fn main():
 /// pass as success.
 #[test]
 fn drain_reports_an_unawaited_cancellation() {
+    let _slot = spawn_slot();
     let module = check(
         r#"task bg():
     sleep_builtin(3000)
@@ -320,6 +345,7 @@ fn typeck_pins_the_handle_in_unit_out_signature() {
 /// what user code calls, and it composes with `await` the same way.
 #[test]
 fn nv_wrapper_task_cancel_stops_the_task() {
+    let _slot = spawn_slot();
     let out = scratch("wrapper-out");
     let mut source = read(&PathBuf::from("stdlib/concurrency/task.nv"));
     if !source.ends_with('\n') {
@@ -428,8 +454,10 @@ fn both_backends_refuse_the_same_way() {
         "both refuse",
     );
     let vm = run_vm(module);
-    assert_eq!(vm.is_err(), true, "VM must fail where the interpreter fails");
-    let vm_err = vm.unwrap_err();
+    let vm_err = match vm {
+        Ok(v) => panic!("VM must fail where the interpreter fails, got {v}"),
+        Err(e) => e,
+    };
     let shared = "cancel of unknown task handle 1";
     assert!(
         errors.iter().any(|e| e.contains(shared)),

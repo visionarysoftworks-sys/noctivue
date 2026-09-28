@@ -218,6 +218,19 @@ fn item_to_json(item: &Item) -> String {
             let trimmed = inner_json.trim_start();
             format!("    {{\"kind\": \"Export\", \"item\": {trimmed}}}")
         }
+        Item::ExportAll(_) => {
+            "    {\"kind\": \"ExportAll\"}".to_string()
+        }
+        Item::ExportAllExcept(e) => {
+            let excluded_json: Vec<String> = e.excluded.iter().map(|s| json_string(s)).collect();
+            format!("    {{\"kind\": \"ExportAllExcept\", \"excluded\": [{}]}}", excluded_json.join(","))
+        }
+        Item::ReExport(import_decl) => {
+            format!(
+                "    {{\"kind\": \"ReExport\", \"path\": {}}}",
+                json_string(&import_decl.path.join("::"))
+            )
+        }
         Item::Mod(m) => {
             format!(
                 "    {{\"kind\": \"Mod\", \"name\": {}, \"item_count\": {}}}",

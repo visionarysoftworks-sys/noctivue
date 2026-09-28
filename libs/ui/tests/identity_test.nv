@@ -1,0 +1,49 @@
+//! Identity-diff re-render test (UI-M1 gate criterion c).
+//!
+//! Run: `noct test` from `libs/ui`.
+//!
+//! A re-render compares two consecutive frames of the same arena by HEAP
+//! IDENTITY (`arc_id_builtin`), not by value. Two positions holding the
+//! very same heap object are unchanged — no value is loaded, no
+//! `Mutation` chain is built, nothing is copied — so a frame in which a
+//! few leaves of many changed costs comparisons, not deep walks. This
+//! test builds a small arena, renders a second frame that shares all but
+//! one node, and pins that the diff finds exactly the changed position.
+//! It asserts CORRECTNESS (the count), never wall-clock: milliseconds
+//! are machine-dependent, but "exactly one position differs" is not.
+//!
+//! The measured data behind the gate (recorded in IMPLEMENTATION_PLAN,
+//! not asserted here): the value-based `diff_widgets` costs 1,907 ms at
+//! 100 nodes and 7,665 ms at 250; the identity pre-pass costs ~500 ms at
+//! 1,000 nodes with one change. Same budget, different complexity class.
+
+import ownership::node_new
+import ownership::node_child
+import ownership::diff_identity_count
+import ownership::LiveNode
+import widget::text
+
+fn build_arena(n: Int) -> [Arc<LiveNode>]:
+    let root = node_new(text("R"))
+    let acc = []
+    acc = list_append_builtin(acc, root)
+    let i = 1
+    while i < n:
+        let k = node_child(root, text("K"))
+        acc = list_append_builtin(acc, k)
+        i = i + 1
+    return acc
+
+main():
+    let a = build_arena(50)
+    let root = a[0]
+    let b = []
+    let i = 0
+    while i < 49:
+        b = list_append_builtin(b, a[i])
+        i = i + 1
+    let fresh = node_child(root, text("CHANGED"))
+    b = list_append_builtin(b, fresh)
+    let changed = diff_identity_count(a, b)
+    assert(changed == 1, "expected exactly the changed leaf")
+    println("identity-diff-ok")

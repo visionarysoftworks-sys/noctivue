@@ -1,0 +1,75 @@
+//! UI Demo — Task Manager
+//!
+//! Demonstrates both import styles the `ui` package supports, because an
+//! application will want both:
+//!
+//! ```text
+//! import ui                     # every module, flat — one line
+//! import ui::widget             # one module, qualified — `widget.text(..)`
+//! import ui::state::Cell        # one type
+//! ```
+//!
+//! The bulk form is the ergonomic default; the narrower forms stay
+//! available for a file that only needs one or two things, and they are
+//! what keeps a ten-package file from needing a hundred import lines.
+//!
+//! Run it from this directory (the `ui` dependency is a `path:` dep, so the
+//! toolchain hands `../../libs` to the resolver as a package root):
+//!
+//! ```text
+//! noct run lib/main.nv
+//! ```
+
+import ui
+import ui::widget
+import ui::state::Cell
+
+/// The title bar. One child, so `container`/`padded` is the whole shape.
+managed fn header() -> Arc<Widget>:
+    container(padded(text("Task Manager"), no_edges()))
+
+/// The tasks themselves. A fixed literal: this language has no way to build
+/// a list at run time, which the library's own docs call out.
+managed fn task_list() -> Arc<Widget>:
+    column(
+    [
+    text("1. Learn Noctivue"),
+    text("2. Publish ui to the registry"),
+    text("3. Retire the command-line stdlib listing"),
+],
+)
+
+/// The filter bar. Three sibling buttons, reached through the module
+/// qualifier rather than flat, to show the second style.
+managed fn filter_bar() -> Arc<Widget>:
+    widget.row([widget.button("All"), widget.button("Active"), widget.button("Completed")])
+
+managed fn footer(total: Int) -> Arc<Widget>:
+    container(padded(row([text("{total} tasks total"), filter_bar()]), no_edges()))
+
+/// The whole tree, top to bottom.
+managed fn build() -> Arc<Widget>:
+    column(
+    [
+    header(),
+    container(padded(task_list(), no_edges())),
+    footer(3),
+    center(text("built with the Noctivue ui package")),
+],
+)
+
+/// One frame: draw the tree, report the cells, then show what an edit does.
+fn main():
+    let root: Arc<Widget> = build(); let filter: Cell = text_cell("all"); let total: Cell = count_cell(3)
+    let cells: [Cell] = [filter, total]; println("--- tree ---")
+    match describe_tree(root):
+        Ok(drawing): println(drawing)
+        Err(problem): println("malformed tree: {problem}")
+    println("--- cells ---"); println(status(root, cells)); println("--- frame ---")
+    match frame(root, cells):
+        Ok(report): println(report)
+        Err(problem): println("cannot draw: {problem}")
+    // An edit bumps a cell's version, so the next frame knows to rebuild.
+    let edited: Cell = set_count(total, 4)
+    let after: [Cell] = [filter, edited]; println("--- after adding a task ---")
+    println(status(root, after)); println("filter still clean: {!is_dirty(filter)}")

@@ -3,7 +3,7 @@
 //! Every expression and binding carries a resolved [`Ty`]; every identifier
 //! has been confirmed to exist in some scope (or `Ty::Error` has been emitted).
 
-use super::types::Ty;
+use super::types::{Mode, Ty};
 use crate::diagnostics::Span;
 
 // ── Module ────────────────────────────────────────────────────────────────────
@@ -60,6 +60,8 @@ pub struct Function {
     pub params: Vec<(String, Ty)>,
     pub return_ty: Ty,
     pub body: Vec<TypedStmt>,
+    /// Execution mode: Native (default) or Managed (ARC).
+    pub mode: Mode,
     /// True for `task` declarations (Phase 5/M4): calls spawn a
     /// concurrent task instead of executing inline. The interpreter
     /// honors it; NIR lowers tasks as plain functions (synchronous

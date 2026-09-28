@@ -723,7 +723,23 @@ pub fn require_package_current_in(
     };
     let manifest = manifest::parse_manifest(&manifest_text)
         .map_err(|e| format!("invalid manifest: {e}"))?;
-    let needs_lock = !manifest.dependencies.is_empty() || !manifest.dev_dependencies.is_empty();
+    // A lockfile exists to pin what a build will pull down: a registry
+    // version, a content hash, a signature. A project whose every
+    // dependency is a `path:` source has none of those - the tree is
+    // right there on disk and is already reviewed by being in the repo.
+    // Demanding a lock for it was pure ceremony: `noct run` refused a
+    // project that could not fail to be reproducible, and the only way
+    // out was `noct add <name>`, which re-adds a dependency you just
+    // hand-wrote in the manifest. So the requirement is scoped to the
+    // dependencies that actually need pinning. A path-only project that
+    // HAS a lock still gets it verified, below.
+    let all_deps = manifest
+        .dependencies
+        .iter()
+        .chain(&manifest.dev_dependencies);
+    let needs_lock = all_deps
+        .clone()
+        .any(|dep| !matches!(dep.source, manifest::Source::Path(_)));
     let lock_path = project.join("nestpkg.lock");
     let lock_text = match fs::read_to_string(&lock_path) {
         Ok(t) => t,

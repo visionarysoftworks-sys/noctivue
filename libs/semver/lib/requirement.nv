@@ -24,13 +24,33 @@
 //! does not land in scope the way a function name does, and item imports
 //! are used flat with no rewrite (MODULES.md §§2, 4.1) — which matters
 //! because a dependency file never gets the qualified-access rewrite.
+//!
+//! ## Requirements stay on the numeric core
+//!
+//! `version.nv` parses pre-release and build metadata (it is one step
+//! ahead of the P-003 v1 manifest grammar, on purpose and by
+//! documentation, not by accident). This module deliberately does NOT
+//! follow it into requirement matching:
+//!
+//! - matching uses `core_cmp`, the numeric core, which is what the
+//!   `nestpkg` crate's `req_satisfied` does — so for every spelling a
+//!   manifest can declare, a requirement means one thing in the
+//!   manifest and one thing here;
+//! - a requirement that carries a pre-release or build section is an
+//!   `Err` naming the manifest grammar, not a silently widened range.
+//!   A helper that accepted a semantics the manifest cannot express
+//!   would let a dependency mean something its own manifest cannot
+//!   say — the same argument that makes compound ranges an error;
+//! - when P-003 grows, one commit switches the `core_*` imports below
+//!   to `version_*` and the parity table in `tests/semver_test.nv`
+//!   grows the suffix rows. Not before.
 
 import version::Version
+import version::core_eq
+import version::core_gte
+import version::core_lt
 import version::parse_version
 import version::parse_version_from
-import version::version_eq
-import version::version_gte
-import version::version_lt
 import version::version_to_string
 
 /// A parsed requirement, constructed with the named-field literal form.
@@ -48,17 +68,31 @@ export struct Requirement:
 /// caller used a range rather than a bare caret/exact requirement.
 /// Detected before parsing so the error names the real problem instead
 /// of surfacing as a confusing version-parse failure on `>=1.0`.
+///
+/// The walk spends a BYTE budget rather than testing `i < s.length`:
+/// this runs BEFORE `version.nv`'s ASCII guard, on raw caller input,
+/// and `String.length` counts bytes while `s[i]` counts characters — so
+/// the naive form indexes past the end of a non-ASCII requirement.
 export fn has_range_syntax(s: String) -> Bool:
-    var i = 0; var found = false
-    while i < s.length:
-        let c = s[i]
+    var i = 0; var found = false; var budget = s.length
+    while budget > 0:
+        let c = s[i]; let cs = "{c}"
         if c == '>' || c == '<' || c == '^' || c == '~' || c == ',' || c == ' ':
             found = true
-        i = i + 1
+        budget = budget - cs.length; i = i + 1
     found
 
 // ── public API ──────────────────────────────────────────────────────────────
 /// Parse a requirement: `1.2.3` (caret) or `=1.2.3` (exact).
+///
+/// A pre-release or build section is an `Err` even though
+/// `version.nv` parses one: the manifest grammar cannot express it, so
+/// accepting it here would widen a range past what a `nestpkg.nvpm` may
+/// declare.
+///
+/// The version half is read with `parse_version_from` in both branches
+/// — one code path, and one less frame on the call chain, which the
+/// tree-walking interpreter's stack makes worth caring about.
 export fn parse_requirement(s: String) -> Result<Requirement, String>:
     if s.length == 0:
         Err("empty requirement")
@@ -66,11 +100,14 @@ export fn parse_requirement(s: String) -> Result<Requirement, String>:
         if has_range_syntax(s):
             Err("compound ranges are not supported (use `1.2.3` for caret or `=1.2.3` for exact): {s}")
         else:
-            if s[0] == '=':
-                let pinned = parse_version_from(s, 1)?
-                Ok(Requirement { base: pinned, exact: true })
+            let exact = s[0] == '='; var start = 0
+            if exact:
+                start = 1
+            let base = parse_version_from(s, start)?
+            if base.pre.length > 0 || base.build.length > 0:
+                Err("pre-release and build metadata are not expressible in a manifest requirement (P-003 v1): {s}")
             else:
-                let base = parse_version(s)?; Ok(Requirement { base: base, exact: false })
+                Ok(Requirement { base: base, exact: exact })
 
 /// Canonical rendering of a requirement.
 export fn requirement_to_string(r: Requirement) -> String:
@@ -80,27 +117,33 @@ export fn requirement_to_string(r: Requirement) -> String:
         version_to_string(r.base)
 
 /// Does `v` satisfy `r`?
+///
+/// Comparison is on the numeric core (`core_*`), matching the
+/// `nestpkg` crate's `req_satisfied` field-for-field, so `1.2.3-rc.1`
+/// and `1.2.3` are the same version here exactly as they are there.
+/// That is invisible to any manifest, which cannot declare the former.
 export fn req_satisfied(r: Requirement, v: Version) -> Bool:
     if r.exact:
-        version_eq(r.base, v)
+        core_eq(r.base, v)
     else:
         caret_allows(r.base, v)
 
 /// The upper bound a caret requirement admits, as a comparable version.
 /// A `0.x` base caps the minor, a `0.0.x` base caps the patch, and
-/// anything else caps the major.
+/// anything else caps the major. The bound is a bare core version, so
+/// it carries no pre-release and no build metadata.
 export fn caret_upper_bound(r: Version) -> Version:
     if r.major > 0:
-        Version { major: r.major + 1, minor: 0, patch: 0 }
+        Version { major: r.major + 1, minor: 0, patch: 0, pre: "", build: "" }
     else:
         if r.minor > 0:
-            Version { major: 0, minor: r.minor + 1, patch: 0 }
+            Version { major: 0, minor: r.minor + 1, patch: 0, pre: "", build: "" }
         else:
-            Version { major: 0, minor: 0, patch: r.patch + 1 }
+            Version { major: 0, minor: 0, patch: r.patch + 1, pre: "", build: "" }
 
 /// True when `v` falls in `base .. upper` for the caret bound.
 export fn caret_allows(base: Version, v: Version) -> Bool:
-    version_gte(v, base) && version_lt(v, caret_upper_bound(base))
+    core_gte(v, base) && core_lt(v, caret_upper_bound(base))
 
 /// Convenience: parse `s` as a requirement and test `version_s` against
 /// it in one call — the shape most callers actually want.

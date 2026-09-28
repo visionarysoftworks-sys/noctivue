@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Noctivue Language Server Protocol implementation"
+description = "noctivue-analyzer: Noctivue Language Server Protocol implementation (binary: noctivue-lsp for compat)"
 
 [dependencies]
 compiler = { path = "../compiler" }

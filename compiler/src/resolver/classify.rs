@@ -232,6 +232,7 @@ fn bare_to_function(decl: &BareDecl) -> FunctionDecl {
         return_ty: decl.return_ty.clone(),
         body: FunctionBody::Block(decl.body.clone()),
         span: decl.span.clone(),
+        is_managed: decl.is_managed,
     }
 }
 

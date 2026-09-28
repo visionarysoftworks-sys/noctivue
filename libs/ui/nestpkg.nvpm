@@ -1,0 +1,6 @@
+package:
+    name: ui
+    version: 0.1.0
+    description: Flutter-style declarative widget framework for Noctivue
+    license: MIT
+    x-repository: https://github.com/visionarysoftworks-sys/noctivue

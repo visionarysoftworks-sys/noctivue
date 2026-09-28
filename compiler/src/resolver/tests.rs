@@ -68,7 +68,10 @@ fn item_name(item: &Item) -> &str {
         Item::Impl(_) => "<impl>",
         Item::Const(c) => &c.name,
         Item::Export(_) => "<export>",
+        Item::ReExport(_) => "<re-export>",
         Item::Mod(m) => &m.name,
+        Item::ExportAll(_) => "<export-all>",
+        Item::ExportAllExcept(_) => "<export-all-except>",
     }
 }
 

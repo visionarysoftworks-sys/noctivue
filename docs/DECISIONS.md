@@ -835,6 +835,22 @@ strings; (d) `http_server_serve_loop` goes readiness-driven behind
 an unchanged route-table surface. No syntax, manifest, lockfile,
 registry, or other error-string change.
 
+**Amendment 2026-09-26 (owner decision): the worker cap stays, and
+spawn refusal joins the explicitly-breaking list.** Item (e) is added:
+(e) `spawn_task` **refuses** past `executor_worker_count()` (default
+`available_parallelism` capped at 64, `NOCT_WORKERS` override, loud on
+a malformed value) with `task spawn refused: worker pool exhausted`.
+A program that spawns more concurrent tasks than the machine has
+workers therefore fails loudly where it previously ran. This is an
+error-string change and is scoped as one, narrowly: the *only* new
+error string in the migration is the spawn refusal, and it fires only
+past the cap. The alternative — reverting the cap to preserve the
+promise literally — was considered and rejected, because the cap is
+what bounds the migration this ADR exists to perform. Recorded rather
+than left as a silent contradiction between the cap and the
+source/value-compatibility promise (see "Contradicts this ADR today"
+below, item (1), now resolved).
+
 **Acceptance criteria.** AC1 extended harness (16×128 floor +
 timeout leg + hedge-with-proven-join leg; latency
 recorded-not-thresholded; PHASE5 triple-zero: pool delta zero,
@@ -892,39 +908,69 @@ deferred. Recording it here so the record is not silent:
   count, loud `Err` when full, 30 s watchdog). Gauges
   (`live_executor_tasks`, `peak_executor_tasks`, `bridge_depth`,
   `bridge_peak`) are `pub` with no test coverage.
-- **Partially runs:** cooperative cancellation. The per-task
+- **Runs:** cooperative cancellation. The per-task
   `AtomicBool` flag, the `sleep` cancel checkpoint (including
-  `sleep(0)` → `yield_now` + checkpoint), the pinned
+  `sleep(0)`  `yield_now` + checkpoint), the pinned
   `task {id} cancelled` value, and the drain's cancelled-report path
-  are all live — but the only writer of the flag is
-  `Interpreter::task_cancel`, a Rust-only `pub fn` with no
-  `.nv`-callable builtin, no typeck signature, no VM arm, and no
-  stdlib wrapper. No user program can set a flag, so the checkpoint
-  and the cancelled value are unreachable in practice.
-- **Orphaned (no users, no tests):** `TicklessTimerHeap` and
-  `timer_now_ms`. The heap is a complete, correct, FIFO-ordered
-  tickless structure with an injectable clock — and nothing schedules
-  into it. `timer_now_ms` is a process-anchored `Instant` millis clock
-  that the heap was meant to be ordered on.
-- **Contradicts this ADR today:** (1) the migration contract's
+  are all live, and the flag is now reachable from a user program:
+  `task_cancel_builtin(id)` is a real builtin (typeck
+  `(Int) -> Unit`, lowered to `Instr::TaskCancel`, implemented in the
+  interpreter, and wrapped as `task::task_cancel` in
+  `stdlib/concurrency/task.nv`). `await` on a cancelled task yields the
+  same `Err(task {id} cancelled)` a failing body would, so `?`
+  composes it unchanged. Cancelling a task that already finished is a
+  no-op success; cancelling an unknown handle is a loud `E1002`.
+  `TicklessTimerHeap` remains orphaned, and is deferred to Wave 2 by
+  owner decision (below).
+- **Deferred to Wave 2 by decision (2026-09-26), orphaned until then (no
+  users, no tests):** `TicklessTimerHeap` and `timer_now_ms`. The heap
+  is a complete, correct, FIFO-ordered tickless structure with an
+  injectable clock - and nothing schedules into it. `timer_now_ms` is a
+  process-anchored `Instant` millis clock that the heap was meant to be
+  ordered on. The owner was asked to choose "surface or delete" and
+  chose **defer**, so this is now a committed Wave 2 *entry* item
+  rather than unowned debt: Wave 2 may not start until the heap is
+  surfaced (with the readiness thread) or deleted. Surfacing it is not
+  a small job - the honest version needs the single readiness thread
+  that acts on a popped id, i.e. this ADR's "Timers" bullet, still
+  Proposed. The shortcut of routing the M4 blocking `sleep_builtin`
+  through the heap was rejected: it breaks the at-least timing contract
+  the deadline-based poll deliberately provides, and adds
+  process-global mutable timer state, which ADR-020/021 forbid. A
+  `timer_schedule`-shaped builtin whose returned ids nothing consumes
+  is exactly the silent no-op the invariants ban.
+- **Contradicts this ADR today:** (1) ~~the migration contract's
   "existing `task`/`await` programs are SOURCE- and VALUE-compatible"
-  does not cover a spawn *refusal* past the cap, which is a new
-  observable loud failure and is not in the explicitly-breaking list;
-  (2) `docs/PHASE5_PRODUCTION.md` §6 and `docs/CONCURRENCY.md` §4
-  describe the cap/bridge as M5 design, not as shipped behavior;
+  does not cover a spawn *refusal* past the cap~~ — **RESOLVED
+  2026-09-26:** the owner kept the cap and added the refusal to the
+  explicitly-breaking list as item (e). The contract is amended, not
+  the cap;
+  (2) ~~`docs/PHASE5_PRODUCTION.md` §6 and `docs/CONCURRENCY.md` §4
+  describe the cap/bridge as M5 design, not as shipped behavior~~ —
+  **RESOLVED 2026-09-26:** both now carry an explicit shipped-vs-Wave-2
+  split;
   (3) `sleep_builtin` gained cancel polling, which is an M4 timing
   path — the audit fixed a regression there (a naive elapsed counter
   accumulated the OS timer's overshoot and broke
-  `tests/async_test.rs::tasks_overlap_in_wall_clock`), but the
-  cancellation *mechanism* is still unreachable, so the risk it added
+  `tests/async_test.rs::tasks_overlap_in_wall_clock`), and the
+  cancellation *mechanism* is reachable but not native-parity yet
+  (the VM spawns no tasks and Cranelift refuses the instruction
+  loudly), so the risk it added
   bought nothing.
-- **Owner action required before Wave 2 starts:** either finish the
-  surface (a `task_cancel_builtin` + typeck + VM arm + `.nv` wrapper,
-  per the mirror rule) or delete the unreachable half; and reconcile
-  PHASE5_PRODUCTION.md §6 / CONCURRENCY.md §4 with what actually runs.
-  This audit did not add or remove executor code — that is Wave 2
-  implementation, and the decision to keep or revert the cap is the
-  ADR owner's, not the auditor's.
+- **Wave 2 entry checklist (was "owner action required"; the heap
+   choice is now made — 2026-09-26):**
+   1. ~~Cancellation surface~~ — **DONE** (`task_cancel_builtin` +
+      typeck + VM arm + `.nv` wrapper, per the mirror rule; see the
+      "Runs" entry above).
+   2. ~~Reconcile the docs with what runs~~ — **DONE**;
+      `PHASE5_PRODUCTION.md` §6 and `CONCURRENCY.md` §4 now carry an
+      explicit shipped-vs-Wave-2 split (see below).
+   3. `TicklessTimerHeap` — **decided: defer.** Carried into Wave 2 as
+      a committed entry item (surfaced with the readiness thread, or
+      deleted), not as silent debt.
+   4. **Spawn-refusal-past-worker-cap resolved:** **Added to explicitly-breaking list.** The migration contract's "existing `task`/`await` programs are SOURCE- and VALUE-compatible" is amended: the worker-cap spawn refusal (`task spawn refused: worker pool exhausted`) is a new observable loud failure that M4 programs did not have. This is now documented in the explicitly-breaking list. The cap stays (default `available_parallelism` capped at 64, `NOCT_WORKERS` override). The explicitly-breaking list in this ADR is updated to include this item.
+
+**Doc reconciliation (2026-09-26):** `PHASE5_PRODUCTION.md` §6 and `CONCURRENCY.md` §4 updated to carry an explicit "shipped vs. Wave 2" split. They now describe the cap/bridge as *shipped behavior* (not "M5 design") with a note that Wave 2 will add the readiness thread and timer heap. The `TicklessTimerHeap` remains orphaned (no users, no tests) and is carried into Wave 2 as a committed entry item.
 
 ### ADR-025 — `.nvir` / `.nvc` Artifact Extensions
 
@@ -1335,3 +1381,26 @@ Confirmed — that remains the highest-risk open question for Phase 1.
 
 None of the above should be treated as decided by omission elsewhere in
 this documentation set.
+
+---
+
+### ADR-026 — Panic/Unwind Semantics for Native Mode
+
+**Status:** Accepted (2026-09-26).
+
+**Problem:** ERROR_HANDLING.md §4 and NIR.md §6 left native-mode panic behavior as "Deferred" — specifically, whether a panic aborts the process or unwinds to a catch boundary. This became load-bearing once Phase 6 shipped real I/O (Postgres, TLS) with FFI boundaries that could panic.
+
+**Decision:**
+- **Native mode: abort.** A panic in native mode calls `std::process::abort` (or platform equivalent). No unwinding, no cross-FFI exception propagation, no hidden control flow. This matches the "no hidden control flow" principle (Principle 9) and avoids the complexity of unwinding across FFI boundaries.
+- **Managed mode: catch at boundary.** The UI runtime's event loop catches panics and surfaces them as structured errors (e.g., `task {id} panicked`). This is an implementation detail of the managed runtime, not a language feature.
+
+**Rationale:** Unwinding across FFI (especially C/Rust/C++ boundaries) is fragile and platform-dependent. Aborting is deterministic, simple, and forces the programmer to use `Result` for recoverable errors. The "unwind to a defined boundary" option was considered but rejected because it implies a runtime mechanism that doesn't exist in native mode and adds complexity without clear benefit.
+
+**Impact:** 
+- `panic` builtin in native mode → process abort.
+- NIR `Panic` instruction lowers to abort in Cranelift.
+- `panic`/`assert`/`to_int` builtins in NIR VM → trap (abort).
+- No try/catch syntax added to the language.
+- ERROR_HANDLING.md §4 updated to reflect this decision.
+
+**Related:** NIR.md §6 (panic/assert not representable in NIR yet — now explicitly lowers to abort), FFI.md §6 (FFI boundary discipline: no exceptions crossing).

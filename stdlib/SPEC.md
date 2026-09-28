@@ -518,6 +518,40 @@ fn rng_next_between(r: Rng, lo: Int, hi: Int) -> Int
   level, and cross-backend replay), plus the §7 per-file
   `diagnostics`/`lint`/`fmt --check` gates.
 
+### 5.16 `fs/directory.nv` — RUNNABLE
+
+One single-purpose module promoted from `reserved`. It wraps exactly one
+builtin and exposes directory enumeration without growing caller-side
+collections:
+
+```nv
+DirEntry:                                  // fs/directory.nv
+    name: String
+    is_dir: Bool
+    is_file: Bool
+fn dir_list(path: String) -> Result<[DirEntry], String>
+fn dir_name(entry: DirEntry) -> String
+fn dir_is_directory(entry: DirEntry) -> Bool
+fn dir_is_file(entry: DirEntry) -> Bool
+fn dir_is_other(entry: DirEntry) -> Bool
+```
+
+- `fs_list_dir_builtin(path) -> Result<[DirEntry], String>` returns the
+  immediate children as basename-sorted structs. Names are basenames;
+  callers use `fs/path::path_join` before opening entries.
+- Sorting uses UTF-8 byte order so listings are stable across filesystems
+  and processes. Hidden entries are included.
+- Directory symlinks are classified by their targets. An entry that cannot
+  be classified after listing is neither a file nor a directory.
+- The result is point-in-time only. A missing path, inaccessible path,
+  non-directory path, or non-UTF-8 child name is an `Err`.
+- Interpreter and NIR VM parity is clean (`Instr::FsListDir`);
+  `noct build` still fails loud on it (Cranelift `is_supported`).
+- Gates: interpreter `interp_fs_list_dir_*`, compiler
+  `nir::vm_hostio_tests::fs_list_dir_*`, CLI `parity_fs_list_dir_names`
+  and `native_build::hostio_nofs_listdir`, plus the §7 per-file
+  `diagnostics`/`lint`/`fmt --check` gates.
+
 ## 6. File states (normative)
 
 Every file under `stdlib/` MUST be in exactly one state:
@@ -602,7 +636,7 @@ reserved (M4/M5, untouched by this spec): concurrency/{atomic,channel,mutex,sync
                (`task.nv` promoted RUNNABLE by §5.12 — the rest need M5
                sync primitives), net/{address,socket,tcp,udp}.nv
                (`http/*` promoted RUNNABLE by §5.13 — raw sockets need
-               an ownership story first), fs/*, io/*,
+               an ownership story first), fs/permissions.nv, io/*,
               net/* (+http/*), env/*, process/*, time/*, numbers/*,
               encoding/*, result/result.nv extras beyond §5.5
               (`time/instant.nv` + `numbers/random.nv` promoted RUNNABLE

@@ -41,14 +41,8 @@ failures** — a violated precondition, an index out of bounds, an
 assertion failure — situations where continuing execution would be
 unsound, not situations an API caller is expected to handle.
 
-- A panic in **native mode** aborts the current process (or, where the
-  platform/runtime configuration allows, unwinds to a defined boundary —
-  exact unwind-vs-abort configurability is **Deferred**).
-- A panic in **managed mode** (e.g., inside a UI event handler)
-  **SHOULD** be caught at a well-defined boundary (e.g., the framework's
-  event dispatch loop) and surfaced as a developer-visible error rather
-  than crashing the whole application — exact boundary semantics are
-  **Deferred** to UI_SPEC.md once the managed runtime is prototyped.
+- A panic in **native mode** **aborts the process** (via `std::process::abort` or equivalent). Unwinding is NOT supported in native mode — this avoids the complexity of cross-FFI unwinding, ensures deterministic behavior, and matches the "no hidden control flow" principle. The exact abort mechanism is platform-dependent but always terminates the process.
+- A panic in **managed mode** (e.g., inside a UI event handler) **SHOULD** be caught at a well-defined boundary (e.g., the framework's event dispatch loop) and surfaced as a developer-visible error rather than crashing the whole application — exact boundary semantics are defined by the UI runtime (UI-SPEC.md).
 
 ## 5. `Option<T>` vs `Result<T, E>`
 

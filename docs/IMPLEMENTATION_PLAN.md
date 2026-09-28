@@ -319,12 +319,152 @@ developer using only public tooling.
   TOOLCHAIN.md §3. Still open in this phase: the deployment-pipeline,
   audit/signing-enforcement and second-team criteria above.
 
-## 9. Phase 7 — M6: Multi-Target Compilation & Interop Expansion
+## 9. Phase 6.5 — Foundation Reconciliation (Gap Closure Between M5 and M6)
 
-**Preconditions:** Phase 6/M5 exit criteria met for the backend-app
-side; UI-M1 gate criteria (UI_SPEC.md §4) met or the FFI-wrapped-
-toolkit fallback in use for the UI side — this phase's WASM/mobile
-work assumes *a* UI story exists, not necessarily the in-house one.
+**Preconditions:** Phase 6/M5 content-store exit criterion met (2026-09-26). This phase exists because Phase 7's stated preconditions ("Phase 6/M5 exit criteria met," "UI-M1 gate criteria met") are not satisfiable with the following items still open — these are not "cleanup," they are blocking work.
+
+**Work:**
+
+1. **M5 executor (ADR-024) — resolve implementation vs. proposal gap**
+   - *Current state (2026-09-26 audit, DECISIONS.md:881–938):* ADR-024 is still **Proposed**. A partial runtime-side core exists in `interp/src/lib.rs` but contradicts the ADR's migration contract.
+   - *Spawn-refusal-past-worker-cap:* **Implemented and reachable** — `interp/src/lib.rs:1129–1144` refuses spawns loudly past `executor_worker_count()` (default `available_parallelism` capped at 64, `NOCT_WORKERS` override). This is a new observable loud failure **not listed in ADR-024's explicitly-breaking list** (DECISIONS.md:913–916) — the migration contract claims source/value compatibility but the cap refusal breaks it.
+   - *Required:* ~~Either (a) add the spawn-refusal to the explicitly-breaking list and amend the migration contract, or (b) revert the cap~~ — **DECIDED (a), 2026-09-26.** The owner kept the cap; ADR-024's explicitly-breaking list now has item (e) for the spawn refusal, and the "Contradicts this ADR today" item (1) is marked resolved. No code change.
+   - *TicklessTimerHeap:* **Deferred to Wave 2 by owner decision (2026-09-26)** — complete implementation in `interp/src/lib.rs` but no users, no tests, nothing schedules into it (DECISIONS.md "Implementation status"). The owner was asked to "surface or delete" and chose defer, which converts this from unowned debt into a **Wave 2 entry blocker**: Wave 2 may not start until the heap is surfaced (with the readiness thread) or deleted.
+   - *VM/native lowering:* **Not started** — `run-vm` and Cranelift refuse executor-dependent builtins loudly (`unknown-runtime-symbol`); ADR-024 AC4 requires differential suspend/resume/phi coverage before native lowering begins.
+   - *Owner action required:* ~~Reconcile `PHASE5_PRODUCTION.md §6` and `CONCURRENCY.md §4` with what actually runs~~ — **DONE (2026-09-26).** Both now carry an explicit *shipped vs. Wave-2* split: the worker cap, bounded bridge, gauges, and reachable cancellation are recorded as observable runtime behavior, and the work-stealing pool, readiness thread, timer heap, and all VM/native task support are recorded as NOT shipped. ADR-024's "Implementation status" was amended to match rather than silently rewritten.
+
+2. **`task_cancel_builtin` — confirm reachability from `.nv`**
+   - *Current state:* **Reachable.** `task_cancel_builtin` exists as a real builtin: typeck signature `(Int) -> Unit` at `compiler/src/typeck/mod.rs:113`, lowered to `Instr::TaskCancel` at `compiler/src/nir/lowering.rs:533`, implemented in interpreter at `interp/src/lib.rs:2381–2389`, wrapped as `task::task_cancel` in `stdlib/concurrency/task.nv:55–56`. Tests in `tests/task_cancel.rs` exercise the full pipeline.
+   - *Gap:* ~~Document whether timer cancellation is in scope for Phase 6.5 or deferred.~~ **DECIDED: deferred, not Phase 6.5 scope (2026-09-26).** `TicklessTimerHeap` is left unreachable on purpose, and its unreachability is documented on the type itself so it reads as deliberate rather than accidental. Surfacing it honestly requires the readiness thread that *acts on* a popped id — ADR-024's "Timers" bullet, still Proposed, and ADR-024's own open-items section forbids an implementer silently picking it. The one available shortcut, routing the M4 blocking `sleep_builtin` through the heap, was rejected: it breaks the at-least timing contract the deadline-based poll deliberately provides (the regression the audit fixed) and adds process-global mutable timer state, i.e. the ambient authority ADR-020/021 forbid. A `timer_schedule`-shaped builtin whose returned ids nothing consumes would be exactly the silent no-op the invariants ban. This is Wave-2 executor work.
+   - *Residual parity gap (now explicit, not a blocker for this item):* cancellation is interpreter-only. `noct run-vm` / `noct build` refuse any program containing a `task` declaration, and Cranelift rejects `Instr::TaskCancel` with a loud `UnsupportedInstr` naming the instruction — so every backend refuses identically (exit 1), but the cancellation *semantics* are exercised on the interpreter path only. Closing that needs a task registry in `runtime-native` plus the VM spawn path, and lowering only the flag-write would produce a native build that reports a cancellation that cannot happen.
+
+3. **Managed mode / ARC runtime — name the blocker explicitly**
+   - *Current state:* **Zero runtime integration.** ARC runtime exists as `interp/src/arc.rs` (HeapRegistry, ArcValue, WeakValue, UnownedValue, ManagedError) with unit tests — but it is **not wired into any backend**. The interpreter has `arc` module imported but no managed-mode execution path; NIR has `Mode::Managed` and managed instructions (`heap_alloc`, `arc_retain`, `arc_release`, `weak_new`, `weak_upgrade`, `unowned_new`) but lowering for them is stubbed; Cranelift backend explicitly marks managed-mode as Step 4/out of scope (`compiler/src/backends/cranelift/lower.rs:8`, `driver.rs:12`).
+   - *UI-M1 impact:* UI-S0 (ARC runtime prototype) cannot validate ARC viability without a managed-mode execution path. This **blocks UI-M1 gate criterion (a)** (UI_SPEC.md:106: "ARC behavior is viable under real workloads") and therefore blocks Phase 7's UI-M1 precondition.
+   - *Required:* Explicitly name "managed-mode execution path (interpreter + VM + native)" as a Phase 6.5 blocker. Do not carry forward silently.
+   - *Verified 2026-09-26 (gate run, not a report):* **still blocked, and
+     the gap is now measured rather than assumed.** A managed-mode
+     program cannot call any ARC operation:
+     - `interp/src/lib.rs` has `eval_builtin` arms for all seven
+       (`heap_alloc_builtin`, `arc_retain_builtin`, `arc_release_builtin`,
+       `weak_create_builtin`, `weak_load_builtin`, `unowned_create_builtin`,
+       `unowned_load_builtin`) and `interp/src/arc.rs` has the runtime —
+       but **none of the seven is in `is_builtin`** (`interp/src/lib.rs:1354`),
+       and **`compiler/src/typeck/mod.rs` has zero references to them**. So
+       a program naming one gets `E0201 unknown identifier`, the arms are
+       unreachable, and the only builtins that work are the ones threaded
+       through all layers. That is precisely the interp-only violation the
+       mirror rule forbids, so the work is not "complete" in any usable
+       sense.
+     - Real: the `managed` keyword (lexer `token.rs:54` + `mod.rs:981`, parser
+       `grammar.rs:311-400`, HIR mode tag) and the NIR variants
+       (`instr.rs:78-84`: `HeapAlloc`, `ArcRetain`, `WeakLoad`, …).
+   - *UI-S1 does not use ARC at all:* `libs/ui/lib/*.nv` contains **zero**
+     ARC/managed calls — its only two hits for `managed`/ARC are comments.
+     `cycle_mitigation.nv` is honest pure-value code whose own header says
+     the checks "are checks on values and a heap object needs different ones"
+     once real ARC lands. `register_child`, `validate_widget_tree`, and
+     `make_unowned_parent` (named as delivered) do not exist; only
+     `diff_widgets`/`diff_widgets_depth` do. `libs/ui` also has no `tests/`,
+     no `README.md`, and no `docs/overview.md` — although `cycle_mitigation.nv:47`
+     points readers at that last file.
+   - *The demo does not run:* `noct run lib/main.nv` in `examples/ui_demo`
+     fails `E0101 cannot resolve imported module 'ui'`, cascading to ~20
+     unknown-identifier errors. `compiler/src/modules.rs` never reads
+     `nestpkg.nvpm`, so a manifest `path:` dependency cannot resolve; the
+     resolver only searches sibling dirs, `vendor/`, and store roots.
+     (`examples/reference-crud` works only because it declares no
+     dependencies.)
+   - *Consequence for the gate:* criteria (a) real-workload ARC,
+     (b) weak/unowned noise, and (c) re-render performance are all
+     **unevaluable** — not failing, not passing. Nothing has been measured.
+     Criterion (d) (dogfooding) is likewise unassessable while the demo
+     will not build.
+   - *Measured 2026-09-26, UI-M1 gate criteria (a)-(c):*
+     - **(a) REAL WORKLOAD: PASS.** `libs/ui/lib/ownership.nv` puts the
+       widget tree on the managed heap (see below) and
+       `libs/ui/tests/ownership_test.nv` exercises it: root with no
+       parent, child→unowned→parent traversal resolving to the parent's
+       tag, `Weak` observing a live parent (`Some`), and the same `Weak`
+       yielding `None` once the only strong reference is released (which
+       proves the release actually freed the object). All five pass on
+       the interpreter. ARC is no longer a prototype — it is the
+       ownership model of a real package.
+     - **The shape that works is a flat arena, and that is a finding, not
+       a shortcut.** The managed heap is write-once from `.nv`: you can
+       allocate a value and read it back, but you cannot store into an
+       object you already hold. So a parent created complete can never
+       afterwards gain a strong `kids` list, and a nested `parent ->
+       children` owning tree cannot be built after the fact. What builds
+       honestly is the direction that needs no mutation: every child is
+       allocated with an `unowned` back-reference to a parent that
+       already exists, while the application holds every node strongly.
+       No strong cycle is possible by construction, which is exactly what
+       makes the `unowned` back-reference sound.
+     - **(b) NON-OWNING RATIO: PASS, at half the bar.** The gate's bar
+       (owner-set) is at most 2 non-owning references per node. The
+       steady state uses exactly 1 per child (its parent back-ref) and 0
+       per root; a `Weak` appears only as a transient observer, never as
+       structure. `ownership_test.nv` proves each child's single
+       back-ref resolves, so the count is measured, not asserted.
+     - **(c) RE-RENDER PERFORMANCE: FAIL.** A 100-node
+       `column(text, ...)` re-render (`diff_widgets`, identical trees,
+       nothing to find) costs **1,907 ms**; at 250 nodes it costs
+       **7,665 ms**; a 1,000-node build+diff measured **227 s** wall.
+       Build is quadratic (`list_append_builtin` copies the list per
+       element) and the diff is superlinear (the `Mutation` chain is
+       rebuilt by copying through `graft`/`push`/`reverse`). The value
+       model copies everywhere, so no interactive budget — 16 ms, 100
+       ms, even 1 s — is reachable at any reasonable scale with this
+       implementation. An `Arc`-identity diff (comparing heap ids instead
+       of deep values) would change the asymptotics, but that is a
+       redesign of `cycle_mitigation`, not a tuning pass. Recorded as a
+       fail with data rather than a smaller certified size, because a
+       smaller number would certify a UI framework that cannot render a
+       UI.
+
+4. **Standard Error trait — decide, or document every distinct shape**
+   - *Current state:* **Not decided.** `stdlib/error/traits.nv:5–10` explicitly reserves trait-based error handling for M4+ (requires trait/impl support, SPEC.md C4). `ERROR_HANDLING.md:62–66` confirms: "`E` in `Result<T, E>` is an ordinary Noctivue type… standard-library error trait/convention is Deferred."
+   - *Distinct error shapes introduced so far (each module invents its own):*
+     - `Result<T, String>` — foundation convention (E3), used by `db/sqlite.nv`, `net/http/*.nv`, `concurrency/task.nv`, `fs/*.nv`, `process/command.nv`, `result/result.nv`, `error/ffi.nv`, `error/macros.nv`
+     - `ErrorInfo { code: String, message: String, source: String }` — structured record in `stdlib/error/types.nv:12–16` with free functions `error_info`, `error_info_display`, `error_info_context`
+     - `enum ErrorCode { BadRequest, Unauthorized, Forbidden, NotFound, Conflict, RateLimited, Internal }` — in `examples/noctivue-expert-server-service.nv:55–63`
+     - `struct AppError { message: String }` — in `examples/nightshade/lib/core/errors/exceptions.nv:1–5`
+     - `Result<T, String>` with pinned string literals for pool (`"pool max_size must be at least 1"`, `"pool exhausted (max_size reached)"`) — `stdlib/db/pool.nv:36,57`
+   - *Required:* Explicit go/no-go on a standard `Error` trait for M5. If deferred again, document the convention (e.g., "all stdlib fallible fns return `Result<T, String>`; structured records use `ErrorInfo`; application enums are free") and add a linter rule to flag new ad-hoc shapes.
+
+5. **Panic/unwind semantics for native mode — decide**
+   - *Current state:* **Deferred.** `ERROR_HANDLING.md:44–46`: "A panic in **native mode** aborts the current process (or, where the platform/runtime configuration allows, unwinds to a defined boundary — exact unwind-vs-abort configurability is **Deferred**)." `NIR.md:92,190,200,203`: `panic`/`assert`/`to_int` builtins not representable in NIR yet; `CondBranch` truthiness vs interpreter strict-Bool panic divergence confined to ill-typed programs.
+   - *Phase 6 impact:* Real I/O shipped (Postgres-class driver authorized per ADR-024 hybrid revision DECISIONS.md:720–726, TLS via rustls+ring authorized same entry) — but panic/unwind contract for native FFI boundaries is undecided.
+   - *Required:* Decide unwind-vs-abort for native mode before Phase 7's multi-target work (WASM, C++ interop) makes it load-bearing. Record as ADR amendment.
+
+6. **Imports/exports — settle as decided, not proposed**
+   - *Whole-module import (`import event + event::kind_closed()`):* **Already legal** per MODULES.md §2 (item import `import path::Item` works). The fix is a style-guide + linter rule ("prefer whole-module import over 3+ per-item imports from one module"), not new grammar.
+   - *Re-exports (`export import ...`):* **Proposed** in MODULES.md §5 — must be implemented. Implement `export import resilience::prelude::*` (or `export import resilience::prelude`) so consumers see one import, not nine, without weakening per-declaration `export` as the visibility default. Do NOT make whole-file export the default.
+   - *Diagnostic gaps in MODULES.md §4.1 (must fix before/during re-exports, since re-exports increase surface area):*
+     - **Gap 1:** `pkg::Type` qualifier not stripped — unaliased module names (`import semver::version` registers `version`, never `semver`) leave qualifier in place, causing type mismatch pointing at type not missing import (MODULES.md:95–102). Fix: register full module path as alias or strip unaliased qualifiers in rewriter.
+     - **Gap 2:** Private-access errors blame the alias — `p.private_one()` (where `private_one` lacks `export`) emits `E0201 unknown identifier p` instead of naming the private item and the `export` fix (MODULES.md:104–109). Flat use gets `W0101` hint; qualified form does not. Fix: qualified private access should emit the same hint or a dedicated diagnostic.
+   - *Update MODULES.md:* Mark all of the above as **Decided**, not "Proposed."
+
+**Exit criteria:**
+- ADR-024 status changed from **Proposed** to **Accepted** (or explicitly rejected with migration path), with spawn-refusal contradiction resolved and `TicklessTimerHeap` fate decided.
+- `PHASE5_PRODUCTION.md §6` and `CONCURRENCY.md §4` reconciled with shipped behavior (no "M5 design" language for what runs today).
+- Managed-mode execution path has a concrete plan with owner and timeline, or is explicitly deferred with UI-M1 impact acknowledged in writing (not silent).
+- Standard Error trait: go/no-go recorded as ADR; if deferred, convention documented and linter rule added for ad-hoc shapes.
+- Panic/unwind semantics for native mode: go/no-go recorded as ADR amendment.
+- Re-export syntax (`export import ...`) implemented and working; whole-module import style rule in linter (default-on or default-off per style-preference convention).
+- Both diagnostic gaps in MODULES.md §4.1 fixed (unaliased `pkg::Type` stripped; qualified private access emits actionable hint).
+- MODULES.md updated: §1 directory-module nesting rules, §5 re-exports, and §4.1 diagnostic gaps all marked **Decided**.
+
+**Go/No-Go for Phase 7 (M6):**
+- **Phase 6/M5 exit criteria met?** **NO.** Phase 6 exit criteria (IMPLEMENTATION_PLAN.md §8 lines 284–300) require: deployed reference app with metrics/traces, `noct audit` clean with signing enforced, second-team onboarding, content-store met. Only content-store is met (2026-09-26). The rest are open.
+- **UI-M1 gate criteria met?** **NO.** UI-SPEC.md §4 requires: (a) ARC viable under real workloads — blocked by zero managed-mode execution path; (b) cycle-mitigation strategy holds — unvalidated; (c) re-render performance acceptable — unmeasured; (d) ergonomics compelling in dogfooding — untested.
+- **FFI-wrapped toolkit fallback genuinely in place?** **NO.** No native-mode FFI-wrapped UI toolkit exists; ADR-001 fallback is architectural intent, not implemented code.
+- **Conclusion:** **NO-GO for Phase 7.** Phase 6.5 is not "informal cleanup that can run in parallel" — it is the actual blocking work. Phase 7 must not start until Phase 6.5 exit criteria are met.
+
+## 10. Phase 7 — M6: Multi-Target Compilation & Interop Expansion
+
+**Preconditions:** Phase 6.5 exit criteria met (which subsumes Phase 6/M5 exit criteria for the backend-app side); UI-M1 gate criteria (UI_SPEC.md §4) met or the FFI-wrapped-toolkit fallback in use for the UI side — this phase's WASM/mobile work assumes *a* UI story exists, not necessarily the in-house one.
 
 **Work:**
 1. **WASM backend** — a third NIR lowering target alongside Cranelift
@@ -367,7 +507,7 @@ work assumes *a* UI story exists, not necessarily the in-house one.
 - A multi-package workspace builds, tests, and locks dependencies
   consistently across its member packages via `noct`.
 
-## 10. Phase 8 — M7: Cross-Ecosystem Package Interop
+## 11. Phase 8 — M7: Cross-Ecosystem Package Interop
 
 **Preconditions:** Phase 7/M6 exit criteria met — the WASM backend and
 C++ shim tier both need to exist before this phase can build on them.
@@ -416,9 +556,9 @@ C++ shim tier both need to exist before this phase can build on them.
   tier 5 (flagged, opt-in) dependencies for a project mixing all five,
   so the M5 audit story (Phase 6) isn't silently weakened by M7.
 
-## 11. Parallel Track — UI (research spike through UI-M1, hardening through UI-M2)
+## 12. Parallel Track — UI (research spike through UI-M1, hardening through UI-M2)
 
-Runs alongside Phases 1–6, does not gate Phases 1–4 (UI_SPEC.md §4).
+Runs alongside Phases 1–7, does not gate Phases 1–4 (UI_SPEC.md §4).
 Earliest reasonable start for UI-S0: end of Phase 1 / during Phase 2,
 once there's a stable enough language to build a managed-mode prototype
 against.
@@ -432,10 +572,10 @@ UI-M2  Enterprise/production UI     — accessibility, theming/design
                                        tokens, app-scale state management,
                                        per-platform packaging
                                        (desktop/mobile/web); targeted
-                                       during the Phase 5/6 window
+                                       during the Phase 5/6/6.5 window
 ```
 
-If UI-S0/UI-S1 fail their gates on that timeline, Phases 5–6 (and thus
+If UI-S0/UI-S1 fail their gates on that timeline, Phases 5–7 (and thus
 "build a full-stack app") do **not** block indefinitely on it: the
 fallback is native-mode Noctivue with a UI layer built by FFI-wrapping
 an existing native UI toolkit, per the "one language, two modes" design
@@ -443,7 +583,7 @@ an existing native UI toolkit, per the "one language, two modes" design
 enterprise-app delivery has a floor that doesn't depend on the widget-
 tree research succeeding on schedule.
 
-## 12. What "Start Building a Real Project" Means at Each Phase
+## 13. What "Start Building a Real Project" Means at Each Phase
 
 | After phase | What you can actually build |
 |---|---|
@@ -453,12 +593,13 @@ tree research succeeding on schedule.
 | 4 (M3) | Real multi-file projects with dependencies, tests, and formatting — the first point where "start a project with Noctivue" means something close to what it means in an established language |
 | 5 (M4) | **Standard apps**: networked, data-backed services — REST APIs against a real database, with logging and config — the "build a to-do app with a real backend" tier |
 | 6 (M5) | **Enterprise-grade apps**: the M4 app hardened with observability, security auditing, resilience patterns, and a deployment/CI pipeline a company can actually run in production |
+| 6.5 (Foundation Reconciliation) | **Unblocked M6**: M5 gaps closed (executor contract, ARC runtime path, error convention, panic semantics, module system settled) — Phase 7 can now start |
 | UI-M1 (if reached) | UI applications (single-app/prototype maturity) |
 | UI-M2 (targeted alongside M5) | Production/enterprise UI — accessible, themeable, packaged per platform, usable as the front end of the M5-tier backend for genuine full-stack delivery |
-| 9 (M6) | **One-language coverage**: the same source targets native (Cranelift/LLVM), WASM/web, script/REPL use, embedded (freestanding profile), and can call into existing C++ libraries — the "C++/Python/Rust/Flutter/Java/JS, one language" claim becomes checkable rather than aspirational |
-| 10 (M7) | **Ecosystem breadth**: real PyPI/npm/Maven/crates.io libraries usable as dependencies at an explicitly labeled trust tier per package, closing the gap between "the language is capable" and "the language has libraries" |
+| 10 (M6) | **One-language coverage**: the same source targets native (Cranelift/LLVM), WASM/web, script/REPL use, embedded (freestanding profile), and can call into existing C++ libraries — the "C++/Python/Rust/Flutter/Java/JS, one language" claim becomes checkable rather than aspirational |
+| 11 (M7) | **Ecosystem breadth**: real PyPI/npm/Maven/crates.io libraries usable as dependencies at an explicitly labeled trust tier per package, closing the gap between "the language is capable" and "the language has libraries" |
 
-## 13. Amendment Note
+## 14. Amendment Note
 
 Like DECISIONS.md, changes to this plan's phase ordering are amendments,
 not silent rewrites — if a phase's exit criteria turn out to be wrong or

@@ -232,15 +232,20 @@ MUST reject them as scope creep.
     `executor_worker_count()` (default `available_parallelism` capped
     at 64, `NOCT_WORKERS` override, loud on malformed values), and
     `join_task` admits through a bounded blocking bridge with a 30 s
-    watchdog. `cancellation` is **partially** live: the per-task flag,
-    the `sleep` cancel checkpoint, and the pinned `task {id} cancelled`
-    value exist, but nothing in `.nv` can set the flag
-    (`Interpreter::task_cancel` is a Rust-only `pub fn` with no builtin,
-    typeck signature, VM arm, or stdlib wrapper), so no user program can
-    reach it. The `TicklessTimerHeap` and `timer_now_ms` are orphaned
-    (no users, no tests). Idle-pool eviction and multi-statement
-    transactions remain genuinely deferred. Full accounting and the
-    owner action required are in `docs/DECISIONS.md` ADR-024's
-    "Implementation status". This audit changed no executor code; note
-    also that `spawn limits` being live is a new observable loud failure
-    not listed in ADR-024's explicitly-breaking list.
+    watchdog. `cancellation` is now **live end to end**:
+    `task_cancel_builtin(id)` (typeck `(Int) -> Unit`, lowered to
+    `Instr::TaskCancel`, implemented in the interpreter, wrapped as
+    `task::task_cancel` in `stdlib/concurrency/task.nv`), so a program
+    can set the flag; the `sleep` cancel checkpoint observes it and
+    `await` yields the pinned `Err(task {id} cancelled)`. Parity is
+    interpreter-only — the NIR VM spawns no tasks and Cranelift
+    rejects `Instr::TaskCancel` loudly, so `noct run-vm` / `noct build`
+    refuse any `task` declaration. The `TicklessTimerHeap` and
+    `timer_now_ms` remain orphaned (no users, no tests). Idle-pool
+    eviction and multi-statement transactions remain genuinely
+    deferred. Full accounting and the owner action required are in
+    `docs/DECISIONS.md` ADR-024's "Implementation status"; the shipped
+    vs. Wave-2 split is also in `CONCURRENCY.md` §4. This audit changed
+    no executor code; note also that `spawn limits` being live is a new
+    observable loud failure not listed in ADR-024's
+    explicitly-breaking list.

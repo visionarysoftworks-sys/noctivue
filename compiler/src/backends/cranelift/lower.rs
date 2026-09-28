@@ -395,11 +395,20 @@ pub fn lower_instr(
             ctx.set(builder, *dst, v);
         }
 
-        Instr::Print { val } => {
+        Instr::Print { val, newline } => {
             // One header-pointer argument (abi.rs string model). No dst:
             // Print is a statement-shaped instruction in a value world.
             let s = ctx.get(builder, *val);
-            call(builder, ctx.rt.print, &[s]);
+            // `println` was previously lowered as `print` here, dropping
+            // the trailing newline on native builds. The runtime already
+            // exports `noctivue_rt_io_writeln` for exactly this shape
+            // ("stdout plus a newline, matches the interpreter's
+            // `println!`"), so the fix needs no new ABI entry.
+            if *newline {
+                call(builder, ctx.rt.io_writeln, &[s]);
+            } else {
+                call(builder, ctx.rt.print, &[s]);
+            }
         }
 
         // Phase 5/M4 host-IO scalar subset: each builtin is one runtime
@@ -488,7 +497,7 @@ pub fn lower_instr(
         | Instr::DbOpen { .. } | Instr::DbExec { .. } | Instr::DbQuery { .. } | Instr::DbClose { .. }
         | Instr::TimeMonoMs { .. } | Instr::RngSeed { .. } | Instr::RngNext { .. }
         | Instr::TaskCancel { .. }
-        | Instr::FsRead { .. } | Instr::FsWrite { .. } | Instr::FsModifiedMillis { .. }
+        | Instr::FsRead { .. } | Instr::FsWrite { .. } | Instr::FsListDir { .. } | Instr::FsModifiedMillis { .. }
         | Instr::EnvGet { .. } | Instr::ConfigGet { .. } | Instr::DotenvLoad { .. }
         | Instr::StackAlloc { .. } | Instr::Load { .. } | Instr::Store { .. }
         | Instr::StructNew { .. } | Instr::FieldGet { .. }
@@ -500,8 +509,10 @@ pub fn lower_instr(
         | Instr::OptionSome { .. } | Instr::OptionNone { .. }
         | Instr::ClosureNew { .. } | Instr::ClosureCall { .. }
         | Instr::CallIndirect { .. } | Instr::HeapAlloc { .. } | Instr::ArcRetain { .. }
-        | Instr::ArcRelease { .. } | Instr::WeakLoad { .. } => {
-            return false; // not this category — caller dispatches to Step 2/3/4
+        | Instr::ArcRelease { .. } | Instr::WeakCreate { .. } | Instr::WeakLoad { .. }
+        | Instr::ArcLoad { .. } | Instr::ArcId { .. }
+        | Instr::UnownedCreate { .. } | Instr::UnownedLoad { .. } => {
+            return false; // not this category - caller dispatches to Step 2/3/4
         }
     }
     true

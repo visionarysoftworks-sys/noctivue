@@ -540,6 +540,7 @@ fn native_build_rejects_vm_only_hostio_loudly() {
         ("hostio_nodb_close", "fn main():\n    db_close_builtin(1)\n", "db_close"),
         ("hostio_nofs_read", "fn main():\n    fs_read_text(\"x\")\n", "fs_read"),
         ("hostio_nofs_write", "fn main():\n    fs_write_text(\"x\", \"y\")\n", "fs_write"),
+        ("hostio_nofs_list_dir", "fn main():\n    fs_list_dir_builtin(\"x\")\n", "fs_list_dir"),
         ("hostio_nofs_mtime", "fn main():\n    fs_modified_millis_builtin(\"x\")\n", "fs_modified_millis"),
         ("hostio_noenv_get", "fn main():\n    env_get_builtin(\"x\")\n", "env_get"),
         ("hostio_noconfig", "fn main():\n    config_get_builtin(\"x\", \"y\")\n", "config_get"),

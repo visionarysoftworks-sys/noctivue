@@ -5,6 +5,12 @@
 //! character, or a table border off by one dash, is exactly the kind of
 //! regression that is invisible in a screenshot and obvious in a diff.
 //!
+//! Non-ASCII is asserted with explicit `\u{…}` escapes wherever the
+//! distinction matters (a combining mark and a precomposed `é` are
+//! different code points with the same glyph and different widths), and
+//! with literals where the glyph is the thing under test (CJK, box
+//! drawing) so the expected table output is readable.
+//!
 //! The types are item-imported (`import style::Style`) and annotated flat
 //! rather than qualified (`style.Style`) because a module-qualified type
 //! does not parse in a type position today — see MODULES.md §4.1 and the
@@ -15,6 +21,7 @@ import style
 import table
 import spinner
 import progress
+import width
 import style::Style
 import style::Color
 import spinner::Spinner
@@ -23,6 +30,14 @@ import spinner::Spinner
 /// INTERNAL-ish helper for the non-ASCII checks below.
 fn bold_style() -> Style:
     style.with_bold(style.plain())
+
+/// INTERNAL-ish helper for the OSC checks below: `ESC ] 8 ; ; url ESC \`.
+fn open_link(url: String) -> String:
+    "\u{1b}]8;;" + url + "\u{1b}\\"
+
+/// INTERNAL-ish: the OSC 8 close sequence, `ESC ] 8 ; ; ESC \`.
+fn close_link() -> String:
+    "\u{1b}]8;;\u{1b}\\"
 
 fn check_style_basics():
     // A plain style must cost nothing: no escape, no reset, no bytes.
@@ -48,12 +63,244 @@ fn check_color_clamping_and_names():
     let c: Color = style.color(300, -5, 10); assert(c.r == 255, "high component clamps to 255")
     assert(c.g == 0, "low component clamps to 0")
     assert(c.b == 10, "in-range component is untouched")
+    match c.index:
+        Some(_): assert(false, "an RGB color must not carry a palette index")
+        None: assert(true, "color() leaves the palette index None")
     match style.color_named("red"):
         Some(named): assert(named.r == 205 && named.g == 49, "named red is canonical RGB")
         None: assert(false, "red is a known name")
     match style.color_named("chartreuse"):
         Some(_): assert(false, "unknown name must not resolve")
         None: assert(true, "unknown name is None")
+
+// ── the 256-color palette ───────────────────────────────────────────────────
+fn check_palette_sgr_form():
+    // A palette color emits the 4-parameter form, never the truecolor one.
+    let p: Color = style.color_palette(33)
+    assert(style.sgr(style.with_fg(style.plain(), p)) == "\u{1b}[38;5;33m", "palette fg is 38;5;N")
+    assert(style.sgr(style.with_bg(style.plain(), p)) == "\u{1b}[48;5;33m", "palette bg is 48;5;N")
+    // It composes with attributes in the same fixed order as any color.
+    let bold_p: Style = style.with_fg(style.with_bold(style.plain()), style.color_palette(1))
+    assert(style.sgr(bold_p) == "\u{1b}[1;38;5;1m", "palette joins attributes with ';'")
+    // The truecolor path is untouched.
+    assert(
+    style.sgr(style.with_fg(style.plain(), style.color(1, 2, 3))) == "\u{1b}[38;2;1;2;3m",
+    "RGB is still 38;2",
+)
+    // A palette color and an RGB color DO coexist in one Style, because fg
+    // and bg are independent: palette foreground over RGB background.
+    let mixed: Style = style.with_bg(style.with_fg(style.plain(), style.color_palette(33)), style.color(20, 20, 20))
+    assert(style.sgr(mixed) == "\u{1b}[38;5;33;48;2;20;20;20m", "palette fg + RGB bg in one style")
+    let other: Style = style.with_fg(style.with_bg(style.plain(), style.color_palette(9)), style.color_palette(200))
+    assert(style.sgr(other) == "\u{1b}[38;5;200;48;5;9m", "palette fg + palette bg in one style")
+
+fn check_palette_index_clamping():
+    // Like color(), color_palette() clamps rather than trapping: an index is
+    // usually arithmetic, and a total function is worth more than an Err.
+    match style.color_palette(300).index:
+        Some(v): assert(v == 255, "a high palette index clamps to 255")
+        None: assert(false, "color_palette always sets an index")
+    match style.color_palette(0 - 1).index:
+        Some(v): assert(v == 0, "a low palette index clamps to 0")
+        None: assert(false, "color_palette always sets an index")
+    assert(palette_rgb_is_none(style.palette_rgb(256)), "palette_rgb rejects 256")
+    assert(palette_rgb_is_none(style.palette_rgb(0 - 1)), "palette_rgb rejects -1")
+
+/// INTERNAL-ish: `None` test for `Option<Color>`.
+fn palette_rgb_is_none(v: Option<Color>) -> Bool:
+    match v:
+        Some(_): false
+        None: true
+
+/// INTERNAL-ish: assert `palette_rgb(i)` is exactly (r, g, b).
+fn check_rgb(pairs: [Int], want: [Int]):
+    match style.palette_rgb(pairs[0]):
+        Some(c): assert(
+    c.r == want[0] && c.g == want[1] && c.b == want[2],
+    "palette_rgb({pairs[0]}) is {want[0]},{want[1]},{want[2]}: {c.r},{c.g},{c.b}",
+)
+        None: assert(false, "palette_rgb({pairs[0]}) must be Some")
+
+fn check_palette_system_slots():
+    // 0-15 are the xterm reference system colors.
+    check_rgb([0], [0, 0, 0])
+    check_rgb([1], [205, 0, 0]); check_rgb([2], [0, 205, 0]); check_rgb([3], [205, 205, 0])
+    check_rgb([4], [0, 0, 238]); check_rgb([5], [205, 0, 205]); check_rgb([6], [0, 205, 205])
+    check_rgb([7], [229, 229, 229]); check_rgb([8], [127, 127, 127]); check_rgb([9], [255, 0, 0])
+    check_rgb([10], [0, 255, 0]); check_rgb([11], [255, 255, 0]); check_rgb([12], [92, 92, 255])
+    check_rgb([13], [255, 0, 255]); check_rgb([14], [0, 255, 255]); check_rgb([15], [255, 255, 255])
+
+fn check_palette_cube_and_gray():
+    // 16-231: the 6x6x6 cube. Level N is 0, 95, 135, 175, 215, 255, and
+    // index - 16 is r*36 + g*6 + b.
+    check_rgb([16], [0, 0, 0])
+    check_rgb([17], [0, 0, 95]); check_rgb([21], [0, 0, 255]); check_rgb([22], [0, 95, 0])
+    check_rgb([46], [0, 255, 0]); check_rgb([51], [0, 255, 255]); check_rgb([52], [95, 0, 0])
+    check_rgb([88], [135, 0, 0]); check_rgb([116], [135, 215, 215]); check_rgb([196], [255, 0, 0])
+    check_rgb([197], [255, 0, 95]); check_rgb([231], [255, 255, 255])
+    // 232-255: the 24-step grayscale ramp, 8 + 10 * (n - 232).
+    check_rgb([232], [8, 8, 8])
+    check_rgb([240], [88, 88, 88]); check_rgb([255], [238, 238, 238])
+
+fn check_cube_levels():
+    assert(style.cube_level(0) == 0, "cube level 0")
+    assert(style.cube_level(1) == 95, "cube level 1")
+    assert(style.cube_level(2) == 135, "cube level 2")
+    assert(style.cube_level(3) == 175, "cube level 3")
+    assert(style.cube_level(4) == 215, "cube level 4")
+    assert(style.cube_level(5) == 255, "cube level 5")
+
+fn check_palette_names_and_resolve():
+    // The 16 names also have index forms.
+    match style.color_named_palette("red"):
+        Some(c):
+            match c.index:
+                Some(v): assert(v == 1, "named red is palette slot 1")
+                None: assert(false, "a palette color carries an index")
+        None: assert(false, "red is a known palette name")
+    match style.color_named_palette("bright_white"):
+        Some(c):
+            match c.index:
+                Some(v): assert(v == 15, "bright_white is palette slot 15")
+                None: assert(false, "a palette color carries an index")
+        None: assert(false, "bright_white is a known palette name")
+    assert(palette_rgb_is_none(style.color_named_palette("chartreuse")), "unknown palette name is None")
+    // resolve_color collapses the tagged union onto the RGB side.
+    let resolved: Color = style.resolve_color(style.color_palette(1))
+    assert(
+    resolved.r == 205 && resolved.g == 0 && resolved.b == 0,
+    "palette 1 resolves to its xterm RGB",
+)
+    assert(palette_index_is_none(resolved.index), "a resolved color is a plain RGB color")
+    let kept: Color = style.resolve_color(style.color(1, 2, 3))
+    assert(kept.r == 1 && kept.g == 2 && kept.b == 3, "resolve_color leaves an RGB color alone")
+
+/// INTERNAL-ish: `None` test for `Option<Int>`.
+fn palette_index_is_none(v: Option<Int>) -> Bool:
+    match v:
+        Some(_): false
+        None: true
+
+// ── OSC 8 hyperlinks ────────────────────────────────────────────────────────
+fn check_osc8_composition():
+    assert(
+    style.hyperlink_open("https://example.com") == open_link("https://example.com"),
+    "open is ESC ] 8 ; ; uri ESC \\",
+)
+    assert(style.hyperlink_close() == close_link(), "close is ESC ] 8 ; ; ESC \\")
+    assert(style.hyperlink("t", "u") == open_link("u") + "t" + close_link(), "hyperlink wraps text")
+    // An empty URI IS the close sequence, per the spec.
+    assert(style.hyperlink_open("") == close_link(), "an empty URI closes the link")
+    // Everything after the second ';' is the URI, so a ';' in the URL is safe.
+    assert(
+    style.hyperlink_open("https://e.com/a;b?c=d") == open_link("https://e.com/a;b?c=d"),
+    "a semicolon in the URL survives",
+)
+    // The building blocks are exported so a caller can frame its own OSC.
+    assert(style.osc() == "\u{1b}]", "osc() is the OSC introducer")
+    assert(style.st() == "\u{1b}\\", "st() is the string terminator")
+    // A styled link and a linked style are the same visible thing.
+    let styled_link: String = style.style_text(style.hyperlink("hi", "u"), bold_style())
+    assert(style.strip_ansi(styled_link) == "hi", "a styled link strips to its text")
+    assert(style.visible_width(styled_link) == 2, "a styled link measures as its text")
+
+fn check_strip_removes_osc():
+    // The whole point: an OSC 8 link is invisible, so it must not measure.
+    let link: String = style.hyperlink("docs", "https://example.com")
+    assert(style.strip_ansi(link) == "docs", "OSC 8 strips to the link text")
+    assert(style.visible_width(link) == 4, "a link measures as its text, not its bytes")
+    // BEL (0x07) is accepted as a terminator too: some programs emit it.
+    let bel: String = "\u{1b}]8;;url\u{7}hi\u{1b}]8;;\u{7}"
+    assert(style.strip_ansi(bel) == "hi", "BEL-terminated OSC strips")
+    assert(style.visible_width(bel) == 2, "a BEL-terminated link measures as its text")
+    // An unterminated sequence is dropped to the end of the string.
+    assert(style.strip_ansi("ab\u{1b}]8;;url") == "ab", "an unterminated OSC is dropped")
+    // An ESC inside the payload is not a terminator unless followed by '\\'.
+    let mid_esc: String = "\u{1b}]8;;a\u{1b}Xb\u{1b}\\hi\u{1b}]8;;\u{1b}\\"
+    assert(style.strip_ansi(mid_esc) == "hi", "an ESC that is not ST does not close the OSC")
+    // CSI still works, and OSC inside a styled line does not disturb it.
+    assert(
+    style.strip_ansi("\u{1b}[1m\u{1b}]8;;u\u{1b}\\hi\u{1b}]8;;\u{1b}\\\u{1b}[0m") == "hi",
+    "CSI around OSC",
+)
+    // A non-CSI, non-OSC escape still keeps its successor (regression guard).
+    assert(style.strip_ansi("a\u{1b}Zb") == "aZb", "a bare escape is dropped, its successor kept")
+    assert(style.strip_ansi("a\u{1b}[1mb") == "ab", "CSI still strips")
+    // CJK inside a link measures in cells, so the control bytes do not skew it.
+    let cjk_link: String = style.hyperlink("日本", "https://e.com")
+    assert(style.strip_ansi(cjk_link) == "日本", "a CJK link strips to its text")
+    assert(style.visible_width(cjk_link) == 4, "a CJK link measures 4 cells")
+
+// ── width ───────────────────────────────────────────────────────────────────
+fn check_width_table():
+    // The table itself, per the five categories that matter. The argument is
+    // a ONE-CHARACTER STRING, and every case is written with a `\u{…}` escape
+    // plus the code point spelled out in this comment — because `noct fmt`
+    // inlines printable escapes into raw glyphs (a bare combining mark, a
+    // zero-width space), so the code point in the message is the audit trail,
+    // not the character. See the note in `lib/width.nv`.
+    assert(width.char_cells("a") == 1, "ASCII is 1 cell")
+    assert(width.char_cells(" ") == 1, "space is 1 cell")
+    assert(width.char_cells("~") == 1, "tilde is 1 cell")
+    assert(width.char_cells("") == 0, "DEL is a C0 control, so 0 cells")
+    assert(width.char_cells("│") == 1, "box drawing U+2502 is 1 cell")
+    assert(width.char_cells("█") == 1, "block element U+2588 is 1 cell")
+    assert(width.char_cells("日") == 2, "CJK U+65E5 is 2 cells")
+    assert(width.char_cells("あ") == 2, "hiragana U+3042 is 2 cells")
+    assert(width.char_cells("가") == 2, "hangul syllable U+AC00 is 2 cells")
+    assert(width.char_cells("Ａ") == 2, "fullwidth A U+FF21 is 2 cells")
+    assert(width.char_cells("ｱ") == 1, "halfwidth katakana U+FF71 is 1 cell")
+    assert(width.char_cells("́") == 0, "combining acute U+0301 is 0 cells")
+    assert(width.char_cells("ा") == 0, "devanagari vowel sign U+093E is 0 cells")
+    assert(width.char_cells("​") == 0, "zero-width space U+200B is 0 cells")
+    assert(width.char_cells("️") == 0, "VS16 U+FE0F is 0 cells")
+    assert(width.char_cells("\u{7}") == 0, "BEL U+0007 is 0 cells")
+    assert(width.char_cells("\0") == 0, "NUL is 0 cells")
+    assert(width.char_cells("") == 0, "C1 U+009F is 0 cells")
+    assert(width.char_cells("😀") == 2, "emoji U+1F600 is 2 cells")
+    assert(width.char_cells("🇯") == 2, "regional indicator U+1F1EF is 2 cells")
+    assert(width.char_cells("𠀀") == 2, "CJK ext B U+20000 is 2 cells")
+    assert(width.char_cells("⁠") == 0, "word joiner U+2060 is 0 cells")
+    // Precomposed accents are ordinary letters, not combining marks.
+    assert(width.char_cells("é") == 1, "precomposed e-acute U+00E9 is 1 cell")
+    // The VS16 helpers.
+    assert(width.is_vs16("️"), "VS16 is recognised")
+    assert(width.is_vs16("a") == false, "an ASCII letter is not VS16")
+    assert(width.is_promotable("a") == false, "ASCII is never promotable")
+    assert(width.is_promotable("é"), "a non-ASCII 1-cell character is promotable")
+
+fn check_visible_width_is_cells():
+    assert(style.visible_width("") == 0, "empty is zero cells")
+    assert(style.visible_width("abc") == 3, "ASCII is one cell per character")
+    assert(style.visible_width("│x│") == 3, "box drawing is one cell each")
+    assert(style.visible_width("日本語") == 6, "CJK is two cells each")
+    assert(style.visible_width("日本abc") == 7, "mixed CJK and ASCII")
+    assert(style.visible_width("ｱｲｳ") == 3, "halfwidth katakana is one cell each")
+    assert(style.visible_width("ＡＢ") == 4, "fullwidth forms are two cells each")
+    assert(style.visible_width("😀") == 2, "an emoji is two cells")
+    // A combining mark adds no cells: "e" + U+0301 is one cell, even though
+    // it is two code points and four bytes.
+    assert(style.visible_width("é") == 1, "a combining acute adds no cells")
+    assert(style.visible_width("aé") == 2, "a combining mark adds no cells mid-string")
+    assert(style.visible_width("日́") == 2, "a combining mark on a wide character keeps 2")
+    // Precomposed e-acute is one code point and one cell — same as before.
+    assert(style.visible_width("héllo") == 5, "a precomposed accent is one cell")
+    // VS16 (U+FE0F, invisible) promotes a text-presentation symbol to emoji
+    // presentation: one cell becomes two.
+    assert(style.visible_width("☺") == 1, "a text-presentation symbol is one cell")
+    assert(style.visible_width("☺️") == 2, "VS16 widens it to two")
+    assert(style.visible_width("✔️") == 2, "VS16 widens a dingbat too")
+    assert(style.visible_width("a️") == 1, "VS16 never promotes ASCII")
+    // No grapheme clustering: a two-code-point flag measures per code point.
+    // Documented in the width module; pinned here so the approximation
+    // cannot change silently.
+    assert(style.visible_width("🇯🇵") == 4, "a flag pair measures 4, not 2 (no clustering)")
+    // Styled wide text still measures as its text.
+    assert(style.visible_width(style.style_text("日本", bold_style())) == 4, "styled CJK measures 4")
+    // A progress bar is 8 block elements plus 2 brackets.
+    match progress.render_bar(1, 4, 8):
+        Ok(bar): assert(style.visible_width(bar) == 10, "a bar is 10 cells: {bar}")
+        Err(e): assert(false, "unexpected error: {e}")
 
 fn check_strip_and_width():
     let bold: Style = with_bold(plain()); let painted: String = style.style_text("hi", bold)
@@ -66,18 +313,22 @@ fn check_strip_and_width():
     assert(style.strip_ansi("a\u{1b}Zb") == "aZb", "non-CSI escape keeps its successor")
     assert(style.strip_ansi("plain") == "plain", "plain text is unchanged")
 
-fn check_non_ascii_is_safe_and_counted_in_characters():
+fn check_non_ascii_is_safe_and_counted_in_cells():
     // `String.length` is bytes (3) while `s[i]` indexes characters, so a
     // naive `while i < s.length` walk panics here. These assertions are the
     // regression guard for that: the walk must be budgeted by bytes.
     let boxy: String = "│x│"
     assert(boxy.length == 7, "length is bytes (3+1+3), not chars")
+    // "│" is East Asian Ambiguous and this package measures it at 1 cell, so
+    // this is 3 cells — and 3 characters, which is why the old
+    // character-counting expectation happens to still be right. It is now
+    // right for the right reason: see `check_width_table`.
     assert(style.visible_width(boxy) == 3, "box-drawing chars count as one column each")
     assert(style.strip_ansi(boxy) == boxy, "non-ASCII survives stripping")
     assert(style.visible_width(style.style_text(boxy, bold_style())) == 3, "styled non-ASCII width")
     assert(style.strip_ansi(style.style_text(boxy, bold_style())) == boxy, "styled non-ASCII strips")
     // Mixed content, including a multi-byte char next to an escape.
-    assert(style.visible_width("\u{1b}[1mhéllo wörld\u{1b}[0m") == 11, "accented text counts chars")
+    assert(style.visible_width("\u{1b}[1mhéllo wörld\u{1b}[0m") == 11, "accented text counts cells")
     // Empty and escape-only inputs.
     assert(style.visible_width("") == 0, "empty is zero columns")
     assert(style.visible_width(style.style_text("", bold_style())) == 0, "empty styled is zero")
@@ -145,6 +396,40 @@ fn check_table_measures_styled_cells():
     "styled cell keeps column alignment:\n{painted}",
 )
 
+fn check_table_measures_wide_and_linked_cells():
+    // CJK: the column is 6 cells wide because "日本語" is 3 characters but 6
+    // columns, and the narrower header "名前" (2 characters, 4 columns) is
+    // padded to match. Measured in cells, the table still lines up.
+    let cjk: String = table.render_table(["名前", "x"], [["日本語", "y"]], ["left", "right"])
+    assert(
+    cjk == "│ 名前   │ x │\n├────────┼───┤\n│ 日本語 │ y │\n└────────┴───┘\n",
+    "CJK cell keeps column alignment:\n{cjk}",
+)
+    // Right alignment counts cells too: the 1-cell header "h" is pushed to
+    // the right edge of the 6-cell column, which is 7 spaces wide in total.
+    let right: String = table.render_table(["h"], [["日本語"]], ["right"])
+    assert(
+    right == "│      h │\n├────────┤\n│ 日本語 │\n└────────┘\n",
+    "right-aligned CJK:\n{right}",
+)
+    // An OSC 8 link is invisible, so it must not widen the column: the rule
+    // is 6 dashes for 4 columns of CJK text, exactly as without the link.
+    let linked: String = table.render_table(["h"], [[style.hyperlink("日本", "https://e.com")]], ["left"])
+    assert(
+    linked == "│ h    │\n├──────┤\n│ " + open_link("https://e.com") + "日本" + close_link() + " │\n└──────┘\n",
+    "hyperlinked CJK cell keeps column alignment:\n{linked}",
+)
+    // A styled AND linked CJK cell: both control sequences are invisible.
+    let both: String = table.render_table(
+    ["h"],
+    [[style.style_text(style.hyperlink("日本", "u"), bold_style())]],
+    ["left"],
+)
+    assert(
+    both == "│ h    │\n├──────┤\n│ \u{1b}[1m" + open_link("u") + "日本" + close_link() + "\u{1b}[0m │\n└──────┘\n",
+    "styled hyperlinked CJK cell keeps column alignment:\n{both}",
+)
+
 // ── spinner ─────────────────────────────────────────────────────────────────
 fn check_spinner_advances_and_wraps():
     let frames: [String] = spinner.spinner_frames(); assert(frames.length == 10, "ten frames")
@@ -158,6 +443,8 @@ fn check_spinner_advances_and_wraps():
     assert(spinner.spinner_frame(Spinner { index: 99 }) == frames[0], "index past end wraps")
     assert(spinner.spinner_frame(Spinner { index: 0 - 1 }) == frames[0], "negative index wraps")
     assert(spinner.spinner_line(s, "working") == "{frames[0]} working", "frame plus label")
+    // A braille frame is East Asian Ambiguous, so it is one cell.
+    assert(style.visible_width(spinner.spinner_line(s, "working")) == 9, "a spinner line is 9 cells")
 
 // ── progress ────────────────────────────────────────────────────────────────
 fn check_bar_geometry():
@@ -202,7 +489,12 @@ fn check_percent():
 
 fn main():
     check_style_basics(); check_style_attributes_compose(); check_color_clamping_and_names()
-    check_strip_and_width(); check_non_ascii_is_safe_and_counted_in_characters()
-    check_table_layout_is_byte_exact(); check_table_alignment(); check_table_edges()
-    check_table_measures_styled_cells(); check_spinner_advances_and_wraps(); check_bar_geometry()
-    check_bar_rejects_impossible_input(); check_percent(); println("terminal tests passed")
+    check_palette_sgr_form(); check_palette_index_clamping(); check_palette_system_slots()
+    check_palette_cube_and_gray(); check_cube_levels(); check_palette_names_and_resolve()
+    check_osc8_composition(); check_strip_removes_osc(); check_width_table()
+    check_visible_width_is_cells(); check_strip_and_width()
+    check_non_ascii_is_safe_and_counted_in_cells(); check_table_layout_is_byte_exact()
+    check_table_alignment(); check_table_edges(); check_table_measures_styled_cells()
+    check_table_measures_wide_and_linked_cells(); check_spinner_advances_and_wraps()
+    check_bar_geometry(); check_bar_rejects_impossible_input(); check_percent()
+    println("terminal tests passed")

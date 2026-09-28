@@ -28,8 +28,66 @@ use compiler::diagnostics::DiagnosticSink;
 /// holds only build outputs now.
 pub(crate) fn read_module_graph(paths: &[&str]) -> Result<compiler::modules::ModuleGraph, String> {
     let roots = paths.iter().map(|p| Path::new(p).to_path_buf()).collect::<Vec<_>>();
-    let package_roots = vec![crate::store::Store::open().resolution_root()];
+    let mut package_roots = vec![crate::store::Store::open().resolution_root()];
+    package_roots.extend(path_dependency_roots()?);
     compiler::modules::ModuleGraph::load_with(&roots, &package_roots)
+}
+
+/// Directories of the project's `path:` dependencies, for the resolver.
+///
+/// The module resolver never reads `nestpkg.nvpm` — it searches sibling
+/// trees, `vendor/`, and the package roots it is handed. That left a
+/// manifest dependency of `path: ../../libs/ui` unresolvable, so a
+/// project with a first-party dependency failed at `import` with
+/// `E0101 cannot resolve imported module 'ui'` and a cascade of
+/// unknown-identifier errors behind it — a message that points at the
+/// import rather than at the manifest line that caused it. Resolving
+/// path deps here, at the toolchain seam, keeps manifest parsing out of
+/// the compiler crate (which has no manifest parser) and reuses the
+/// same `package_roots` channel the store already uses.
+///
+/// A declared path dependency whose directory does not exist is a loud
+/// error naming the dependency and the path it claimed. Skipping it
+/// would reproduce the confusing `E0101` this exists to prevent.
+fn path_dependency_roots() -> Result<Vec<std::path::PathBuf>, String> {
+    let manifest_path = Path::new("nestpkg.nvpm");
+    let Ok(text) = std::fs::read_to_string(manifest_path) else {
+        // No manifest: single-file use, no package context.
+        return Ok(Vec::new());
+    };
+    let manifest = crate::manifest::parse_manifest(&text)
+        .map_err(|e| format!("invalid manifest: {e}"))?;
+    let base = std::path::absolute(manifest_path)
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for dep in manifest.dependencies.iter().chain(&manifest.dev_dependencies) {
+        let crate::manifest::Source::Path(rel) = &dep.source else {
+            continue;
+        };
+        let dir = base.join(rel);
+        if !dir.is_dir() {
+            return Err(format!(
+                "dependency `{}` declares path `{rel}`, but `{}` is not a directory",
+                dep.name,
+                dir.display()
+            ));
+        }
+        // Hand over the CONTAINING directory, not the package directory:
+        // the resolver's `package_roots` are roots that hold packages
+        // (the store, a `vendor/` tree), and it finds `<root>/<pkg>/lib/…`
+        // by listing them. Passing `libs/ui` would make it look for
+        // `libs/ui/ui/…`. Sibling path deps share a parent, so dedupe.
+        if let Some(parent) = dir.parent() {
+            let parent = parent.to_path_buf();
+            if !roots.contains(&parent) {
+                roots.push(parent);
+            }
+        }
+    }
+    Ok(roots)
 }
 
 /// Name the file owning a whole-unit byte offset (see `read_module_graph`).
@@ -134,13 +192,50 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // 9. Run interpreter
-    let mut interp = interp::Interpreter::new();
-    let exit_code = interp.run(&module, &mut sink);
+    //
+    // On a scoped thread with a large stack, NOT the main thread. The main
+    // thread's stack is 1 MiB on Windows (8 MiB for a spawned thread), and
+    // the tree-walking interpreter's per-frame cost meant a recursion of
+    // ~15 ordinary calls already overflowed it. That is shallow enough to
+    // make any recursive algorithm — tree walking, rendering, diffing —
+    // unusable, and it surfaced as a hard `thread 'main' has overflowed
+    // its stack` crash with no diagnostic. Same reasoning, and the same
+    // shape, as the interpreter's HTTP worker threads.
+    let ran = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let mut interp = interp::Interpreter::new();
+                let mut sink = DiagnosticSink::new();
+                let code = interp.run(&module, &mut sink);
+                (code, sink.take())
+            })
+            .map(|handle| handle.join())
+    });
 
-    // Print any diagnostics emitted during interpretation
-    if sink.has_errors() {
-        print_diagnostics_multi(&files, &sink);
-    }
+    let exit_code = match ran {
+        Ok(Ok((code, diags))) => {
+            if !diags.is_empty() {
+                let mut sink = DiagnosticSink::new();
+                for diag in diags {
+                    sink.emit(diag);
+                }
+                print_diagnostics_multi(&files, &sink);
+            }
+            code
+        }
+        // The interpreter thread panicked: a user-level bug (a stack
+        // overflow, an explicit panic) must still exit with a message
+        // rather than taking the whole CLI down with it.
+        Ok(Err(_)) => {
+            eprintln!("noct run: the interpreter thread panicked");
+            1
+        }
+        Err(e) => {
+            eprintln!("noct run: cannot start the interpreter thread: {e}");
+            1
+        }
+    };
 
     exit_code
 }

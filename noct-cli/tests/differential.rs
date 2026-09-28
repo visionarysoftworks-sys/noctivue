@@ -175,6 +175,111 @@ fn check_fixture(rel: &str) {
 // ── Pure semantics ────────────────────────────────────────────────────
 
 #[test]
+fn managed_heap_round_trip() {
+    // Phase 6.5 / UI-S0: every managed builtin, end to end, on BOTH
+    // backends. This is the test the feature never had — the lowering
+    // used to fabricate a `Const Unit` typed as `Weak`/`Unowned` and an
+    // `ArcRetain` for `weak_create`, so a program could "pass" while
+    // doing none of the work. Byte-identical stdout plus a zero exit is
+    // what proves the VM now performs the same operations the
+    // interpreter does.
+    check_source(
+        "managed_round_trip",
+        r#"managed fn roundtrip() -> String:
+    let a = heap_alloc_builtin(7)
+    let w = weak_create_builtin(a)
+    let opt = weak_load_builtin(w)
+    let u = unowned_create_builtin(a)
+    let back = unowned_load_builtin(u)
+    let b = arc_retain_builtin(a)
+    arc_release_builtin(b)
+    "managed-ok"
+
+main():
+    println(roundtrip())
+"#,
+    );
+}
+
+#[test]
+fn managed_weak_upgrade_reports_live_and_dead() {
+    // `weak_load` must answer `Some` while the object is alive and
+    // `None` once every strong reference is gone. The "dead" half is
+    // the interesting one: it is the behaviour a fabricated `Weak`
+    // could never produce, because there was no heap behind it.
+    check_source(
+        "managed_weak_upgrade",
+        r#"managed fn live() -> String:
+    let a = heap_alloc_builtin(1)
+    let w = weak_create_builtin(a)
+    let opt = weak_load_builtin(w)
+    if opt.is_some():
+        "live-some"
+    else:
+        "live-none"
+
+managed fn dead() -> String:
+    let a = heap_alloc_builtin(1)
+    let w = weak_create_builtin(a)
+    arc_release_builtin(a)
+    let opt = weak_load_builtin(w)
+    if opt.is_some():
+        "dead-some"
+    else:
+        "dead-none"
+
+main():
+    println(live())
+    println(dead())
+"#,
+    );
+}
+
+#[test]
+fn managed_operations_refuse_wrong_shapes_loudly() {
+    // The wrong-shape cases must FAIL, identically, on both backends —
+    // and they must not merely agree on a silent success. `arc_retain`
+    // on a non-Arc used to do nothing at all in the VM, and `weak_load`
+    // on a non-Weak used to answer `None`, which reads exactly like
+    // "freed". Runtime-failure stderr text is a documented boundary
+    // (see the module comment), so this asserts the exit code and the
+    // absence of the bogus success on stdout.
+    let path = write_case(
+        "managed_wrong_shape",
+        r#"managed fn bad() -> String:
+    let n = 5
+    arc_retain_builtin(n)
+    "should-not-reach"
+
+main():
+    println(bad())
+"#,
+    );
+    let run = run_cli(&["run", &path.to_string_lossy()]);
+    let run_vm = run_cli(&["run-vm", &path.to_string_lossy()]);
+    assert_eq!(
+        run.status.code(),
+        run_vm.status.code(),
+        "[managed_wrong_shape] exit codes differ: run={:?} run-vm={:?}\nrun stderr:\n{}\nrun-vm stderr:\n{}",
+        run.status.code(),
+        run_vm.status.code(),
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run_vm.stderr),
+    );
+    assert_ne!(
+        run.status.code(),
+        Some(0),
+        "arc_retain on a non-Arc must fail loudly, not silently succeed.\nstdout:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+    );
+    assert!(
+        !String::from_utf8_lossy(&run.stdout).contains("should-not-reach"),
+        "a failing managed op must not let the program continue.\nstdout:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+    );
+}
+
+#[test]
 fn arithmetic_and_bindings() {
     // NOTE: `print` takes String only; interpolating keeps the test on the
     // execution path instead of vacuously agreeing on a type error.

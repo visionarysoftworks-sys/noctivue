@@ -1,0 +1,11 @@
+// @skip-test (module-graph fixture: covered by compiler::modules::tests)
+export *
+
+export fn barrel_fn() -> String:
+    "barrel"
+
+export struct BarrelStruct:
+    x: Int
+
+struct BarrelPrivate:
+    x: Int

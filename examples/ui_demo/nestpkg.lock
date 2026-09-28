@@ -1,0 +1,7 @@
+lock_version: 1
+packages:
+    ui:
+        version: 0.1.0
+        source:
+            path: ../../libs/ui
+        tier: native

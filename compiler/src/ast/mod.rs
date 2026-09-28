@@ -44,6 +44,19 @@ pub struct ImportDecl {
     pub span: Span,
 }
 
+/// `export *` — re-export all public items in this file.
+#[derive(Debug, Clone)]
+pub struct ExportAll {
+    pub span: Span,
+}
+
+/// `export * except item1, item2, ...` — re-export all except named items.
+#[derive(Debug, Clone)]
+pub struct ExportAllExcept {
+    pub excluded: Vec<String>,
+    pub span: Span,
+}
+
 // ── Top-level items ───────────────────────────────────────────────────────────
 
 /// A top-level item in a source file.
@@ -78,8 +91,14 @@ pub enum Item {
     Const(ConstDecl),
     /// Module declaration (`mod …`).
     Mod(ModDecl),
+    /// Re-export of imported items (`export import …`).
+    ReExport(ImportDecl),
     /// Re-export (`export …`).
     Export(Box<Item>),
+    /// Re-export all public items in this file (`export *`).
+    ExportAll(ExportAll),
+    /// Re-export all public items except specified ones (`export * except ...`).
+    ExportAllExcept(ExportAllExcept),
 }
 
 // ── Bare declaration (the key Phase 0 node) ───────────────────────────────────
@@ -106,6 +125,9 @@ pub struct BareDecl {
     pub return_ty: Option<TypeExpr>,
     pub body: Block,
     pub span: Span,
+    /// True if this declaration was prefixed with `managed` keyword
+    /// (UI-S0: managed mode / ARC runtime)
+    pub is_managed: bool,
 }
 
 // ── Declarations ─────────────────────────────────────────────────────────────
@@ -118,6 +140,9 @@ pub struct FunctionDecl {
     pub return_ty: Option<TypeExpr>,
     pub body: FunctionBody,
     pub span: Span,
+    /// True if this function was declared with `managed` prefix
+    /// (UI-S0: managed mode / ARC runtime)
+    pub is_managed: bool,
 }
 
 /// A concurrent task declaration (`task name(params): block`).

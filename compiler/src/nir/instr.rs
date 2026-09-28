@@ -74,14 +74,40 @@ pub enum Instr {
     Move { dst: ValueId, src: ValueId },
 
     // ── Memory (Managed) ────────────────────────────────────────────────────
-    /// `%dst = heap_alloc ty` — allocate on heap (managed mode)
-    HeapAlloc { dst: ValueId, ty: NirTy },
+    /// `%dst = heap_alloc %src, ty` — allocate on heap (managed mode), moving src value
+    HeapAlloc { dst: ValueId, src: ValueId, ty: NirTy },
     /// `arc_retain %src` — increment refcount
     ArcRetain { src: ValueId },
     /// `arc_release %src` — decrement refcount
     ArcRelease { src: ValueId },
-    /// `%dst = weak_load %src` — load weak reference
+    /// `%dst = arc_load %src, ty` — read the value behind a strong
+    /// reference. Cannot fail by construction: holding an `Arc` means the
+    /// object is alive, so this differs from `unowned_load` (which traps
+    /// on a dangling back-reference) and from `weak_load` (which yields
+    /// `None` once the last strong reference is gone).
+    ArcLoad { dst: ValueId, src: ValueId, ty: NirTy },
+    /// `%dst = arc_id %src` — the heap identity of a strong reference, as
+    /// an integer. Two `Arc`s to the same heap object report the same id,
+    /// so a re-render can recognise a shared subtree without loading or
+    /// comparing a single value.
+    ArcId { dst: ValueId, src: ValueId },
+    /// `%dst = weak_create %src, ty` — a non-owning observer of an `Arc`.
+    /// Does not keep the object alive; `WeakLoad` on it yields `None`
+    /// once the last strong reference is gone.
+    WeakCreate { dst: ValueId, src: ValueId, ty: NirTy },
+    /// `%dst = weak_load %src` — upgrade a weak reference to
+    /// `Option<Arc>`, or `None` when the object is already freed.
     WeakLoad { dst: ValueId, src: ValueId, ty: NirTy },
+    /// `%dst = unowned_create %src, ty` — a checked back-reference that
+    /// is deliberately NOT refcounted. Its whole point is to let a
+    /// child point at its parent without keeping the parent alive and
+    /// without creating a strong cycle, so it must not affect the
+    /// count. It trades liveness for safety: `UnownedLoad` traps if the
+    /// object is gone, unlike `WeakLoad` which returns `None`.
+    UnownedCreate { dst: ValueId, src: ValueId, ty: NirTy },
+    /// `%dst = unowned_load %src, ty` — dereference an unowned
+    /// back-reference, trapping when the object has been deallocated.
+    UnownedLoad { dst: ValueId, src: ValueId, ty: NirTy },
 
     // ── Aggregates ──────────────────────────────────────────────────────────
     /// `%dst = struct_new [field0, field1, ...]` — construct struct
@@ -109,8 +135,13 @@ pub enum Instr {
     CallIndirect { dst: ValueId, func_ptr: ValueId, args: Vec<ValueId>, ret_ty: NirTy },
 
     // ── I/O ────────────────────────────────────────────────────────────────
-    /// `print %val` — print a value (returns Unit)
-    Print { val: ValueId },
+    /// `print %val` — print a value (returns Unit). `newline` carries
+    /// the `print` vs `println` distinction, which lowering used to
+    /// discard: it emitted this single instruction for BOTH, so the VM
+    /// silently dropped every trailing newline. The differential
+    /// harness missed it because every existing case used
+    /// `print("{x}")`, never `println`.
+    Print { val: ValueId, newline: bool },
 
     // ── Host I/O (Phase 5/M4 stdlib builtins) ─────────────────────────────
     //
@@ -175,6 +206,10 @@ pub enum Instr {
     /// `%dst = fs_write %path, %contents` — write a UTF-8 text file.
     /// VM-only (returns `Result<Unit, String>`).
     FsWrite { dst: ValueId, path: ValueId, contents: ValueId },
+    /// `%dst = fs_list_dir %path` — list immediate directory entries as
+    /// basename-sorted `DirEntry` structs. VM-only (returns
+    /// `Result<[DirEntry], String>`).
+    FsListDir { dst: ValueId, path: ValueId },
     /// `%dst = fs_modified_millis %path` — file mtime as millis since
     /// the Unix epoch. VM-only (returns `Result<Int, String>`).
     FsModifiedMillis { dst: ValueId, path: ValueId },
@@ -286,10 +321,19 @@ impl fmt::Display for Instr {
             Instr::Load { dst, src, ty } => write!(f, "{} = load {} : {}", dst, src, ty),
             Instr::Store { val, ptr } => write!(f, "store {}, {}", val, ptr),
             Instr::Move { dst, src } => write!(f, "{} = move {}", dst, src),
-            Instr::HeapAlloc { dst, ty } => write!(f, "{} = heap_alloc : {}", dst, ty),
+            Instr::HeapAlloc { dst, src, ty } => write!(f, "{} = heap_alloc {}, : {}", dst, src, ty),
             Instr::ArcRetain { src } => write!(f, "arc_retain {}", src),
             Instr::ArcRelease { src } => write!(f, "arc_release {}", src),
+            Instr::ArcLoad { dst, src, ty } => write!(f, "{} = arc_load {} : {}", dst, src, ty),
+            Instr::ArcId { dst, src } => write!(f, "{} = arc_id {}", dst, src),
+            Instr::WeakCreate { dst, src, ty } => write!(f, "{} = weak_create {} : {}", dst, src, ty),
             Instr::WeakLoad { dst, src, ty } => write!(f, "{} = weak_load {} : {}", dst, src, ty),
+            Instr::UnownedCreate { dst, src, ty } => {
+                write!(f, "{} = unowned_create {} : {}", dst, src, ty)
+            }
+            Instr::UnownedLoad { dst, src, ty } => {
+                write!(f, "{} = unowned_load {} : {}", dst, src, ty)
+            }
             Instr::StructNew { dst, fields, field_names, ty } => write!(f, "{} = struct_new [{}] : {} ({})", dst, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty, field_names.join(", ")),
             Instr::FieldGet { dst, obj, field, ty } => write!(f, "{} = field_get {}, {} : {}", dst, obj, field, ty),
             Instr::FieldSet { dst, obj, field, val } => write!(f, "{} = field_set {}, {}, {}", dst, obj, field, val),
@@ -300,7 +344,9 @@ impl fmt::Display for Instr {
             Instr::EnumNew { dst, tag, fields, ty } => write!(f, "{} = enum_new {} [{}] : {}", dst, tag, fields.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ty),
             Instr::Call { dst, func, args, ret_ty } => write!(f, "{} = call {}({}) : {}", dst, func, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
             Instr::CallIndirect { dst, func_ptr, args, ret_ty } => write!(f, "{} = call_indirect {}({}) : {}", dst, func_ptr, args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "), ret_ty),
-            Instr::Print { val } => write!(f, "print {}", val),
+            Instr::Print { val, newline } => {
+                write!(f, "{} {}", if *newline { "println" } else { "print" }, val)
+            }
             Instr::Sleep { ms } => write!(f, "sleep {}", ms),
             Instr::FsExists { dst, path } => write!(f, "{} = fs_exists {}", dst, path),
             Instr::IoWrite { src } => write!(f, "io_write {}", src),
@@ -318,6 +364,7 @@ impl fmt::Display for Instr {
             Instr::DbClose { dst, handle } => write!(f, "{} = db_close {}", dst, handle),
             Instr::FsRead { dst, path } => write!(f, "{} = fs_read {}", dst, path),
             Instr::FsWrite { dst, path, contents } => write!(f, "{} = fs_write {}, {}", dst, path, contents),
+            Instr::FsListDir { dst, path } => write!(f, "{} = fs_list_dir {}", dst, path),
             Instr::FsModifiedMillis { dst, path } => write!(f, "{} = fs_modified_millis {}", dst, path),
             Instr::EnvGet { dst, name } => write!(f, "{} = env_get {}", dst, name),
             Instr::ConfigGet { dst, path, key } => write!(f, "{} = config_get {}, {}", dst, path, key),

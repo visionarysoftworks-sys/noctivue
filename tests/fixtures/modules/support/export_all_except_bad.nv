@@ -1,0 +1,5 @@
+// @skip-test (module-graph fixture: covered by compiler::modules::tests)
+export * except not_exported_anywhere
+
+export fn kept_fn() -> String:
+    "kept"

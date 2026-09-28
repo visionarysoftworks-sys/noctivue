@@ -11,6 +11,12 @@
 //! `run-vm`/`build`, per the portability rule in `libs/README.md`).
 //! Matching the ten digit literals keeps this module pure and total:
 //! every call returns a value, so no error channel is needed.
+//!
+//! `is_ascii_alphanumeric` is here for the same reason the digit
+//! scanner is: pre-release and build-metadata identifiers are
+//! alphanumeric, and the language offers no `char` range test. String
+//! comparison is lexicographic, so a one-character string range test is
+//! exactly an ASCII range test — no `char -> Int` needed.
 
 /// Value of an ASCII digit char, or -1 when `c` is not a digit.
 export fn digit_value(c: Char) -> Int:
@@ -49,3 +55,15 @@ export fn digit_value(c: Char) -> Int:
 /// True when `c` is an ASCII digit.
 export fn is_digit(c: Char) -> Bool:
     digit_value(c) >= 0
+
+/// True when `c` is an ASCII letter or digit — the character class
+/// SemVer allows inside a pre-release or build-metadata identifier
+/// (with `-` as the one extra member).
+///
+/// Range tests go through a one-character string because the language
+/// has no `char` ordering operator; for a single ASCII character
+/// lexicographic string order *is* code-point order, so this is the
+/// same test written the only way it can be. Nothing else about the
+/// language is assumed: `to_int` is not touched.
+export fn is_ascii_alphanumeric(c: Char) -> Bool:
+    let s = "{c}"; s >= "0" && s <= "9" || s >= "A" && s <= "Z" || s >= "a" && s <= "z"

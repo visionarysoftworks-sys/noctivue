@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Arc as StdArc, RwLock, Weak as StdWeak, LazyLock, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum VmValue {
@@ -32,9 +32,42 @@ pub enum VmValue {
     Tuple(Vec<VmValue>),
     Range { start: Box<VmValue>, end: Box<VmValue>, inclusive: bool },
     Pointer(usize),
+    // UI-S0: Managed mode (ARC) values
+    Arc(VmArcValue),
+    Weak(VmWeakValue),
+    Unowned(VmUnownedValue),
 }
 
 impl VmValue {
+    /// The runtime shape's name, for error messages. A managed-heap
+    /// operation that gets the wrong shape must SAY which shape it got
+    /// — "expected Arc value" alone leaves the reader guessing, and
+    /// these are the messages that tell a `Weak` from a dangling
+    /// `Unowned` at a glance.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            VmValue::Int(_) => "Int",
+            VmValue::Float(_) => "Float",
+            VmValue::Bool(_) => "Bool",
+            VmValue::Char(_) => "Char",
+            VmValue::String(_) => "String",
+            VmValue::Unit => "Unit",
+            VmValue::Struct { .. } => "Struct",
+            VmValue::Enum { .. } => "Enum",
+            VmValue::List(_) => "List",
+            VmValue::Option(_) => "Option",
+            VmValue::Result(_) => "Result",
+            VmValue::Function(_) => "Function",
+            VmValue::Closure { .. } => "Closure",
+            VmValue::Tuple(_) => "Tuple",
+            VmValue::Arc(_) => "Arc",
+            VmValue::Weak(_) => "Weak",
+            VmValue::Unowned(_) => "Unowned",
+            VmValue::Range { .. } => "Range",
+            VmValue::Pointer(_) => "Pointer",
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             VmValue::Bool(b) => *b,
@@ -94,7 +127,187 @@ impl std::fmt::Display for VmValue {
                 write!(f, "{}..{}{}", start, end_str, end)
             }
             VmValue::Pointer(addr) => write!(f, "pointer@{:?}", addr),
+            VmValue::Arc(arc) => write!(f, "<arc @{}>", arc.heap_id.0),
+            VmValue::Weak(weak) => write!(f, "<weak @{}>", weak.heap_id.0),
+            VmValue::Unowned(unowned) => write!(f, "<unowned @{}>", unowned.heap_id.0),
         }
+    }
+}
+
+// ============================================================================
+// UI-S0: Managed mode (ARC) runtime for NIR VM
+// ============================================================================
+
+/// Unique heap object identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VmHeapId(pub u64);
+
+static VM_NEXT_HEAP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn vm_alloc_heap_id() -> VmHeapId {
+    VmHeapId(VM_NEXT_HEAP_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// A heap-allocated object with reference counting.
+#[derive(Debug)]
+pub struct VmHeapObject {
+    /// The actual value stored on the heap.
+    pub value: RwLock<VmValue>,
+    /// Strong reference count (Arc count).
+    pub strong_count: AtomicU64,
+    /// Weak reference count (Weak count).
+    pub weak_count: AtomicU64,
+}
+
+impl VmHeapObject {
+    pub fn new(value: VmValue) -> StdArc<Self> {
+        StdArc::new(VmHeapObject {
+            value: RwLock::new(value),
+            strong_count: AtomicU64::new(1),
+            weak_count: AtomicU64::new(1), // Arc itself holds a weak reference
+        })
+    }
+
+    pub fn strong_count(&self) -> u64 {
+        self.strong_count.load(Ordering::Relaxed)
+    }
+
+    pub fn weak_count(&self) -> u64 {
+        self.weak_count.load(Ordering::Relaxed)
+    }
+
+    pub fn increment_strong(&self) {
+        self.strong_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn decrement_strong(&self) -> u64 {
+        self.strong_count.fetch_sub(1, Ordering::Relaxed) - 1
+    }
+
+    pub fn increment_weak(&self) {
+        self.weak_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn decrement_weak(&self) -> u64 {
+        self.weak_count.fetch_sub(1, Ordering::Relaxed) - 1
+    }
+}
+
+/// Global heap registry for managed objects.
+/// Maps HeapId to the heap object.
+#[derive(Debug, Default)]
+pub struct VmHeapRegistry {
+    pub objects: HashMap<VmHeapId, StdArc<VmHeapObject>>,
+}
+
+impl VmHeapRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allocate a new managed object on the heap.
+    /// Returns the HeapId and increments the strong count to 1.
+    pub fn alloc(&mut self, value: VmValue) -> VmHeapId {
+        let id = vm_alloc_heap_id();
+        let obj = VmHeapObject::new(value);
+        self.objects.insert(id, obj);
+        id
+    }
+
+    /// Get a reference to the heap object (for reading/writing the value).
+    pub fn get(&self, id: VmHeapId) -> Option<&StdArc<VmHeapObject>> {
+        self.objects.get(&id)
+    }
+
+    /// Retain (increment strong count) for an Arc clone.
+    pub fn retain(&self, id: VmHeapId) -> Result<(), String> {
+        self.objects.get(&id)
+            .map(|obj| obj.increment_strong())
+            .ok_or_else(|| format!("Arc retain: heap object {} not found", id.0))
+    }
+
+    /// Release (decrement strong count). If count reaches 0, deallocate.
+    pub fn release(&mut self, id: VmHeapId) -> Result<(), String> {
+        let should_drop = self.objects.get(&id)
+            .map(|obj| obj.decrement_strong() == 0)
+            .ok_or_else(|| format!("Arc release: heap object {} not found", id.0))?;
+
+        if should_drop {
+            self.objects.remove(&id);
+        }
+        Ok(())
+    }
+
+    /// Create a weak reference to the object.
+    pub fn weak(&self, id: VmHeapId) -> Result<VmWeakValue, String> {
+        self.objects.get(&id)
+            .map(|obj| {
+                obj.increment_weak();
+                VmWeakValue::new(StdArc::downgrade(obj), id)
+            })
+            .ok_or_else(|| format!("Weak creation: heap object {} not found", id.0))
+    }
+
+    /// Create an unowned back-reference. Deliberately does NOT touch
+    /// any count — that is the entire difference from [`Self::weak`],
+    /// and the reason a child can point at its parent without keeping
+    /// the parent alive. Safety comes from the trap in
+    /// `UnownedLoad`, not from the count.
+    pub fn unowned(&self, id: VmHeapId) -> Result<VmUnownedValue, String> {
+        if self.objects.contains_key(&id) {
+            Ok(VmUnownedValue::new(id))
+        } else {
+            Err(format!(
+                "Unowned creation: heap object {} not found",
+                id.0
+            ))
+        }
+    }
+}
+
+/// Strong reference (Arc) to a heap-allocated managed value.
+#[derive(Debug, Clone)]
+pub struct VmArcValue {
+    pub heap_id: VmHeapId,
+}
+
+impl VmArcValue {
+    pub fn new(heap_id: VmHeapId) -> Self {
+        Self { heap_id }
+    }
+}
+
+/// Weak reference to a heap-allocated managed value.
+/// Upgrading returns `Option<VmArcValue>`.
+#[derive(Debug, Clone)]
+pub struct VmWeakValue {
+    pub weak_ref: StdWeak<VmHeapObject>,
+    pub heap_id: VmHeapId,
+}
+
+impl VmWeakValue {
+    pub fn new(weak_ref: StdWeak<VmHeapObject>, heap_id: VmHeapId) -> Self {
+        Self { weak_ref, heap_id }
+    }
+
+    /// Attempt to upgrade to a strong reference.
+    /// Returns `None` if the object has been deallocated.
+    pub fn upgrade(&self) -> Option<VmArcValue> {
+        self.weak_ref.upgrade().map(|_| VmArcValue::new(self.heap_id))
+    }
+}
+
+/// Unowned reference to a heap-allocated managed value.
+/// Does not affect reference counts. Accessing a dangling unowned
+/// reference traps at runtime (panic).
+#[derive(Debug, Clone)]
+pub struct VmUnownedValue {
+    pub heap_id: VmHeapId,
+}
+
+impl VmUnownedValue {
+    pub fn new(heap_id: VmHeapId) -> Self {
+        Self { heap_id }
     }
 }
 
@@ -222,6 +435,56 @@ fn vm_ok(value: VmValue) -> VmValue {
 
 fn vm_err(message: String) -> VmValue {
     VmValue::Result(Err(Box::new(VmValue::String(message))))
+}
+
+/// Read one directory level as sorted `DirEntry` values.
+///
+/// Mirrors the interpreter's listing exactly: byte-ordered UTF-8 basenames,
+/// symlinks classified through their targets, and a point-in-time view in
+/// which an entry that disappears before classification is neither a file
+/// nor a directory.
+fn vm_list_dir_entries(path: &str) -> Result<VmValue, String> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("cannot list directory `{path}`: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("cannot list directory `{path}`: {error}"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("directory `{path}` contains a non-UTF-8 file name"))?;
+        names.push(name);
+    }
+    names.sort();
+
+    let mut values = Vec::with_capacity(names.len());
+    for name in names {
+        let full_path = std::path::Path::new(path).join(&name);
+        let (is_dir, is_file) = match std::fs::symlink_metadata(&full_path) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    match std::fs::metadata(&full_path) {
+                        Ok(target) => (target.is_dir(), target.is_file()),
+                        Err(_) => (false, false),
+                    }
+                } else {
+                    (file_type.is_dir(), file_type.is_file())
+                }
+            }
+            Err(_) => (false, false),
+        };
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), VmValue::String(name));
+        fields.insert("is_dir".to_string(), VmValue::Bool(is_dir));
+        fields.insert("is_file".to_string(), VmValue::Bool(is_file));
+        values.push(VmValue::Struct {
+            name: "DirEntry".to_string(),
+            fields,
+        });
+    }
+    Ok(VmValue::List(values))
 }
 
 /// Serve one accepted connection to completion on its worker
@@ -561,6 +824,8 @@ pub struct Vm {
     call_stack: Vec<CallFrame>,
     globals: HashMap<FuncId, VmValue>,
     heap: Vec<VmValue>,
+    /// UI-S0: Managed mode (ARC) heap registry
+    managed_heap: RefCell<VmHeapRegistry>,
     /// Open SQLite connections by opaque handle id (Phase 5/M4:
     /// `Db*`). Interior mutability: `execute_instr` only has `&mut
     /// self` shared across arms, and the VM is single-threaded —
@@ -591,6 +856,7 @@ impl Vm {
             call_stack: Vec::new(),
             globals: HashMap::new(),
             heap: Vec::new(),
+            managed_heap: RefCell::new(VmHeapRegistry::new()),
             db: RefCell::new(VmDbRegistry::default()),
             rng: RefCell::new(VmRngRegistry::default()),
         };
@@ -736,11 +1002,6 @@ impl Vm {
                 self.heap.push(VmValue::Unit);
                 frame.locals[dst.0 as usize] = VmValue::Pointer(ptr);
             }
-            Instr::HeapAlloc { dst, ty: _ } => {
-                let ptr = self.heap.len();
-                self.heap.push(VmValue::Unit);
-                frame.locals[dst.0 as usize] = VmValue::Pointer(ptr);
-            }
             Instr::Load { dst, src, ty: _ } => {
                 let ptr_val = self.get_value(frame, *src)?;
                 if let VmValue::Pointer(idx) = ptr_val {
@@ -766,10 +1027,149 @@ impl Vm {
                 let val = self.get_value(frame, *src)?;
                 frame.locals[dst.0 as usize] = val;
             }
-            Instr::ArcRetain { src } => {}
-            Instr::ArcRelease { src } => {}
+            // UI-S0: Managed mode (ARC) instructions
+            Instr::HeapAlloc { dst, src, ty: _ } => {
+                let value = self.get_value(frame, *src)?;
+                let mut managed_heap = self.managed_heap.borrow_mut();
+                let heap_id = managed_heap.alloc(value);
+                frame.locals[dst.0 as usize] = VmValue::Arc(VmArcValue::new(heap_id));
+            }
+            Instr::ArcRetain { src } => {
+                let arc_val = self.get_value(frame, *src)?;
+                // Wrong shape is a loud error. It used to be `if let`
+                // with no else, so passing a non-Arc silently did
+                // nothing and the program carried on with a refcount
+                // it believed it had bumped.
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "arc_retain: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                let managed_heap = self.managed_heap.borrow();
+                managed_heap
+                    .retain(arc.heap_id)
+                    .map_err(VmError::ManagedPanic)?;
+            }
+            Instr::ArcRelease { src } => {
+                let arc_val = self.get_value(frame, *src)?;
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "arc_release: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                let mut managed_heap = self.managed_heap.borrow_mut();
+                managed_heap
+                    .release(arc.heap_id)
+                    .map_err(VmError::ManagedPanic)?;
+            }
+            Instr::ArcLoad { dst, src, ty: _ } => {
+                let arc_val = self.get_value(frame, *src)?;
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "arc_load: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                let managed_heap = self.managed_heap.borrow();
+                let Some(obj) = managed_heap.get(arc.heap_id) else {
+                    // Unreachable while refcounts are honest, so treat it as
+                    // the bug it is rather than defaulting to Unit.
+                    return Err(VmError::ManagedPanic(format!(
+                        "arc_load: heap object {} not found (dangling strong reference)",
+                        arc.heap_id.0
+                    )));
+                };
+                let value = obj.value.read().map_err(|_| {
+                    VmError::ManagedPanic(format!(
+                        "arc_load: heap object {} is poisoned",
+                        arc.heap_id.0
+                    ))
+                })?.clone();
+                frame.locals[dst.0 as usize] = value;
+            }
+            Instr::ArcId { dst, src } => {
+                let arc_val = self.get_value(frame, *src)?;
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "arc_id: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                frame.locals[dst.0 as usize] = VmValue::Int(arc.heap_id.0 as i128);
+            }
+            Instr::WeakCreate { dst, src, ty: _ } => {
+                let arc_val = self.get_value(frame, *src)?;
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "weak_create: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                let managed_heap = self.managed_heap.borrow();
+                let weak = managed_heap
+                    .weak(arc.heap_id)
+                    .map_err(VmError::ManagedPanic)?;
+                frame.locals[dst.0 as usize] = VmValue::Weak(weak);
+            }
             Instr::WeakLoad { dst, src, ty: _ } => {
-                frame.locals[dst.0 as usize] = VmValue::Option(None);
+                let weak_val = self.get_value(frame, *src)?;
+                // A non-Weak argument used to answer `None` — a silent
+                // wrong answer that reads exactly like "the object was
+                // freed". `None` must mean *dead*, never *wrong type*.
+                let VmValue::Weak(weak) = weak_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "weak_load: expected Weak value, found {}",
+                        weak_val.type_name()
+                    )));
+                };
+                let result = match weak.upgrade() {
+                    Some(arc) => VmValue::Option(Some(Box::new(VmValue::Arc(arc)))),
+                    None => VmValue::Option(None),
+                };
+                frame.locals[dst.0 as usize] = result;
+            }
+            Instr::UnownedCreate { dst, src, ty: _ } => {
+                let arc_val = self.get_value(frame, *src)?;
+                let VmValue::Arc(arc) = arc_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "unowned_create: expected Arc value, found {}",
+                        arc_val.type_name()
+                    )));
+                };
+                let managed_heap = self.managed_heap.borrow();
+                let unowned = managed_heap
+                    .unowned(arc.heap_id)
+                    .map_err(VmError::ManagedPanic)?;
+                frame.locals[dst.0 as usize] = VmValue::Unowned(unowned);
+            }
+            Instr::UnownedLoad { dst, src, ty: _ } => {
+                let unowned_val = self.get_value(frame, *src)?;
+                let VmValue::Unowned(unowned) = unowned_val else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "unowned_load: expected Unowned value, found {}",
+                        unowned_val.type_name()
+                    )));
+                };
+                // The trap. A dangling unowned back-reference is a
+                // program bug, so it stops the program — matching the
+                // interpreter's panic, and deliberately NOT the `None`
+                // that `weak_load` returns for the same condition.
+                let managed_heap = self.managed_heap.borrow();
+                let Some(obj) = managed_heap.get(unowned.heap_id) else {
+                    return Err(VmError::ManagedPanic(format!(
+                        "unowned_load: unowned reference trap - heap object {} deallocated",
+                        unowned.heap_id.0
+                    )));
+                };
+                let value = obj.value.read().map_err(|_| {
+                    VmError::ManagedPanic(format!(
+                        "unowned_load: heap object {} is poisoned",
+                        unowned.heap_id.0
+                    ))
+                })?.clone();
+                frame.locals[dst.0 as usize] = value;
             }
             Instr::StructNew { dst, fields, field_names, ty } => {
                 let field_values: Vec<VmValue> = fields.iter()
@@ -910,9 +1310,17 @@ impl Vm {
                     frame.locals[dst.0 as usize] = VmValue::Unit;
                 }
             }
-            Instr::Print { val } => {
+            Instr::Print { val, newline } => {
                 let v = self.get_value(frame, *val)?;
-                print!("{}", v);
+                // Byte-for-byte parity with the interpreter, which is the
+                // oracle: `print` emits no newline, `println` emits
+                // exactly one. The two were previously indistinguishable
+                // here, so VM stdout ran every line together.
+                if *newline {
+                    println!("{}", v);
+                } else {
+                    print!("{}", v);
+                }
             }
             // ── Phase 5/M4 host-IO builtins ──────────────────────────
             // Every arm mirrors `interp/src/lib.rs`'s `eval_builtin`
@@ -1309,6 +1717,18 @@ impl Vm {
                     }
                     _ => Err(Box::new(VmValue::String(
                         "fs_write_text: expected path and contents Strings".to_string(),
+                    ))),
+                };
+                frame.locals[dst.0 as usize] = VmValue::Result(result);
+            }
+            Instr::FsListDir { dst, path } => {
+                let p = self.get_value(frame, *path)?;
+                let result = match p {
+                    VmValue::String(path) => vm_list_dir_entries(&path)
+                        .map(Box::new)
+                        .map_err(|message| Box::new(VmValue::String(message))),
+                    _ => Err(Box::new(VmValue::String(
+                        "fs_list_dir: expected path String".to_string(),
                     ))),
                 };
                 frame.locals[dst.0 as usize] = VmValue::Result(result);
@@ -1879,4 +2299,15 @@ pub enum VmError {
     /// cancel, would report a cancellation that never happened.
     #[error("unsupported by this backend: {0}")]
     UnsupportedByBackend(String),
+    /// A managed-heap (ARC) operation failed at runtime: a refcount
+    /// bump or drop on a dead object, a `Weak`/`Unowned` of the wrong
+    /// shape, or a dangling `Unowned` dereference. Mirrors the
+    /// interpreter's `RuntimeError::Panic` for the same conditions —
+    /// these are program errors, not backend limits, which is why they
+    /// do NOT reuse `UnsupportedByBackend`. Loud by construction: a
+    /// `Weak` argument that was not a `Weak` used to answer `None`,
+    /// and a non-`Arc` argument to `ArcRetain` used to do nothing at
+    /// all, both of which are silent wrong answers.
+    #[error("managed heap: {0}")]
+    ManagedPanic(String),
 }

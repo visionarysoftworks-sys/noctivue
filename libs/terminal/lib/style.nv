@@ -1,6 +1,7 @@
-//! terminal/style — colors and text attributes as composable values.
+//! terminal/style — colors, text attributes, OSC 8 links, and width
+//! measurement as composable values.
 //!
-//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! Status: first-party library v0.2.0 (native tier). Pure `.nv`: no
 //! builtins beyond `print`/`println`/`assert`, so it runs on `run` today
 //! and stays portable to `run-vm`/`build` later. Nothing here touches a
 //! TTY, reads the environment, or sleeps: a style is a value, and
@@ -14,22 +15,52 @@
 //! print(style_text("DANGER", danger))
 //! ```
 //!
-//! ## Why truecolor only
+//! ## Why truecolor by default, and when to ask for a palette index
 //!
-//! Colors are RGB and always emitted as SGR `38;2;r;g;b` (and `48;2;…` for
-//! backgrounds). The 16-color SGR forms (`30`–`37`, `90`–`97`) are
-//! deliberately NOT emitted: which RGB a terminal shows for "color 1" is
-//! the *terminal's* policy, so honoring it is the terminal's job. Emitting
-//! explicit RGB states exactly what color was asked for and renders
-//! identically on every terminal that supports truecolor. `color_named`
-//! maps the 16 conventional names to their canonical RGB so callers can
-//! still ask for "red" without hardcoding components.
+//! A color is emitted as SGR `38;2;r;g;b` (`48;2;…` for backgrounds) when
+//! it carries RGB components, and as `38;5;N` (`48;5;N`) when it carries
+//! a 256-color palette index. The 16-color SGR forms (`30`–`37`,
+//! `90`–`97`) are deliberately NOT emitted: which RGB a terminal shows for
+//! "color 1" is the *terminal's* policy, so honoring it is the terminal's
+//! job.
+//!
+//! Default to `color(r, g, b)`. Reach for `color_palette(i)` when the
+//! index is what you actually mean — a theme, a diff, a CI log where the
+//! user's palette is the point, or an output that must survive a terminal
+//! that maps `38;5;N` to the user's own 256 colors instead of flattening
+//! it to RGB.
+//!
+//! The two can coexist in one style, in the two ways that are meaningful:
+//! a palette foreground over an RGB background, or an RGB foreground over
+//! a palette background. Within a *single* [`Color`] the two are mutually
+//! exclusive — it is a tagged union, and a palette index wins (see
+//! [`color`]); [`resolve_color`] converts one into the other on demand.
 
-/// An RGB color. Components are clamped to 0-255 by [`color`].
+import width::char_cells
+import width::is_promotable
+import width::is_vs16
+
+/// A color: either RGB components or a 256-color palette index, never
+/// both.
+///
+/// `index` is the palette discriminator and is `None` for an RGB color,
+/// so **every `Color` produced by this module's constructors is
+/// total**: read `r`/`g`/`b` for the components and `index` for the
+/// palette entry. `color_palette(i)` sets `index` to `Some(i)` and leaves
+/// the components at 0.
+///
+/// > **API change (v0.2.0).** `index` was added to `Color`. Code that
+/// > only calls the constructors ([`color`], [`color_named`],
+/// > [`color_palette`]) is unaffected. Code that writes the struct
+/// > literal `Color { r: …, g: …, b: … }` directly must now name all
+/// > four fields, because a literal missing a field is a distinct
+/// > incomplete struct type in this language. The constructors are the
+/// > supported way to build a `Color`.
 export struct Color:
     r: Int
     g: Int
     b: Int
+    index: Option<Int>
 
 /// A text style. Composable by value: the `with_*` functions return a new
 /// style and never mutate their argument, so a base style can be shared
@@ -48,6 +79,15 @@ export struct Style:
 /// emitting a real escape needs no builtin and no `to_int`.
 export fn esc() -> String:
     "\u{1b}"
+
+/// INTERNAL — the OSC introducer, `ESC ]`.
+export fn osc() -> String:
+    esc() + "]"
+
+/// INTERNAL — the String Terminator, `ESC \` (0x07 BEL is also accepted
+/// on input; see [`strip_ansi`]).
+export fn st() -> String:
+    esc() + "\\"
 
 /// INTERNAL — true when `c` is a CSI final byte (0x40-0x7E), which is
 /// where an ANSI control sequence ends. Compared lexicographically
@@ -74,16 +114,25 @@ export fn clamp_byte(v: Int) -> Int:
         else:
             v
 
+/// INTERNAL — the SGR parameters for one color under `base` (`38` for a
+/// foreground, `48` for a background): `;5;N` for a palette index,
+/// `;2;r;g;b` for RGB. A palette index takes the index path and ignores
+/// the components, which is what makes the two a tagged union.
+export fn color_params(base: Int, c: Color) -> String:
+    match c.index:
+        Some(v): "{base};5;{v}"
+        None: "{base};2;{c.r};{c.g};{c.b}"
+
 /// INTERNAL — SGR parameters for a foreground color, or `""` for none.
 export fn fg_params(c: Option<Color>) -> String:
     match c:
-        Some(col): "38;2;{col.r};{col.g};{col.b}"
+        Some(col): color_params(38, col)
         None: ""
 
 /// INTERNAL — SGR parameters for a background color, or `""` for none.
 export fn bg_params(c: Option<Color>) -> String:
     match c:
-        Some(col): "48;2;{col.r};{col.g};{col.b}"
+        Some(col): color_params(48, col)
         None: ""
 
 // ── construction ────────────────────────────────────────────────────────────
@@ -97,13 +146,17 @@ export fn make_style(fg: Option<Color>, bg: Option<Color>, bold: Bool, dim: Bool
 export fn plain() -> Style:
     make_style(None, None, false, false, false, false)
 
-/// An RGB color, with components clamped into 0-255.
+/// An RGB color, with components clamped into 0-255. `index` is `None`,
+/// so this renders as `38;2;r;g;b` / `48;2;r;g;b`.
 export fn color(r: Int, g: Int, b: Int) -> Color:
-    Color { r: clamp_byte(r), g: clamp_byte(g), b: clamp_byte(b) }
+    Color { r: clamp_byte(r), g: clamp_byte(g), b: clamp_byte(b), index: None }
 
 /// The 16 conventional color names as canonical RGB, or `None` for an
 /// unknown name. Names are lowercase with underscores: `bright_black`,
-/// `bright_red`, and so on.
+/// `bright_red`, and so on. These are the *xterm* RGB values, which are
+/// what a terminal that understands `38;2` shows for the corresponding
+/// palette slots; use [`color_named_palette`] to ask for the index
+/// instead.
 export fn color_named(name: String) -> Option<Color>:
     if name == "black":
         Some(color(0, 0, 0))
@@ -155,6 +208,59 @@ export fn color_named(name: String) -> Option<Color>:
                                                                 else:
                                                                     None
 
+/// The 16 conventional color names as 256-color palette indices (0-15),
+/// or `None` for an unknown name. Same names as [`color_named`].
+export fn color_named_palette(name: String) -> Option<Color>:
+    if name == "black":
+        Some(color_palette(0))
+    else:
+        if name == "red":
+            Some(color_palette(1))
+        else:
+            if name == "green":
+                Some(color_palette(2))
+            else:
+                if name == "yellow":
+                    Some(color_palette(3))
+                else:
+                    if name == "blue":
+                        Some(color_palette(4))
+                    else:
+                        if name == "magenta":
+                            Some(color_palette(5))
+                        else:
+                            if name == "cyan":
+                                Some(color_palette(6))
+                            else:
+                                if name == "white":
+                                    Some(color_palette(7))
+                                else:
+                                    if name == "bright_black":
+                                        Some(color_palette(8))
+                                    else:
+                                        if name == "bright_red":
+                                            Some(color_palette(9))
+                                        else:
+                                            if name == "bright_green":
+                                                Some(color_palette(10))
+                                            else:
+                                                if name == "bright_yellow":
+                                                    Some(color_palette(11))
+                                                else:
+                                                    if name == "bright_blue":
+                                                        Some(color_palette(12))
+                                                    else:
+                                                        if name == "bright_magenta":
+                                                            Some(color_palette(13))
+                                                        else:
+                                                            if name == "bright_cyan":
+                                                                Some(color_palette(14))
+                                                            else:
+                                                                if name == "bright_white":
+                                                                    Some(color_palette(15))
+                                                                else:
+                                                                    None
+
 /// `s` with a foreground color.
 export fn with_fg(s: Style, c: Color) -> Style:
     make_style(Some(c), s.bg, s.bold, s.dim, s.italic, s.underline)
@@ -178,6 +284,137 @@ export fn with_italic(s: Style) -> Style:
 /// `s` with underline.
 export fn with_underline(s: Style) -> Style:
     make_style(s.fg, s.bg, s.bold, s.dim, s.italic, true)
+
+// ── the 256-color palette ───────────────────────────────────────────────────
+/// The RGB value of one of the 6 levels of the color cube (N 0-5, where
+/// the levels are 0, 95, 135, 175, 215 and 255 — the xterm cube, which
+/// is NOT evenly spaced and so cannot be computed).
+export fn cube_level(n: Int) -> Int:
+    if n <= 0:
+        0
+    else:
+        if n == 1:
+            95
+        else:
+            if n == 2:
+                135
+            else:
+                if n == 3:
+                    175
+                else:
+                    if n == 4:
+                        215
+                    else:
+                        255
+
+/// The xterm RGB of palette slot `i` for 0-15 (the 16 system colors, as
+/// the xterm reference `rgb.txt` defines them), or `None` outside
+/// 0-255.
+///
+/// The system slots are the *reference* palette: a terminal is free to
+/// override them, and many do. The cube (16-231) and grayscale ramp
+/// (232-255) are fixed by the standard and are exact.
+export fn system_rgb(i: Int) -> Option<Color>:
+    if i == 0:
+        Some(color(0, 0, 0))
+    else:
+        if i == 1:
+            Some(color(205, 0, 0))
+        else:
+            if i == 2:
+                Some(color(0, 205, 0))
+            else:
+                if i == 3:
+                    Some(color(205, 205, 0))
+                else:
+                    if i == 4:
+                        Some(color(0, 0, 238))
+                    else:
+                        if i == 5:
+                            Some(color(205, 0, 205))
+                        else:
+                            if i == 6:
+                                Some(color(0, 205, 205))
+                            else:
+                                if i == 7:
+                                    Some(color(229, 229, 229))
+                                else:
+                                    if i == 8:
+                                        Some(color(127, 127, 127))
+                                    else:
+                                        if i == 9:
+                                            Some(color(255, 0, 0))
+                                        else:
+                                            if i == 10:
+                                                Some(color(0, 255, 0))
+                                            else:
+                                                if i == 11:
+                                                    Some(color(255, 255, 0))
+                                                else:
+                                                    if i == 12:
+                                                        Some(color(92, 92, 255))
+                                                    else:
+                                                        if i == 13:
+                                                            Some(color(255, 0, 255))
+                                                        else:
+                                                            if i == 14:
+                                                                Some(color(0, 255, 255))
+                                                            else:
+                                                                if i == 15:
+                                                                    Some(color(255, 255, 255))
+                                                                else:
+                                                                    None
+
+/// The RGB a terminal *typically* shows for palette slot `i` (0-255), or
+/// `None` when `i` is out of range.
+///
+/// This is the inverse of [`color_palette`]: build a color from a palette
+/// index with [`color_palette`] and read the RGB back with this. Useful
+/// for a caller that has to blend a palette color with an RGB one, or to
+/// print a legend. The returned `Color` has `index: None` — it is a
+/// plain RGB color.
+export fn palette_rgb(i: Int) -> Option<Color>:
+    if i < 0 || i > 255:
+        None
+    else:
+        if i < 16:
+            system_rgb(i)
+        else:
+            if i < 232:
+                // The 6x6x6 cube: index - 16 is r*36 + g*6 + b.
+                let n: Int = i - 16
+                let r_i: Int = n / 36; let rest: Int = n - r_i * 36; let g_i: Int = rest / 6
+                let b_i: Int = rest - g_i * 6
+                Some(color(cube_level(r_i), cube_level(g_i), cube_level(b_i)))
+            else:
+                // The 24-step grayscale ramp: 8, 18, … 238.
+                Some(color(8 + (i - 232) * 10, 8 + (i - 232) * 10, 8 + (i - 232) * 10))
+
+/// A 256-color palette color, emitted as `38;5;N` / `48;5;N`.
+///
+/// `i` is clamped into 0-255, matching [`color`]'s treatment of color
+/// components — a total function is worth more here than an `Err`,
+/// because a palette index is usually arithmetic (`16 + 36 * r`). When
+/// the index matters, validate with [`palette_rgb`] first, which returns
+/// `None` outside 0-255. The RGB components of the result are 0: a
+/// palette color carries an index, not components, and
+/// [`color_params`] emits the index and ignores them.
+export fn color_palette(i: Int) -> Color:
+    Color { r: 0, g: 0, b: 0, index: Some(clamp_byte(i)) }
+
+/// `c` as a plain RGB color: unchanged for an RGB color, and the
+/// reference RGB for a palette color (0 for anything the reference
+/// palette does not define).
+///
+/// This is the explicit way to collapse a tagged-union `Color` onto the
+/// RGB side, for a caller that has to do arithmetic on components.
+export fn resolve_color(c: Color) -> Color:
+    match c.index:
+        Some(i):
+            match palette_rgb(i):
+                Some(rgb): rgb
+                None: color(0, 0, 0)
+        None: c
 
 // ── rendering ───────────────────────────────────────────────────────────────
 /// The SGR escape prefix for `s`, or `""` when `s` is [`plain`]. A style
@@ -217,6 +454,39 @@ export fn style_text(text: String, s: Style) -> String:
     else:
         prefix + text + reset()
 
+// ── OSC 8 hyperlinks ────────────────────────────────────────────────────────
+/// Open an OSC 8 hyperlink: `ESC ] 8 ; params ; URI ESC \`.
+///
+/// The `params` field is emitted empty, so this is `ESC ] 8 ; ; URI
+/// ESC \`. An empty URI is the *close* form, which is exactly
+/// [`hyperlink_close`], so an empty `url` produces a well-formed (if
+/// useless) close.
+///
+/// The URI is emitted verbatim. Everything after the second `;` is the
+/// URI per the spec, so a `;` inside a URL is safe; an ESC or a `;` is
+/// the only thing that can terminate the sequence early, so do not build
+/// a URL from untrusted bytes.
+export fn hyperlink_open(url: String) -> String:
+    osc() + "8;;" + url + st()
+
+/// Close the innermost OSC 8 hyperlink: `ESC ] 8 ; ; ESC \`.
+export fn hyperlink_close() -> String:
+    osc() + "8;;" + st()
+
+/// `text` wrapped in an OSC 8 hyperlink to `url`:
+/// `ESC ] 8 ; ; url ESC \ text ESC ] 8 ; ; ESC \`.
+///
+/// Styling composes with linking in either order — both produce the same
+/// visible result, and [`visible_width`] measures both correctly:
+///
+/// ```text
+/// style_text(hyperlink("docs", url), with_underline(plain()))
+/// hyperlink(style_text("docs", with_underline(plain())), url)
+/// ```
+export fn hyperlink(text: String, url: String) -> String:
+    hyperlink_open(url) + text + hyperlink_close()
+
+// ── stripping and measuring ─────────────────────────────────────────────────
 /// INTERNAL — the character at index `i`, as a string.
 ///
 /// This package walks strings with an index, and the language's two string
@@ -233,46 +503,102 @@ export fn char_at(s: String, i: Int) -> String:
 
 /// Remove ANSI control sequences from `s`, returning the plain text.
 ///
-/// Handles CSI sequences (ESC `[` parameters final-byte 0x40-0x7E). An ESC
-/// that does NOT begin a CSI sequence is dropped and the character after it
-/// is kept, so text that merely contains an escape byte loses the escape
-/// rather than swallowing a real character.
+/// Handles both introducer families:
+///
+/// - **CSI** — `ESC [` parameters intermediates final-byte(0x40-0x7E),
+///   which covers every SGR sequence.
+/// - **OSC** — `ESC ] …` up to a String Terminator (`ESC \`, the way this
+///   module emits it) or a BEL (0x07, which some programs and older
+///   terminals emit instead). This is what makes
+///   [`hyperlink`] measurable: an OSC 8 link is invisible text plus two
+///   invisible control sequences, and a string that keeps them measures
+///   wider than it paints.
+///
+/// An ESC that does NOT begin a CSI or OSC sequence is dropped and the
+/// character after it is kept, so text that merely contains an escape
+/// byte loses the escape rather than swallowing a real character. A
+/// sequence left unterminated at the end of the string is dropped to the
+/// end. Only the 7-bit `ESC ]` form is recognized; the 8-bit C1 introducer
+/// (0x9D) is not.
 export fn strip_ansi(s: String) -> String:
     let e: String = esc(); var out = ""; var i = 0
     // Bytes still unconsumed. Decrementing by each character's byte width
     // keeps this exactly aligned with the string's byte length, so `i` walks
     // the character count and never indexes past the end.
     var budget: Int = s.length
-    var in_escape = false; var after_esc = false
+    // 0 = ground, 1 = saw ESC, 2 = inside CSI, 3 = inside OSC,
+    // 4 = inside OSC and saw ESC (the ST is `ESC \`).
+    //
+    // Named `mode`, not `state`: `state` is a reserved word in this
+    // language, and using it as an identifier fails with a misleading
+    // parse error (E0108 "expected identifier, found `Eq`") whose spans
+    // point past the end of the file.
+    var mode: Int = 0
     while budget > 0:
         let c: String = char_at(s, i); budget = budget - c.length
-        if in_escape:
-            if is_csi_final(c):
-                in_escape = false
-        else:
-            if after_esc:
-                after_esc = false
-                if c == "[":
-                    in_escape = true
-                else:
-                    out = out + c
+        if mode == 0:
+            if c == e:
+                mode = 1
             else:
-                if c == e:
-                    after_esc = true
+                out = out + c
+        else:
+            if mode == 1:
+                if c == "[":
+                    mode = 2
                 else:
-                    out = out + c
+                    if c == "]":
+                        mode = 3
+                    else:
+                        mode = 0; out = out + c
+            else:
+                if mode == 2:
+                    if is_csi_final(c):
+                        mode = 0
+                else:
+                    if mode == 3:
+                        if c == "\u{7}":
+                            mode = 0
+                        else:
+                            if c == e:
+                                mode = 4
+                    else:
+                        if c == "\\":
+                            mode = 0
+                        else:
+                            mode = 3
         i = i + 1
     out
 
 /// How many columns `s` occupies once escape sequences are removed.
 ///
-/// Counts CHARACTERS, not bytes (see [`char_at`]) and not terminal cells.
-/// Character counting is right for ASCII and for the box-drawing characters
-/// this package's tables use. It is wrong only for double-width text —
-/// CJK and emoji occupy two cells per character — and correcting that needs
-/// a wcwidth table, deliberately out of v0.1.0 (see `docs/overview.md`).
+/// Escape sequences are removed first ([`strip_ansi`]), so a styled
+/// string and its plain text measure the same. What is left is summed in
+/// **terminal cells**, not characters and not bytes, using the wcwidth
+/// table in `width`: CJK and fullwidth forms contribute 2, combining
+/// marks contribute 0, everything else (ASCII, box drawing, block
+/// elements) contributes 1.
+///
+/// A VS16 (U+FE0F) after a non-ASCII character widens that character
+/// from 1 cell to 2, so `☺` measures 1 and `☺️` measures 2. There is no
+/// grapheme clustering, so a multi-code-point emoji sequence measures per
+/// code point — see the `width` module docs for the full list of
+/// approximations.
 export fn visible_width(s: String) -> Int:
     let plain: String = strip_ansi(s); var n = 0; var i = 0; var budget: Int = plain.length
+    // True when the last character took 1 cell and a following VS16 could
+    // still widen it to 2.
+    var promotable = false
     while budget > 0:
-        let c: String = char_at(plain, i); budget = budget - c.length; n = n + 1; i = i + 1
+        // `c` is the one-character string the width table takes, and
+        // `c.length` is the byte budget — one index, two uses. Re-indexing
+        // `c[0]` to get a `Char` would double an already O(n²) walk.
+        let c: String = char_at(plain, i)
+        budget = budget - c.length
+        if is_vs16(c):
+            if promotable:
+                n = n + 1
+            promotable = false
+        else:
+            let w: Int = char_cells(c); n = n + w; promotable = w == 1 && is_promotable(c)
+        i = i + 1
     n

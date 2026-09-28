@@ -254,8 +254,37 @@ impl<'a> Parser<'a> {
     fn parse_top_decl(&mut self) -> Option<Item> {
         match self.peek() {
             Token::Export => {
-                let _span = self.current_span();
+                let export_span = self.current_span();
                 self.advance();
+                // Check for `export *` (export all)
+                if matches!(self.peek(), Token::Star) {
+                    let star_span = self.current_span();
+                    self.advance();
+                    // Check for `except` clause
+                    if matches!(self.peek(), Token::Ident(ref s) if s == "except") {
+                        self.advance(); // consume 'except'
+                        let mut excluded = Vec::new();
+                        loop {
+                            let ident = self.parse_ident()?;
+                            excluded.push(ident);
+                            if matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                                continue;
+                            }
+                            break;
+                        }
+                        return Some(Item::ExportAllExcept(ExportAllExcept {
+                            excluded,
+                            span: export_span,
+                        }));
+                    }
+                    return Some(Item::ExportAll(ExportAll { span: export_span }));
+                }
+                // Check for `export import ...` (re-export)
+                if matches!(self.peek(), Token::Import) {
+                    let import = self.parse_import()?;
+                    return Some(Item::ReExport(import));
+                }
                 let inner = self.parse_top_decl()?;
                 Some(Item::Export(Box::new(inner)))
             }
@@ -276,6 +305,12 @@ impl<'a> Parser<'a> {
             // Async function shorthand: `async fn` or `async name(...)`
             Token::Async => {
                 // Skip `async` for now — treated as a modifier, parse what follows.
+                self.advance();
+                self.parse_top_decl()
+            }
+            Token::Managed => {
+                // `managed` prefix for managed-mode declarations (UI-S0).
+                // Skip and parse the following declaration.
                 self.advance();
                 self.parse_top_decl()
             }
@@ -301,8 +336,18 @@ impl<'a> Parser<'a> {
 
     /// Parses a bare `Identifier [(params)] [-> Type] :` block into a `BareDecl`,
     /// or a standalone expression-statement if no colon-block follows.
+    /// Also handles `managed` prefix for managed-mode declarations.
     fn parse_bare_decl_or_expr_item(&mut self) -> Option<Item> {
         let start = self.current_span().start;
+
+        // Check for `managed` prefix
+        let is_managed = if *self.peek() == Token::Managed {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let name = self.parse_ident()?;
 
         // Optional generic params: `<T, U>`
@@ -352,6 +397,7 @@ impl<'a> Parser<'a> {
             return_ty,
             body,
             span: Span { start, end },
+            is_managed,
         }))
     }
 
@@ -384,6 +430,7 @@ impl<'a> Parser<'a> {
             return_ty,
             body,
             span: Span { start, end },
+            is_managed: false,
         })
     }
 
@@ -1140,6 +1187,7 @@ impl<'a> Parser<'a> {
                 return_ty,
                 body: FunctionBody::Block(body),
                 span: Span { start, end },
+                is_managed: false,
             };
             return Some(Stmt::Function(func));
         }
@@ -1233,6 +1281,7 @@ impl<'a> Parser<'a> {
             return_ty,
             body: FunctionBody::Block(body),
             span: Span { start, end },
+            is_managed: false,
         };
         Some(Stmt::Function(func))
     }

@@ -1,8 +1,15 @@
-# Noctivue Language Server
+# noctivue-analyzer — Noctivue Language Server
 
-`noctivue-lsp` is the editor-facing language server for Noctivue. It
-uses the compiler frontend and communicates over standard input/output
-using JSON-RPC and the Language Server Protocol.
+`noctivue-analyzer` is the editor-facing intelligence engine for Noctivue
+(the rust-analyzer / tsserver equivalent: hover, go-to-definition,
+completions, references). It uses the compiler frontend and communicates
+over standard input/output using JSON-RPC and the Language Server
+Protocol.
+
+Binary compatibility note: the crate and binary are still named
+`noctivue-lsp` (`target/release/noctivue-lsp.exe`) so the VS Code
+extension and scripts keep working. `InitializeResult.serverInfo.name`
+and the `window/logMessage` beacon already report `noctivue-analyzer`.
 
 ## Build and run
 

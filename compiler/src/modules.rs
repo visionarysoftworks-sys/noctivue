@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{self, Expr, FunctionBody, ImportDecl, Item, Param, Program, Stmt, TypeExpr};
+use crate::ast::{self, ExportAll, ExportAllExcept, Expr, FunctionBody, ImportDecl, Item, Param, Program, Stmt, TypeExpr};
 use crate::diagnostics::{Diagnostic, DiagnosticSink, Span};
 use crate::{lexer, parser};
 
@@ -29,6 +29,12 @@ pub struct ModuleGraph {
     /// store, in the toolchain's case). Carried on the graph so the
     /// resolver's search order is decided where the graph is built.
     package_roots: Vec<PathBuf>,
+    /// The toolchain's standard library, searched LAST so a project's own
+    /// module of the same name always shadows it. Files resolved under here
+    /// are promoted to roots (see [`ModuleGraph::visit`]) so their private
+    /// items survive linking — that promotion is what lets the stdlib carry
+    /// no `export` annotations, unlike an ordinary dependency.
+    stdlib_root: Option<PathBuf>,
     diagnostics: Vec<(PathBuf, Diagnostic)>,
 }
 
@@ -51,6 +57,7 @@ impl ModuleGraph {
             roots: roots.iter().filter_map(|p| canonical(p).ok()).collect(),
             diagnostics: Vec::new(),
             package_roots: package_roots.to_vec(),
+            stdlib_root: stdlib_root(),
         };
         let mut states = HashMap::<PathBuf, Visit>::new();
         for root in roots {
@@ -67,6 +74,7 @@ impl ModuleGraph {
             }
         }
         graph.check_flat_uses_of_private_items();
+        graph.check_export_all_except_names();
         Ok(graph)
     }
 
@@ -240,19 +248,62 @@ impl ModuleGraph {
     }
 
     /// Link the parsed joined program.  Root files retain private items;
-    /// imported files contribute only `export` items.
+    /// imported files contribute only `export` and `re-export` items.
     pub fn link(&self, mut program: Program) -> Program {
         let mut items = Vec::new();
         for item in program.items {
             let owner = self.owner(item_span(&item).start);
-            let is_root = owner
-                .and_then(|i| self.files.get(i))
+            let owner_file = owner.and_then(|i| self.files.get(i));
+            let is_root = owner_file
                 .map(|f| self.roots.contains(&f.path))
                 .unwrap_or(true);
+            // A re-export resolves against the file that writes it. With no
+            // attributable owner (should not happen) fall back to the last
+            // root, which is the old behaviour rather than a new failure.
+            let reexport_base = owner_file.or_else(|| {
+                self.files
+                    .iter()
+                    .rev()
+                    .find(|f| self.roots.contains(&f.path))
+            });
             if is_root {
-                items.push(unwrap_export(item));
-            } else if let Item::Export(inner) = item {
-                items.push(unwrap_export(*inner));
+                // Root: keep private items, expand exports and re-exports
+                match item {
+                    Item::Export(inner) => items.push(unwrap_export(*inner)),
+                    Item::ReExport(import) => {
+                        if let Some(base) = reexport_base {
+                            if let Some(expanded) = self.expand_reexport(base, &import) {
+                                items.extend(expanded);
+                            }
+                        }
+                    }
+                    Item::ExportAll(ref e) => {
+                        items.extend(self.expand_export_all(e));
+                    }
+                    Item::ExportAllExcept(ref e) => {
+                        items.extend(self.expand_export_all_except(e));
+                    }
+                    other => items.push(unwrap_export(other)),
+                }
+            } else {
+                // Dependency: only keep exported/re-exported items
+                match item {
+                    Item::Export(inner) => items.push(unwrap_export(*inner)),
+                    Item::ReExport(import) => {
+                        if let Some(base) = reexport_base {
+                            if let Some(expanded) = self.expand_reexport(base, &import) {
+                                items.extend(expanded);
+                            }
+                        }
+                    }
+                    Item::ExportAll(ref e) => {
+                        items.extend(self.expand_export_all(e));
+                    }
+                    Item::ExportAllExcept(ref e) => {
+                        items.extend(self.expand_export_all_except(e));
+                    }
+                    _ => {}
+                }
             }
         }
         program.items = items;
@@ -260,6 +311,101 @@ impl ModuleGraph {
         let aliases = self.module_alias_exports();
         self.rewrite_imported_refs(&mut program, &aliases);
         program
+    }
+
+    /// Expand a re-export (`export import path`) into the target module's
+    /// exported items. Returns the items to include in the linked program.
+    ///
+    /// `importer` is the file that WRITES the re-export, and it must be
+    /// the resolution base. This used to resolve against the root file
+    /// instead, which silently broke every barrel: a package whose
+    /// `lib/main.nv` says `export import widget` was asked for `widget`
+    /// relative to the *consuming* project, found nothing there, and
+    /// expanded to nothing at all. The failure was invisible — the
+    /// re-export simply contributed zero items, so every name the barrel
+    /// was supposed to forward came back `E0201 unknown identifier` with
+    /// no diagnostic anywhere saying a barrel had been dropped. Same
+    /// root-only assumption as `export *` and `module_alias_exports`.
+    fn expand_reexport(&self, importer: &ModuleFile, import: &ImportDecl) -> Option<Vec<Item>> {
+        let (module, item_name) = self.resolve_import(importer, import)?;
+        // Re-export must be a module import (not an item import)
+        if item_name.is_some() {
+            return None;
+        }
+        let Some(source) = self.files.iter().find(|f| f.path == module) else {
+            return None;
+        };
+        // Collect all exported items from the target module
+        let mut exports = Vec::new();
+        for item in &source.program.items {
+            if let Some(name) = exported_name(item) {
+                exports.push(unwrap_export(item.clone()));
+            }
+        }
+        Some(exports)
+    }
+
+    /// `export *` — forward every exported item of *this* file.
+    ///
+    /// Deliberately contributes nothing, and that is the correct
+    /// behaviour for this linker rather than a stub. Linking is flat
+    /// (see [`ModuleGraph::link`]): a root file already contributes
+    /// *all* of its items, and a dependency already contributes
+    /// exactly its `export`ed items. So every name `export *` asks to
+    /// forward is already in the linked program, and re-injecting it
+    /// would push a *second* definition of each re-exported name.
+    ///
+    /// The real limitation this hides is worth stating plainly: a
+    /// barrel cannot use this form to *withhold* a name. A root keeps
+    /// its private items and a dependency's non-exports are never
+    /// contributed at all, so `export * except x` has nothing left to
+    /// remove. Giving it real meaning needs a namespaced barrel model,
+    /// which is an architecture decision, not a linker tweak. The
+    /// `except` list is still validated loudly
+    /// (`check_export_all_except_names`) so it cannot rot into a
+    /// comment that lies.
+    fn expand_export_all(&self, _e: &ExportAll) -> Vec<Item> {
+        Vec::new()
+    }
+
+    /// `export * except a, b` — as [`ModuleGraph::expand_export_all`],
+    /// which this shares, including the same limitation: the excluded
+    /// names are checked for existence, not removed.
+    fn expand_export_all_except(&self, _e: &ExportAllExcept) -> Vec<Item> {
+        Vec::new()
+    }
+
+    /// Loud check for `export * except <name>`: every excluded name
+    /// must actually be an export *of the file that writes the
+    /// `except`*. This is what keeps the form honest while it
+    /// contributes nothing — a typo in an exclusion list is a
+    /// diagnostic, not a silently dead line.
+    fn check_export_all_except_names(&mut self) {
+        for file in &self.files {
+            let exported: HashSet<String> = file
+                .program
+                .items
+                .iter()
+                .filter_map(exported_name)
+                .collect();
+            for item in &file.program.items {
+                let Item::ExportAllExcept(e) = item else {
+                    continue;
+                };
+                for name in &e.excluded {
+                    if !exported.contains(name) {
+                        self.diagnostics.push((
+                            file.path.clone(),
+                            Diagnostic::error(format!(
+                                "`export * except {name}`: `{name}` is not exported by this file, so there is nothing to exclude"
+                            ))
+                            .with_span(e.span.clone(), "excluded here")
+                            .with_code("E0110"),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     fn add_item_aliases(&self, program: &mut Program) {
@@ -304,16 +450,26 @@ impl ModuleGraph {
     /// is used flat (or under its alias via `add_item_aliases`).
     fn module_alias_exports(&self) -> HashMap<String, HashSet<String>> {
         let mut aliases = HashMap::new();
-        let Some(root) = self
-            .files
-            .iter()
-            .rev()
-            .find(|f| self.roots.contains(&f.path))
-        else {
-            return aliases;
-        };
-        for import in &root.program.imports {
-            if let Some((module, item)) = self.resolve_import(root, import) {
+        // EVERY file's imports, not just the root's. This used to read
+        // only `root.program.imports`, which meant a module qualifier
+        // was honoured only where the root happened to import it: a
+        // dependency that did its own `import widget` and then wrote
+        // `widget.column(...)` got `E0201 unknown identifier widget`,
+        // because the qualifier was never registered. `libs/ui` hit
+        // this on every cross-module call — the same root-only
+        // assumption that `export *` was built on.
+        //
+        // The linker is flat, so a qualifier name is global rather than
+        // file-scoped. Two files importing different modules under one
+        // name would therefore merge their export sets. That is the
+        // pre-existing model (it already applied within a single file),
+        // and `or_insert_with` + `extend` keeps it additive: a rewrite
+        // still only happens when the member is actually exported.
+        for importer in &self.files {
+            for import in &importer.program.imports {
+                let Some((module, item)) = self.resolve_import(importer, import) else {
+                    continue;
+                };
                 if item.is_some() {
                     continue;
                 }
@@ -325,15 +481,26 @@ impl ModuleGraph {
                 if key.is_empty() {
                     continue;
                 }
-                if let Some(source) = self.files.iter().find(|f| f.path == module) {
-                    let exports: HashSet<String> = source
-                        .program
-                        .items
-                        .iter()
-                        .filter_map(|item| exported_name(item))
-                        .collect();
+                let Some(source) = self.files.iter().find(|f| f.path == module) else {
+                    continue;
+                };
+                let exports: HashSet<String> = source
+                    .program
+                    .items
+                    .iter()
+                    .filter_map(|item| exported_name(item))
+                    .collect();
+                aliases
+                    .entry(key.clone())
+                    .or_insert_with(HashSet::new)
+                    .extend(exports.clone());
+                // Also register the full module path prefix (e.g., for
+                // `import semver::version`, also register `semver` as a
+                // qualifier so `semver::Type` gets stripped to `Type`).
+                if import.path.len() >= 2 {
+                    let module_prefix = import.path[..import.path.len() - 1].join("::");
                     aliases
-                        .entry(key)
+                        .entry(module_prefix)
                         .or_insert_with(HashSet::new)
                         .extend(exports);
                 }
@@ -342,9 +509,18 @@ impl ModuleGraph {
         aliases
     }
 
-    /// Rewrite qualified references to linked imports inside root-owned
-    /// items only. Dependency files are already linked by flattening,
-    /// so touching them here could only corrupt same-named locals.
+    /// Rewrite qualified references to linked imports. A file may use a
+    /// qualifier **it imported itself**, whether or not it is a root.
+    ///
+    /// The rewrite is export-precise — `module_alias_exports` only
+    /// registers a module's *exported* names, so `document.path` is left
+    /// alone when `path` is a local field — so a same-named local is not
+    /// at risk. Restricting the rewrite to roots was stricter than
+    /// necessary and cost a real capability: a dependency that did its own
+    /// `import widget` and then wrote `widget.column(...)` got
+    /// `E0201 unknown identifier widget`, because the qualifier was
+    /// registered but never applied. That is every cross-module call in
+    /// `libs/ui`, and it made the package unusable as a dependency.
     fn rewrite_imported_refs(
         &self,
         program: &mut Program,
@@ -354,10 +530,44 @@ impl ModuleGraph {
             return;
         }
         for item in &mut program.items {
-            if self.owned_by_root(item_span(item).start) {
+            let start = item_span(item).start;
+            if self.owned_by_root(start)
+                || self.owner(start).is_some_and(|i| self.uses_own_qualifier(i))
+            {
                 rewrite_item(item, aliases);
             }
         }
+    }
+
+    /// Whether this file registered at least one module qualifier of its
+    /// own — i.e. it has an `import m` whose target exports something, so
+    /// `m.name` is meaningful in this file.
+    fn uses_own_qualifier(&self, file_index: usize) -> bool {
+        let Some(file) = self.files.get(file_index) else {
+            return false;
+        };
+        file.program.imports.iter().any(|import| {
+            let Some((module, item)) = self.resolve_import(file, import) else {
+                return false;
+            };
+            if item.is_some() {
+                return false;
+            }
+            let key = import
+                .alias
+                .clone()
+                .or_else(|| import.path.last().cloned())
+                .unwrap_or_default();
+            if key.is_empty() {
+                return false;
+            }
+            self.files
+                .iter()
+                .find(|f| f.path == module)
+                .is_some_and(|source| {
+                    source.program.items.iter().any(|i| exported_name(i).is_some())
+                })
+        })
     }
 
     fn owned_by_root(&self, offset: usize) -> bool {
@@ -373,14 +583,14 @@ impl ModuleGraph {
         import: &ImportDecl,
     ) -> Option<(PathBuf, Option<String>)> {
         let path = import.path.join("::");
-        if let Ok(exact) = resolve_path(&importer.path, &path, &self.package_roots) {
+        if let Ok(exact) = resolve_path(&importer.path, &path, &self.package_roots, self.stdlib_root.as_deref()) {
             if self.files.iter().any(|f| f.path == exact) {
                 return Some((exact, None));
             }
         }
         let item = import.path.last()?.clone();
         let module_path = import.path[..import.path.len().saturating_sub(1)].join("::");
-        let module = resolve_path(&importer.path, &module_path, &self.package_roots).ok()?;
+        let module = resolve_path(&importer.path, &module_path, &self.package_roots, self.stdlib_root.as_deref()).ok()?;
         if self.files.iter().any(|f| f.path == module) {
             Some((module, Some(item)))
         } else {
@@ -395,6 +605,17 @@ impl ModuleGraph {
             None => {}
         }
         states.insert(path.to_path_buf(), Visit::Active);
+        // A stdlib module is a ROOT, not a dependency: the linker keeps a
+        // root's private items, so `import math::…` works without every
+        // stdlib file being `export`-annotated. The trade-off is that stdlib
+        // items are flattened into the joined program, so a user definition
+        // that collides with a stdlib name shadows it — which is the same
+        // rule that governs any other root.
+        if let Some(root) = &self.stdlib_root {
+            if path.starts_with(root) {
+                self.roots.insert(path.to_path_buf());
+            }
+        }
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
         let mut local_sink = DiagnosticSink::new();
@@ -413,8 +634,7 @@ impl ModuleGraph {
                     ))
                     .with_span(import.span.clone(), "imported here")
                     .with_code("E0101"),
-                ));
-                continue;
+                ));                continue;
             };
             if states.get(&target) == Some(&Visit::Active) {
                 self.diagnostics.push((
@@ -431,8 +651,20 @@ impl ModuleGraph {
             self.visit(&target, states)?;
             if let Some(item_name) = item {
                 if let Some(target_file) = self.files.iter().find(|file| file.path == target) {
+                    // A stdlib module is a ROOT, and a root's items are all
+                    // part of the program — so every one of them is
+                    // reachable by an item import. Requiring `export` here
+                    // would mean annotating all ~96 stdlib files, which is
+                    // the opposite of how a root is meant to behave.
+                    // Scoped to the stdlib on purpose: an ordinary
+                    // dependency keeps its encapsulation.
+                    let stdlib_module = self
+                        .stdlib_root
+                        .as_ref()
+                        .is_some_and(|root| target.starts_with(root));
                     let found = target_file.program.items.iter().find(|candidate| {
-                        exported_name(candidate).as_deref() == Some(item_name.as_str())
+                        stdlib_module && item_name_of(candidate).as_deref() == Some(item_name.as_str())
+                            || exported_name(candidate).as_deref() == Some(item_name.as_str())
                     });
                     if found.is_none() {
                         let exists_private = target_file.program.items.iter().any(|candidate| {
@@ -475,12 +707,67 @@ impl ModuleGraph {
                 }
             }
         }
-        self.files.push(ModuleFile {
+        // Re-exported modules must be LOADED, not just expanded. The loop
+        // above only follows `program.imports`, but a barrel writes
+        // `export import widget` as an ITEM (`Item::ReExport`), so a
+        // package whose `lib/main.nv` consists solely of re-exports never
+        // pulled its own modules into the graph. Expansion then found
+        // nothing to expand and every name the barrel forwarded came back
+        // `E0201 unknown identifier` — with no diagnostic saying a barrel
+        // had been dropped, because a re-export that resolves to nothing
+        // is indistinguishable from one that was never written.
+        //
+        // Cycles are checked exactly as for imports, so a mutual
+        // re-export is a loud `E0100` rather than infinite recursion.
+        let file = ModuleFile {
             path: path.to_path_buf(),
             source,
             program,
             base: 0,
-        });
+        };
+        let reexports: Vec<ImportDecl> = file
+            .program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::ReExport(import) => Some(import.clone()),
+                _ => None,
+            })
+            .collect();
+        for import in &reexports {
+            let Some((target, item)) = self.resolve_import_path(path, import) else {
+                self.diagnostics.push((
+                    path.to_path_buf(),
+                    Diagnostic::error(format!(
+                        "cannot resolve re-exported module `{}`",
+                        import.path.join("::")
+                    ))
+                    .with_span(import.span.clone(), "re-exported here")
+                    .with_code("E0101"),
+                ));
+                continue;
+            };
+            if item.is_some() {
+                // `export import m::Item` names one item, not a module to
+                // load; the import path above would already have covered a
+                // real import of the same name.
+                continue;
+            }
+            if states.get(&target) == Some(&Visit::Active) {
+                self.diagnostics.push((
+                    path.to_path_buf(),
+                    Diagnostic::error(format!(
+                        "module import cycle involving `{}`",
+                        target.display()
+                    ))
+                    .with_span(import.span.clone(), "cycle enters here")
+                    .with_code("E0100"),
+                ));
+                continue;
+            }
+            self.visit(&target, states)?;
+        }
+        self.files.push(file);
         states.insert(path.to_path_buf(), Visit::Done);
         Ok(())
     }
@@ -491,14 +778,14 @@ impl ModuleGraph {
         import: &ImportDecl,
     ) -> Option<(PathBuf, Option<String>)> {
         let path = import.path.join("::");
-        if let Ok(exact) = resolve_path(importer, &path, &self.package_roots) {
+        if let Ok(exact) = resolve_path(importer, &path, &self.package_roots, self.stdlib_root.as_deref()) {
             if exact.is_file() {
                 return Some((exact, None));
             }
         }
         let item = import.path.last()?.clone();
         let module = import.path[..import.path.len().saturating_sub(1)].join("::");
-        let module = resolve_path(importer, &module, &self.package_roots).ok()?;
+        let module = resolve_path(importer, &module, &self.package_roots, self.stdlib_root.as_deref()).ok()?;
         if module.is_file() {
             Some((module, Some(item)))
         } else {
@@ -526,10 +813,46 @@ fn canonical(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize()
 }
 
+/// Locate the toolchain's standard library.
+///
+/// Resolution order:
+///   1. `NOCT_STDLIB` — explicit override (tests, hermetic builds, mirrors).
+///   2. `<exe_dir>/../lib/noctivue/stdlib` — the installed SDK layout.
+///   3. `<crate>/../stdlib` — a dev checkout, or `cargo test`.
+///
+/// Returns `None` when no stdlib is present, which leaves resolution exactly
+/// as it was rather than failing: an installation missing its stdlib should
+/// still build projects that import nothing from it.
+pub fn stdlib_root() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("NOCT_STDLIB") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("..").join("lib").join("noctivue").join("stdlib"));
+        }
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("stdlib"),
+    );
+    for candidate in candidates {
+        if let Ok(path) = canonical(&candidate) {
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_path(
     importer: &Path,
     import: &str,
     package_roots: &[PathBuf],
+    stdlib_root: Option<&Path>,
 ) -> std::io::Result<PathBuf> {
     let parts: Vec<&str> = import.split("::").filter(|part| !part.is_empty()).collect();
     if parts.is_empty() {
@@ -568,8 +891,39 @@ fn resolve_path(
                 candidates.extend(package_tree_candidates(root, package, &module));
                 candidates.extend(pointer_tree_candidates(root, package, &module));
             }
+        } else {
+            // A BARE package import (`import ui`) means "this package's
+            // entry module", which by the same convention is `lib/main.nv`.
+            // Without this, a package could only ever be reached through
+            // `pkg::module`, so a barrel package — one whose whole point
+            // is that its `lib/main.nv` re-exports a surface — was
+            // unreachable by its own name. `examples/ui_demo` hit exactly
+            // this: `import ui` failed `E0101 cannot resolve imported
+            // module 'ui'` and the error named the import rather than the
+            // one line of the manifest that declared the dependency.
+            //
+            // Only the declared-root lookups (`vendor/`, the content store,
+            // and manifest `path:` roots) are consulted here. The
+            // `dir/<pkg>/lib/...` sibling guess is deliberately NOT added
+            // for a bare name, because it would newly compete with plain
+            // single-module imports like `import math` and could change
+            // how existing code resolves.
+            let package = parts[0];
+            let module = "main";
+            candidates.extend(package_tree_candidates(&dir.join("vendor"), package, module));
+            for root in package_roots {
+                candidates.extend(package_tree_candidates(root, package, module));
+                candidates.extend(pointer_tree_candidates(root, package, module));
+            }
         }
         ancestor = dir.parent();
+    }
+    // The toolchain's standard library is searched LAST, after every local,
+    // sibling, `vendor/`, and store candidate. A project that ships its own
+    // `math.nv` keeps it, so making the stdlib reachable can never change how
+    // existing code resolves.
+    if let Some(root) = stdlib_root {
+        candidates.push(root.join(&relative));
     }
     for mut candidate in candidates.clone() {
         if candidate.extension().is_none() {
@@ -672,6 +1026,9 @@ fn item_span(item: &Item) -> Span {
         Item::Impl(x) => x.span.clone(),
         Item::Const(x) => x.span.clone(),
         Item::Mod(x) => x.span.clone(),
+        Item::ReExport(x) => x.span.clone(),
+        Item::ExportAll(x) => x.span.clone(),
+        Item::ExportAllExcept(x) => x.span.clone(),
         Item::Export(x) => item_span(x),
     }
 }
@@ -703,6 +1060,9 @@ fn item_name_of(item: &Item) -> Option<String> {
         Item::Const(x) => Some(x.name.clone()),
         Item::Mod(x) => Some(x.name.clone()),
         Item::Impl(_) => None,
+        Item::ReExport(_) => None,
+        Item::ExportAll(_) => None,
+        Item::ExportAllExcept(_) => None,
     }
 }
 
@@ -771,6 +1131,9 @@ fn item_kind_name(item: &Item) -> &'static str {
         Item::Impl(_) => "impl block",
         Item::Const(_) => "const",
         Item::Mod(_) => "module",
+        Item::ReExport(_) => "re-export",
+        Item::ExportAll(_) => "export-all",
+        Item::ExportAllExcept(_) => "export-all-except",
         Item::Export(_) => "item",
     }
 }
@@ -1029,6 +1392,9 @@ fn collect_used_item(item: &Item, used: &mut HashMap<String, Span>) {
             }
         }
         Item::Export(inner) => collect_used_item(inner, used),
+        Item::ExportAll(_) => {}
+        Item::ExportAllExcept(_) => {}
+        Item::ReExport(_) => {}, // ReExport wraps ImportDecl, not an Item - nothing to collect
         Item::Derive(_) => {}
     }
 }
@@ -1382,6 +1748,9 @@ fn rewrite_item(item: &mut Item, aliases: &HashMap<String, HashSet<String>>) {
             }
         }
         Item::Export(i) => rewrite_item(i, aliases),
+        Item::ExportAll(_) => {}
+        Item::ExportAllExcept(_) => {}
+        Item::ReExport(_) => {}, // ReExport wraps ImportDecl, not an Item
         Item::Derive(_) => {}
     }
 }
@@ -1623,6 +1992,67 @@ mod tests {
             .to_path_buf()
     }
 
+    /// A path in the compiler's fixture tree, outside the `modules/`
+    /// directory the module fixtures share.
+    fn other_fixture(parts: &[&str]) -> PathBuf {
+        let mut path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests")
+            .join("fixtures");
+        for part in parts {
+            path = path.join(part);
+        }
+        path
+    }
+
+    /// The stdlib is a built-in ROOT, not a registry package: importable
+    /// from any project with no manifest entry and no package root
+    /// (docs/RELEASE_PLAN.md B3/B4, B1's design decision).
+    #[test]
+    fn imports_toolchain_stdlib_without_a_package_root() {
+        let root = stdlib_root().expect("no stdlib root found (dev checkout?)");
+        let graph = ModuleGraph::load(&[other_fixture(&["stdlib", "probe.nv"])]).unwrap();
+        assert!(
+            !graph
+                .diagnostics
+                .iter()
+                .any(|(_, d)| d.code.as_deref() == Some("E0101")),
+            "a stdlib import did not resolve: {:?}",
+            graph.diagnostics
+        );
+        assert!(
+            graph.files.iter().any(|f| f.path.starts_with(&root)),
+            "the import resolved somewhere other than the stdlib root {root:?}"
+        );
+    }
+
+    /// The stdlib is searched LAST, so a project's own module of the same
+    /// path still wins. Without this the change would be able to shadow
+    /// existing code.
+    #[test]
+    fn a_project_module_shadows_the_stdlib() {
+        let root = stdlib_root().expect("no stdlib root found (dev checkout?)");
+        let graph = ModuleGraph::load(&[other_fixture(&["stdlib", "shadow", "probe.nv"])]).unwrap();
+        assert!(
+            !graph
+                .diagnostics
+                .iter()
+                .any(|(_, d)| d.code.as_deref() == Some("E0101")),
+            "the shadowing import did not resolve: {:?}",
+            graph.diagnostics
+        );
+        assert!(
+            !graph.files.iter().any(|f| f.path.starts_with(&root)),
+            "the stdlib was loaded even though the project defines the same path"
+        );
+        let (source, _) = graph.joined_source();
+        assert!(
+            source.contains("shadow_marker"),
+            "the project's own module should have been the one linked"
+        );
+    }
+
     #[test]
     fn links_exported_module_and_rewrites_alias() {
         let graph = ModuleGraph::load(&[fixture("main.nv")]).unwrap();
@@ -1643,6 +2073,81 @@ mod tests {
             .diagnostics
             .iter()
             .any(|(_, d)| d.code.as_deref() == Some("E0100") && !d.labels.is_empty()));
+    }
+
+    #[test]
+    fn export_all_in_a_dependency_adds_no_duplicate_definitions() {
+        // `export *` in a dependency must not re-inject the ROOT's
+        // exports, and must not re-inject the dependency's own either
+        // (the flat linker already contributes both). The old
+        // implementation returned the root file's exported items,
+        // which duplicated definitions silently. A duplicate `fn` in
+        // one program is the tell: typecheck would see two `barrel_fn`
+        // declarations.
+        let graph = ModuleGraph::load(&[fixture("export_all_dep.nv")]).unwrap();
+        let (source, _) = graph.joined_source();
+        let mut sink = DiagnosticSink::new();
+        let tokens = lexer::lex(&source, &mut sink);
+        let program = graph.link(parser::parse(&tokens, &mut sink));
+        let names: Vec<String> = program
+            .items
+            .iter()
+            .filter_map(item_name_of)
+            .filter(|n| n == "barrel_fn" || n == "root_fn")
+            .collect();
+        let count = |n: &str| names.iter().filter(|x| *x == n).count();
+        assert_eq!(
+            count("barrel_fn"),
+            1,
+            "the dependency's own export must appear once, got {names:?}"
+        );
+        assert_eq!(
+            count("root_fn"),
+            1,
+            "the ROOT's export must not be re-injected by the dependency's \
+             `export *`, got {names:?}"
+        );
+        let program = crate::resolver::resolve(program, &mut sink);
+        let _module = crate::typeck::typecheck(program, &mut sink);
+        assert!(!sink.has_errors(), "{:?}", sink.diagnostics());
+    }
+
+    #[test]
+    fn export_all_except_accepts_a_real_export() {
+        let graph = ModuleGraph::load_with(&[fixture("export_all_dep.nv")], &[]).unwrap();
+        let _ = graph;
+        // The `except` fixture is its own root: loading it must be clean.
+        let dir = fixture_dir();
+        let graph = ModuleGraph::load(&[dir.join("support").join("export_all_except.nv")]).unwrap();
+        assert!(
+            !graph
+                .diagnostics
+                .iter()
+                .any(|(p, _)| p.ends_with("export_all_except.nv")),
+            "excluding a real export must be accepted: {:?}",
+            graph.diagnostics
+        );
+    }
+
+    #[test]
+    fn export_all_except_rejects_a_name_that_is_not_exported() {
+        // The one loud behaviour `export * except` can still have: a
+        // typo in the exclusion list is a diagnostic, so the form
+        // cannot rot into a comment that lies about what it hides.
+        let dir = fixture_dir();
+        let graph =
+            ModuleGraph::load(&[dir.join("support").join("export_all_except_bad.nv")]).unwrap();
+        let diag = graph
+            .diagnostics
+            .iter()
+            .find(|(_, d)| d.code.as_deref() == Some("E0110"))
+            .unwrap_or_else(|| panic!("no E0110 for a bogus exclusion: {:?}", graph.diagnostics));
+        assert!(
+            diag.1.message.contains("not_exported_anywhere")
+                && diag.1.message.contains("nothing to exclude"),
+            "the error must name the item and say there is nothing to exclude: {}",
+            diag.1.message
+        );
     }
 
     #[test]
@@ -1788,6 +2293,53 @@ mod tests {
             graph.diagnostics
         );
         let _ = dir;
+    }
+
+    #[test]
+    fn a_barrels_re_exported_module_is_loaded_and_forwarded() {
+        // Two bugs, one symptom. `support/barrel/main.nv` is nothing but
+        // `export import widget`, and `barrel_bulk.nv` does `import
+        // support::barrel` then calls `text(...)` unqualified.
+        //
+        // (a) The visitor only followed `program.imports`, but a barrel
+        //     writes its re-exports as ITEMS, so `widget.nv` was never
+        //     loaded and there was nothing to expand.
+        // (b) `expand_reexport` resolved the path against the ROOT file
+        //     rather than the barrel, so it looked for `widget` next to
+        //     the consumer.
+        //
+        // Together these made a barrel silently forward nothing: every
+        // name came back `E0201 unknown identifier` with no diagnostic
+        // anywhere saying a barrel had been dropped.
+        let graph = ModuleGraph::load(&[fixture("barrel_bulk.nv")]).unwrap();
+        let (source, _) = graph.joined_source();
+        let mut sink = DiagnosticSink::new();
+        let tokens = lexer::lex(&source, &mut sink);
+        let program = graph.link(parser::parse(&tokens, &mut sink));
+        let program = crate::resolver::resolve(program, &mut sink);
+        let _module = crate::typeck::typecheck(program, &mut sink);
+        assert!(!sink.has_errors(), "{:?}", sink.diagnostics());
+    }
+
+    #[test]
+    fn an_unresolvable_re_export_is_loud() {
+        // The counterpart to the test above: a barrel that forwards
+        // nothing must SAY so. Silently expanding to zero items is exactly
+        // what made the original bug invisible.
+        let broken = fixture_dir().join("broken_barrel.nv");
+        std::fs::write(&broken, "export import no_such_module_anywhere\n")
+            .expect("write broken barrel");
+        let graph = ModuleGraph::load(std::slice::from_ref(&broken)).unwrap();
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|(_, d)| d.code.as_deref() == Some("E0101")
+                    && d.message.contains("re-exported module")),
+            "a barrel naming a missing module must be a loud E0101: {:?}",
+            graph.diagnostics
+        );
+        let _ = std::fs::remove_file(&broken);
     }
 
     #[test]

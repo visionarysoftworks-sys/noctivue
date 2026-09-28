@@ -1,0 +1,68 @@
+//! Re-render benchmark: N0 (identical) and N1 (one leaf changed).
+//!
+//! Run: `noct test` from `libs/ui`.
+//!
+//! What this proves: a re-render of a large tree whose frames share
+//! structure costs comparisons, not deep walks. N0 hands the SAME root
+//! `Arc` to both sides, so the diff is a single `arc_id` comparison and
+//! must come back empty. N1 rebuilds one leaf (new `Arc`, bumped versions
+//! up its path) while sharing the other 999, so the diff must find
+//! exactly the changed position without visiting the shared subtrees'
+//! values. Both assert COUNTS (deterministic); milliseconds are printed
+//! for the record but never asserted, because wall-clock is
+//! machine-dependent and a timing assertion is a flaky test by another
+//! name.
+//!
+//! The numbers this replaces (value-based `diff_widgets`, same shapes):
+//! 1,907 ms at 100 nodes, 7,665 ms at 250, 227 s wall at 1,000.
+
+import widget::text
+import widget::column
+import cycle_mitigation::diff_live_pair
+import cycle_mitigation::Mutation
+
+fn leaf(i: Int) -> Arc<Widget>:
+    text("node")
+
+managed fn frame(n: Int) -> Arc<Widget>:
+    let acc: [Arc<Widget>] = []
+    let i = 0
+    while i < n:
+        acc = list_append_builtin(acc, leaf(i))
+        i = i + 1
+    return column(acc)
+
+managed fn frame_with_one_changed(n: Int, base: Arc<Widget>) -> Arc<Widget>:
+    let kids: [Arc<Widget>] = arc_load_builtin(base).children
+    let acc: [Arc<Widget>] = []
+    let i = 0
+    while i < n:
+        if i == n - 1:
+            acc = list_append_builtin(acc, text("CHANGED"))
+        else:
+            acc = list_append_builtin(acc, kids[i])
+        i = i + 1
+    return column(acc)
+
+fn mutations_of(found: Option<Mutation>) -> Int:
+    match found:
+        Some(m): 1
+        None: 0
+
+main():
+    let a = frame(1000)
+    let t0 = time_mono_ms_builtin()
+    let d0 = diff_live_pair(a, a, 0, 0 - 1, 0)
+    let t1 = time_mono_ms_builtin()
+    let n0 = mutations_of(d0)
+    assert(n0 == 0, "identical frames must diff to nothing")
+    print("N0-identical-ms={t1 - t0}")
+    print("N0-mutations={n0}")
+    let b = frame_with_one_changed(1000, a)
+    let t2 = time_mono_ms_builtin()
+    let d1 = diff_live_pair(a, b, 0, 0 - 1, 0)
+    let t3 = time_mono_ms_builtin()
+    let c1 = mutations_of(d1)
+    assert(c1 == 1, "one changed leaf must produce exactly a found change")
+    print("N1-one-changed-ms={t3 - t2}")
+    print("N1-mutations={c1}")

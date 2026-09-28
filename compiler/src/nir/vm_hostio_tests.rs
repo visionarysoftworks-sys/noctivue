@@ -131,6 +131,38 @@ fn fs_exists_true_and_false() {
 }
 
 #[test]
+fn fs_list_dir_sorted_names_and_kinds() {
+    let tag = unique_tag();
+    let dir = std::env::temp_dir().join(format!("noctivue-vm-list-{tag}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("zeta.txt"), b"z").expect("seed file");
+    std::fs::write(dir.join("alpha.txt"), b"a").expect("seed file");
+    std::fs::create_dir_all(dir.join("beta-dir")).expect("seed directory");
+    let lit = nv_string_literal(&dir.to_string_lossy().replace('\\', "/"));
+    let source = format!(
+        "fn main():\n    match fs_list_dir_builtin({lit}):\n        Ok(_):\n            \"directory-ok\"\n        Err(_):\n            \"listing-failed\"\n"
+    );
+    assert_eq!(run_vm_value(&source), Ok("directory-ok".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fs_list_dir_rejects_missing_and_non_directory() {
+    let tag = unique_tag();
+    let dir = std::env::temp_dir().join(format!("noctivue-vm-list-missing-{tag}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("case.txt");
+    std::fs::write(&file, b"x").expect("seed file");
+    let lit = nv_string_literal(&file.to_string_lossy().replace('\\', "/"));
+    let missing = nv_string_literal(&format!("{}-absent", file.to_string_lossy().replace('\\', "/")));
+    let source = format!(
+        "fn main():\n    match fs_list_dir_builtin({lit}):\n        Ok(_):\n            \"file-listed\"\n        Err(_):\n            match fs_list_dir_builtin({missing}):\n                Ok(_):\n                    \"missing-listed\"\n                Err(_):\n                    \"listing-rejected\"\n"
+    );
+    assert_eq!(run_vm_value(&source), Ok("listing-rejected".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn fs_modified_millis_ok_and_missing() {
     let tag = unique_tag();
     let path = temp_path(&tag);

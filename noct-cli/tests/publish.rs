@@ -708,3 +708,62 @@ fn publish_sbom_contains_root_and_path_dep_with_correct_hashes() {
     assert!(text2.contains(&expected), "second SBOM must carry the same root hash");
     cleanup(&dir);
 }
+
+/// A project whose dependencies are ALL local `path:` sources needs no
+/// lockfile. There is no registry version, content hash, or signature to
+/// pin — the tree is on disk and in the repo — so requiring a lock was
+/// ceremony that blocked `noct run` on a project that could not possibly
+/// be irreproducible. The moment ONE registry dependency appears, the
+/// requirement returns: that is the case the lock exists for.
+#[test]
+fn path_only_project_runs_without_a_lockfile() {
+    let mut dir = scratch_dir();
+    let dep = dir.join("libs").join("dep");
+    std::fs::create_dir_all(dep.join("lib")).expect("mkdir dep");
+    std::fs::write(
+        dep.join("lib").join("main.nv"),
+        "export fn helper() -> Int:\n    7\n",
+    )
+    .expect("write dep");
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("lib")).expect("mkdir app");
+    std::fs::write(
+        app.join("nestpkg.nvpm"),
+        "package:\n    name: app\n    version: 0.1.0\n\ndependencies:\n    dep:\n        version: =0.1.0\n        path: ../libs/dep\n",
+    )
+    .expect("write manifest");
+    std::fs::write(
+        app.join("lib").join("main.nv"),
+        "import dep\n\nmain():\n    let n: Int = helper()\n    print(\"{n}\")\n",
+    )
+    .expect("write main");
+    assert!(
+        !app.join("nestpkg.lock").exists(),
+        "the point of the test is that no lock exists"
+    );
+
+    let out = run_cli_in(&app, &["run", "lib/main.nv"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a path-only project must run with no lockfile.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Add ONE registry dependency and the requirement must come back.
+    std::fs::write(
+        app.join("nestpkg.nvpm"),
+        "package:\n    name: app\n    version: 0.1.0\n\ndependencies:\n    dep:\n        version: =0.1.0\n        path: ../libs/dep\n    other:\n        version: =1.0.0\n",
+    )
+    .expect("rewrite manifest");
+    let out = run_cli_in(&app, &["run", "lib/main.nv"]);
+    assert_eq!(out.status.code(), Some(1), "a registry dep must still need a lock");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("lockfile missing"),
+        "got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    cleanup(&dir);
+}

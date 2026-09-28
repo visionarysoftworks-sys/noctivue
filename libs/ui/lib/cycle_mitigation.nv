@@ -1,0 +1,710 @@
+//! ui/cycle_mitigation — the ownership invariant, checkable; and the
+//! structural diff between two trees.
+//! 
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `print`/`println`/`assert`, so it runs on `run` today
+//! and stays portable to `run-vm`/`build` later.
+//! 
+//! ## What this module is for
+//! 
+//! `docs/MEMORY_MODEL.md` §4 and `docs/UI_SPEC.md` §3 both record the
+//! reference-cycle problem as **Open**, with four candidate strategies
+//! and candidate 3 ("parent strongly owns child, child holds an
+//! `unowned` parent back-reference, enforced by the framework") as the
+//! leading one. The original version of this module took that candidate
+//! literally and shipped three functions whose bodies were all `()` or
+//! `true`.
+//! 
+//! It could not do otherwise. The Noctivue runtime that exists today is a
+//! tree-walking interpreter over **values**: a widget is copied when it
+//! is stored, there is no heap identity, no reference counting and no
+//! `weak`/`unowned` annotation in the grammar. So there is no cycle to
+//! mitigate, and a `unowned parent: Widget` field would be a *copy* of
+//! the parent — a second, silently stale copy of the whole subtree, not
+//! a back-reference.
+//! 
+//! Rather than ship three stubs, this module keeps the **invariant** and
+//! drops the mechanism, and it can do that because the invariant has a
+//! checkable form:
+//! 
+//! - **Acyclicity by rank function.** Every node carries `depth`; a
+//!   child's depth is its parent's + 1; a root's is 0. A value that
+//!   contained itself would be its own ancestor at a strictly smaller
+//!   depth, which is impossible. [`validate_tree`] re-derives every depth
+//!   from the root and rejects the first disagreement — so "no cycles" is
+//!   a *proved* property of a tree that passes, not an assertion about
+//!   a runtime that is not there yet.
+//! - **One owner per node.** A non-zero `uid` must be unique among a
+//!   node's children, so no node is owned twice. Checked per sibling
+//!   list, which is the level at which double ownership can arise; a
+//!   global check would need a set, and the language cannot build one.
+//! - **Shape.** A leaf takes no children, a single-child wrapper takes
+//!   exactly one, a container takes zero or more.
+//! 
+//! What is *not* claimed: that this is the strategy Noctivue will adopt.
+//! When a managed mode with real ARC lands, this module is the place
+//! that has to be revisited, because its checks are checks on values and
+//! a heap object needs different ones. That is stated in
+//! `docs/overview.md` too, and it is why nothing here is named as if the
+//! Open question were settled.
+//! 
+//! ## The diff
+//! 
+//! [`diff_widgets`] walks two trees and reports what changed: which node,
+//! at which index, under which parent, and in what way. It exists because
+//! the original module's `diff_props` returned
+//! `Map<String, Value>` and built a mutation list with `push` — a `Map`
+//! does not exist in the language and a list cannot be grown, so
+//! neither half of that was writable. Both are replaced by
+//! fixed-size values ([`Mutation`], [`Diff`]) and a chain of `Mutation`s
+//! threaded through the recursion, which costs nothing and has no cap.
+//! 
+//! Children are paired **positionally**, with one exception: when a node
+//! carries a non-zero `uid` and the two sides disagree on it, the old
+//! child is looked up by `uid` in the new child list, and a hit is
+//! reported as [`MoveChild`] rather than as a spurious replace. That is
+//! a keyed diff for the one case where keying is unambiguous, and it is
+//! honest about being partial: a full keyed diff needs an LCS, and this
+//! language has no way to hold one.
+//! 
+//! The walk is bounded by depth rather than by the interpreter's call
+//! stack: [`diff_widgets`] recurses to [`DIFF_MAX_DEPTH`] and stops.
+//! Past that depth the node's own properties are still compared and its
+//! children are not descended into, which is stated rather than hidden.
+
+import widget
+import widget::Widget
+import widget::WidgetKind
+
+/// How deep [`diff_widgets`] descends. Deeper subtrees are compared at
+/// the node level only.
+/// 
+/// A bound, not an accident: the tree-walking interpreter's call-stack
+/// budget is small, and an unbounded recursive walk over a deep tree
+/// overflows it with no diagnostic at all. Eight levels is far past any
+/// hand-written UI tree, and [`diff_widgets_depth`] is there for a caller
+/// who wants a different bound.
+export fn diff_max_depth() -> Int:
+    8
+
+/// What changed about a node. Unit variants, as everywhere in this
+/// package: a payload variant would have to carry the `Widget`, and a
+/// payload variant cannot be constructed in this language.
+export enum MutationKind:
+    ReplaceNode()
+    Reidentify()
+    Retitle()
+    Enable()
+    Disable()
+    Repad()
+    Realign()
+    InsertChild()
+    RemoveChild()
+    MoveChild()
+
+/// One change, located.
+/// 
+/// - `parent_uid` is the `uid` of the node the change happens under, and
+///   `0` when the change is at the root or the parent is unidentified.
+/// - `index` is the child slot the change applies to; `-1` for a change
+///   to the node itself rather than to one of its children.
+/// - `uid` is the affected node's own `uid`, or the `uid` a moved node
+///   carries, and `0` when it has none.
+/// - `detail` is a one-line human-readable rendering, so a report can be
+///   printed without a second switch over [`MutationKind`] that would
+///   have to be kept in step with this one.
+/// - `next` chains to the next change; the chain is what makes an
+///   unbounded mutation list possible in a language with no list growth.
+export struct Mutation:
+    kind: MutationKind
+    parent_uid: Int
+    index: Int
+    uid: Int
+    detail: String
+    next: Option<Mutation>
+
+/// The result of a diff: how many changes, and the chain of them.
+/// 
+/// There is deliberately no `overflow` flag and no capacity: the chain is
+/// a linked list, so the count is exact and there is no limit to
+/// document.
+export struct Diff:
+    n: Int
+    head: Option<Mutation>
+
+/// INTERNAL — a worklist node for [`validate_tree`]. The validator walks
+/// a tree with a worklist rather than by recursion so that tree depth
+/// costs heap-free `Option` chaining instead of interpreter call frames;
+/// a deep tree must not be able to overflow the stack just by being
+/// validated.
+export struct Pending:
+    node: Widget
+    next: Option<Pending>
+
+/// INTERNAL — a fresh mutation, chained to `rest`. Every mutation in
+/// this module is built here, so the six fields cannot be filled in the
+/// wrong order anywhere.
+export fn mutation(k: MutationKind, parent_uid: Int, index: Int, uid: Int, detail: String, rest: Option<Mutation>) -> Mutation:
+    Mutation { kind: k, parent_uid: parent_uid, index: index, uid: uid, detail: detail, next: rest }
+
+/// INTERNAL — [`mutation`] with nothing after it, for the leaf cases.
+export fn lone(k: MutationKind, parent_uid: Int, index: Int, uid: Int, detail: String) -> Mutation:
+    mutation(k, parent_uid, index, uid, detail, None)
+
+/// INTERNAL — `head` followed by `tail`, i.e. the chain `head` then
+/// everything in `tail`. Walks `head` and rebuilds it, because there is
+/// no pointer mutation; the reverse pass at the end keeps the reported
+/// order the same as the order the walk found them in.
+export fn graft(head: Option<Mutation>, tail: Option<Mutation>) -> Option<Mutation>:
+    var acc: Option<Mutation> = tail; var cur = head; var cont = true
+    while cont:
+        match cur:
+            Some(m):
+                acc = Some(mutation(m.kind, m.parent_uid, m.index, m.uid, m.detail, acc))
+                cur = m.next
+            None:
+                cont = false
+    acc
+
+/// INTERNAL — [`graft`] with the roles swapped, which is how a
+/// per-child result is folded into the running chain.
+export fn join(head: Option<Mutation>, tail: Option<Mutation>) -> Option<Mutation>:
+    if tail_is_empty(tail):
+        head
+    else:
+        graft(head, tail)
+
+/// INTERNAL — whether a chain has nothing in it. A named helper because
+/// matching an `Option` just to learn "empty" is a five-line block that
+/// would otherwise be repeated at every join.
+export fn tail_is_empty(t: Option<Mutation>) -> Bool:
+    match t:
+        Some(_): false
+        None: true
+
+/// INTERNAL — a chain with `m` in front of `rest`.
+export fn push(head: Option<Mutation>, m: Mutation) -> Option<Mutation>:
+    Some(mutation(m.kind, m.parent_uid, m.index, m.uid, m.detail, head))
+
+/// INTERNAL — the chain reversed. The walk prepends, because a prepend
+/// is the only chain operation that does not copy, and a report reads
+/// far better in discovery order.
+export fn reverse(head: Option<Mutation>) -> Option<Mutation>:
+    var out: Option<Mutation> = None; var cur = head; var cont = true
+    while cont:
+        match cur:
+            Some(m):
+                out = Some(mutation(m.kind, m.parent_uid, m.index, m.uid, m.detail, out))
+                cur = m.next
+            None:
+                cont = false
+    out
+
+/// How many changes the diff found. Exact: the chain is unbounded, so
+/// unlike a fixed-capacity accumulator there is nothing to overflow.
+export fn diff_count(d: Diff) -> Int:
+    d.n
+
+/// The change at `i` in report order, or `None` when `i` is out of
+/// range.
+export fn mutation_at(d: Diff, i: Int) -> Option<Mutation>:
+    var out: Option<Mutation> = None; var cur = d.head; var k = 0; var cont = true
+    while cont:
+        match cur:
+            Some(m):
+                if k == i:
+                    out = Some(m); cont = false
+                else:
+                    k = k + 1; cur = m.next
+            None:
+                cont = false
+    out
+
+/// The kind of a change, for a caller that matches on it rather than
+/// printing [`describe_mutation`].
+export fn mutation_kind(m: Mutation) -> MutationKind:
+    m.kind
+
+/// The kind's name, as written in the source, so a report and a test
+/// agree on the spelling.
+export fn mutation_name(k: MutationKind) -> String:
+    if k == ReplaceNode:
+        "ReplaceNode"
+    else:
+        if k == Reidentify:
+            "Reidentify"
+        else:
+            if k == Retitle:
+                "Retitle"
+            else:
+                if k == Enable:
+                    "Enable"
+                else:
+                    if k == Disable:
+                        "Disable"
+                    else:
+                        if k == Repad:
+                            "Repad"
+                        else:
+                            if k == Realign:
+                                "Realign"
+                            else:
+                                if k == InsertChild:
+                                    "InsertChild"
+                                else:
+                                    if k == RemoveChild:
+                                        "RemoveChild"
+                                    else:
+                                        "MoveChild"
+
+/// One change as a line, e.g.
+/// `MoveChild uid=7 2->0 (under uid=1)`.
+export fn describe_mutation(m: Mutation) -> String:
+    "{mutation_name(m.kind)} {detail(m)}"
+
+/// INTERNAL — the locating half of [`describe_mutation`]: which uid, at
+/// which index, under which parent. Empty for a change with nothing to
+/// locate, rather than a line of zeroes.
+export fn detail(m: Mutation) -> String:
+    if m.parent_uid == 0:
+        "uid={m.uid} at {m.index}"
+    else:
+        "uid={m.uid} at {m.index} (under uid={m.parent_uid})"
+
+/// The whole diff as text, one change per line, prefixed with a count.
+/// `"(no changes)"` when the two trees are the same.
+export fn describe(d: Diff) -> String:
+    if d.n == 0:
+        "(no changes)"
+    else:
+        let first: Option<Mutation> = d.head
+        match first:
+            Some(m): describe_from(m, d.n)
+            None: "(no changes)"
+
+/// INTERNAL — [`describe`]'s walk, with the count in the header so a
+/// caller sees "3 changes" and the three lines together.
+export fn describe_from(m: Mutation, n: Int) -> String:
+    var out = "{n} changes:"; var cur: Option<Mutation> = Some(m); var cont = true
+    while cont:
+        match cur:
+            Some(x):
+                out = out + "\n" + describe_mutation(x); cur = x.next
+            None:
+                cont = false
+    out
+
+/// The larger of two lengths — the loop bound when pairing two child
+/// lists of possibly different lengths.
+export fn bigger(a: Int, b: Int) -> Int:
+    if a > b:
+        a
+    else:
+        b
+
+/// The index of the child with `uid`, or `-1`.
+/// 
+/// `-1` and not `None` because the answer feeds an `if` that decides
+/// whether a uid moved, and `-1` is the shape the rest of this module's
+/// index arithmetic already uses.
+export fn index_of_uid(cs: [Arc<Widget>], id: Int) -> Int:
+    var out = 0 - 1; var i = 0; var cont = true
+    while cont:
+        if i < cs.length:
+            if arc_load_builtin(cs[i]).uid == id:
+                out = i; cont = false
+            else:
+                i = i + 1
+        else:
+            cont = false
+    out
+
+/// Whether no two of `cs` share a non-zero `uid`.
+/// 
+/// Sibling-scoped on purpose: "a child has exactly one parent" is a
+/// statement about a sibling list, and checking it there needs no set.
+/// A uid that appears in two *different* subtrees is legal and is not
+/// rejected — a uid is an identity a caller chooses, and reusing one
+/// across branches is the caller's business.
+export fn uids_unique(cs: [Arc<Widget>]) -> Bool:
+    var ok = true; var i = 0
+    while i < cs.length:
+        let a: Widget = arc_load_builtin(cs[i])
+        if a.uid != 0:
+            var j = i + 1
+            while j < cs.length:
+                if arc_load_builtin(cs[j]).uid == a.uid:
+                    ok = false
+                j = j + 1
+        i = i + 1
+    ok
+
+/// INTERNAL — one node's own shape and depth, given that it is the child
+/// of a node at `parent_depth`.
+/// 
+/// The three failures it can report, in the order it looks for them:
+/// a child's `uid` that is not unique among its siblings; a child whose
+/// stamped `depth` is not `parent_depth + 1`; and a kind whose arity its
+/// own node violates. On success it hands back the node's children, so
+/// the caller can push them without touching the node again.
+export fn check_child(w: Widget, parent_depth: Int) -> Result<[Arc<Widget>], String>:
+    let cs: [Arc<Widget>] = w.children
+    if uids_unique(cs) == false:
+        Err("sibling uids are not unique under a {widget.kind_of(w)}")
+    else:
+        if w.depth != parent_depth + 1:
+            Err("{widget.kind_of(w)} at depth {w.depth}, expected {parent_depth + 1}")
+        else:
+            match check_shape(w, cs):
+                Ok(_): Ok(cs)
+                Err(problem): Err(problem)
+
+/// INTERNAL — a node's arity against its kind. Split out of
+/// [`check_child`] so the depth and uid checks and the shape check read
+/// as two separate statements about two separate invariants.
+export fn check_shape(w: Widget, cs: [Arc<Widget>]) -> Result<Widget, String>:
+    if widget.is_leaf(w.kind):
+        if cs.length > 0:
+            Err("a {widget.kind_of(w)} is a leaf but has {cs.length} children")
+        else:
+            Ok(w)
+    else:
+        if widget.is_single(w.kind):
+            if cs.length != 1:
+                Err("a {widget.kind_of(w)} takes one child, found {cs.length}")
+            else:
+                Ok(w)
+        else:
+            Ok(w)
+
+/// INTERNAL — push every child of `w` onto a worklist, so each is
+/// checked with `w`'s depth as its parent depth.
+export fn schedule(todo: Option<Pending>, cs: [Arc<Widget>]) -> Option<Pending>:
+    var out = todo; var i = 0
+    while i < cs.length:
+        let c: Widget = arc_load_builtin(cs[i]); out = Some(Pending { node: c, next: out }); i = i + 1
+    out
+
+/// The whole-tree check. `Ok(root)` when the tree is well formed, and
+/// the **first** problem as `Err(String)` when it is not.
+/// 
+/// First-error rather than a list, for the same reason every other
+/// first-party library in this repo answers with one error: the language
+/// cannot accumulate a list of them, and a caller that gets one concrete
+/// message can act on it. The three checks are tried root-first, so the
+/// error names the outermost problem rather than a symptom of it.
+/// 
+/// Iterative on purpose — see [`Pending`].
+export fn validate_tree(root: Widget) -> Result<Widget, String>:
+    if root.depth != 0:
+        Err("a root must be at depth 0, found {root.depth}")
+    else:
+        match check_root(root):
+            Ok(_): Ok(root)
+            Err(problem): Err(problem)
+
+/// INTERNAL — [`validate_tree`]'s walk: seed the worklist with the root
+/// and drain it, pushing each node's children as it goes.
+export fn check_root(root: Widget) -> Result<Widget, String>:
+    var todo: Option<Pending> = Some(Pending { node: root, next: None }); var bad = false
+    var problem = ""; var cont = true
+    while cont:
+        match todo:
+            Some(p):
+                todo = p.next
+                match check_one(p.node):
+                    Ok(cs):
+                        todo = schedule(todo, cs)
+                    Err(why):
+                        bad = true; problem = why; cont = false
+            None:
+                cont = false
+    if bad:
+        Err(problem)
+    else:
+        Ok(root)
+
+/// INTERNAL — one node against the tree's rules. A node with no parent
+/// (the root) is checked for shape only; anything else is checked as
+/// somebody's child, so a hand-built literal with a wrong `depth` or a
+/// duplicated `uid` is caught.
+export fn check_one(w: Widget) -> Result<[Arc<Widget>], String>:
+    if w.depth == 0:
+        match check_shape(w, w.children):
+            Ok(_): Ok(w.children)
+            Err(why): Err(why)
+    else:
+        check_child(w, w.depth - 1)
+
+/// Build the tree and refuse to hand back a malformed one.
+/// 
+/// The original `build_tree(root) -> Widget` validated nothing and
+/// returned its argument; the useful version of that idea is a `Result`,
+/// so a caller writes `let root = build_tree(candidate)?` at the top of a
+/// `build` and cannot forget the check. On success the value is the
+/// argument, unchanged: validation does not repair a tree, it refuses
+/// one.
+export fn build_tree(root: Widget) -> Result<Widget, String>:
+    validate_tree(root)
+
+/// INTERNAL — the `ReplaceNode` a kind change produces. A replaced node
+/// is not descended into: its whole subtree is new, and reporting the
+/// children of a node that is going away as individual mutations would be
+/// noise.
+export fn replace_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    Some(
+    lone(
+    ReplaceNode,
+    parent_uid,
+    index,
+    next.uid,
+    "kind {widget.kind_of(old)} -> {widget.kind_of(next)}",
+),
+)
+
+/// INTERNAL — the `Reidentify` a `uid` change produces, and only when
+/// both sides actually carry one: two nodes both at `uid` 0 are
+/// "unidentified", which is the same state, not a change of identity.
+export fn id_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if old.uid == next.uid || old.uid == 0 && next.uid == 0:
+        None
+    else:
+        Some(lone(Reidentify, parent_uid, index, next.uid, "uid {old.uid} -> {next.uid}"))
+
+/// INTERNAL — the `Retitle` a text change produces.
+export fn text_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if old.text == next.text:
+        None
+    else:
+        Some(lone(Retitle, parent_uid, index, next.uid, "\"{old.text}\" -> \"{next.text}\""))
+
+/// INTERNAL — the `Enable` / `Disable` an `enabled` change produces. Two
+/// separate variants rather than one with a boolean, so a report reads as
+/// a fact instead of a value to be interpreted.
+export fn enabled_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if old.enabled == next.enabled:
+        None
+    else:
+        if next.enabled:
+            Some(lone(Enable, parent_uid, index, next.uid, "enabled"))
+        else:
+            Some(lone(Disable, parent_uid, index, next.uid, "disabled"))
+
+/// INTERNAL — the `Repad` an insets change produces. The four sides are
+/// in the message because "the padding changed" is not an actionable
+/// report.
+export fn pad_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if widget.same_insets(old.padding, next.padding):
+        None
+    else:
+        let a = widget.insets_of(old); let b = widget.insets_of(next)
+        Some(
+    lone(
+    Repad,
+    parent_uid,
+    index,
+    next.uid,
+    "{a.left},{a.top},{a.right},{a.bottom} -> {b.left},{b.top},{b.right},{b.bottom}",
+),
+)
+
+/// INTERNAL — the `Realign` an alignment change produces. The two
+/// tenths are in the message, because "the alignment changed" is not an
+/// actionable report.
+export fn align_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if widget.same_align(old.alignment, next.alignment):
+        None
+    else:
+        let a = widget.alignment_of(old); let b = widget.alignment_of(next)
+        Some(lone(Realign, parent_uid, index, next.uid, "{a.x},{a.y} -> {b.x},{b.y}"))
+
+/// INTERNAL — every change to one node's own properties, in a fixed
+/// order: identity, then text, then enabled, then the two box
+/// properties. A fixed order is what makes the diff output byte-stable
+/// and therefore assertable.
+export fn node_delta(old: Widget, next: Widget, parent_uid: Int, index: Int) -> Option<Mutation>:
+    if old.kind != next.kind:
+        replace_delta(old, next, parent_uid, index)
+    else:
+        let a = id_delta(old, next, parent_uid, index)
+        let b = text_delta(old, next, parent_uid, index)
+        let c = enabled_delta(old, next, parent_uid, index)
+        let d = pad_delta(old, next, parent_uid, index)
+        let e = align_delta(old, next, parent_uid, index); join(join(join(join(a, b), c), d), e)
+
+/// INTERNAL — one child slot of two parents.
+/// 
+/// The three cases: both sides have a child there, so pair them; only the
+/// new side does, so it is an insertion; only the old side does, so it is
+/// a removal. A pair is handed to [`diff_pair`] unless the two children's
+/// `uid`s disagree *and* the old one turns up elsewhere in the new list,
+/// which is a move rather than a replace.
+export fn diff_slot(oc: [Arc<Widget>], nc: [Arc<Widget>], i: Int, parent_uid: Int, depth: Int) -> Option<Mutation>:
+    if i < oc.length && i < nc.length:
+        let a: Widget = arc_load_builtin(oc[i]); let b: Widget = arc_load_builtin(nc[i])
+        if a.uid != 0 && a.uid != b.uid:
+            let at = index_of_uid(nc, a.uid)
+            if at < 0:
+                diff_pair(a, b, parent_uid, i, depth + 1)
+            else:
+                let moved = lone(MoveChild, parent_uid, at, a.uid, "moved to {at}")
+                join(Some(moved), diff_pair(a, arc_load_builtin(nc[at]), parent_uid, at, depth + 1))
+        else:
+            diff_pair(a, b, parent_uid, i, depth + 1)
+    else:
+        if i < nc.length:
+            Some(lone(InsertChild, parent_uid, i, arc_load_builtin(nc[i]).uid, "inserted at {i}"))
+        else:
+            Some(lone(RemoveChild, parent_uid, i, arc_load_builtin(oc[i]).uid, "removed from {i}"))
+
+/// INTERNAL — one paired node: its own changes, then its children's.
+/// 
+/// `parent_uid` and `index` are the pair's own location, and are passed
+/// down so every mutation in the subtree can say where it happened
+/// without threading a path.
+export fn diff_pair(a: Widget, b: Widget, parent_uid: Int, index: Int, depth: Int) -> Option<Mutation>:
+    let own = node_delta(a, b, parent_uid, index)
+    if depth >= diff_max_depth():
+        own
+    else:
+        let kids = diff_kids(a, b, parent_uid, depth); join(own, kids)
+
+/// INTERNAL — the child slots of a pair, walked to the longer of the two
+/// lists. Returns nothing at all once the depth bound is reached, which
+/// is what bounds the recursion.
+export fn diff_kids(a: Widget, b: Widget, parent_uid: Int, depth: Int) -> Option<Mutation>:
+    if depth >= diff_max_depth():
+        None
+    else:
+        let oc: [Arc<Widget>] = a.children; let nc: [Arc<Widget>] = b.children
+        var out: Option<Mutation> = None; var i = 0; let stop = bigger(oc.length, nc.length)
+        while i < stop:
+            out = join(out, diff_slot(oc, nc, i, parent_uid, depth)); i = i + 1
+        out
+
+/// Compare two trees by HEAP IDENTITY, descending only where the
+/// objects actually differ.
+///
+/// This is the re-render path, and it sits *alongside* `diff_pair`
+/// rather than replacing it: `diff_pair` walks values and stays the
+/// pure-value reference (and its tests stay green untouched), while this
+/// walks `Arc`s and prunes. The two must agree structurally — see
+/// `libs/ui/tests/rerender_test.nv`, which asserts the same trees
+/// produce the same mutation count on both paths.
+///
+/// Pruning rule, and its limit stated plainly: same heap object
+/// (`arc_id` equal) means nothing below can differ, so return `None`
+/// without loading a single value. That is the O(1) fast path. There is
+/// deliberately NO prune on `version` equality: versions track structure
+/// (depth/count), not content, so two different texts at the same
+/// position carry the same version and version-pruning would SILENTLY
+/// MISS a real change. A version that pruned safely would have to fold
+/// content in (a hash), which is a bigger design; until then, differing
+/// identities always descend. The cost model is therefore O(positions)
+/// cheap comparisons plus O(changed) value work — not O(changed) alone,
+/// and the benchmark asserts exactly that.
+export managed fn diff_live_pair(a: Arc<Widget>, b: Arc<Widget>, parent_uid: Int, index: Int, depth: Int) -> Option<Mutation>:
+    if arc_id_builtin(a) == arc_id_builtin(b):
+        None
+    else:
+        let old = arc_load_builtin(a)
+        let next = arc_load_builtin(b)
+        let own = node_delta(old, next, parent_uid, index)
+        if depth >= diff_max_depth():
+            own
+        else:
+            let kids = diff_live_kids(a, b, parent_uid, depth); join(own, kids)
+
+/// The child slots of a live pair, walked to the longer of the two
+/// lists. Takes the `Arc`s (not loaded values) so each slot can prune
+/// on identity before anything is loaded. Same walk order and same
+/// `Mutation` shapes as `diff_kids` — only the pruning is new.
+export managed fn diff_live_kids(a: Arc<Widget>, b: Arc<Widget>, parent_uid: Int, depth: Int) -> Option<Mutation>:
+    if depth >= diff_max_depth():
+        None
+    else:
+        let oc: [Arc<Widget>] = arc_load_builtin(a).children
+        let nc: [Arc<Widget>] = arc_load_builtin(b).children
+        var out: Option<Mutation> = None; var i = 0; let stop = bigger(oc.length, nc.length)
+        while i < stop:
+            out = join(out, diff_live_slot(oc, nc, i, parent_uid, depth)); i = i + 1
+        out
+
+/// One child slot of two live parents. Mirrors `diff_slot` exactly —
+/// same uid-move detection, same insert/remove shapes — except the pair
+/// it recurses into is the live (pruning) one.
+export managed fn diff_live_slot(oc: [Arc<Widget>], nc: [Arc<Widget>], i: Int, parent_uid: Int, depth: Int) -> Option<Mutation>:
+    if i < oc.length && i < nc.length:
+        // Identity first: a shared child Arc means the whole subtree is
+        // unchanged, so skip the two value loads entirely. This is what
+        // keeps a mostly-shared frame cheap — loading is what copies, and
+        // copies are what made the value diff superlinear.
+        if arc_id_builtin(oc[i]) == arc_id_builtin(nc[i]):
+            None
+        else:
+            let a: Widget = arc_load_builtin(oc[i]); let b: Widget = arc_load_builtin(nc[i])
+            if a.uid != 0 && a.uid != b.uid:
+                let at = index_of_uid(nc, a.uid)
+                if at < 0:
+                    diff_live_pair(oc[i], nc[i], parent_uid, i, depth + 1)
+                else:
+                    let moved = lone(MoveChild, parent_uid, at, a.uid, "moved to {at}")
+                    join(Some(moved), diff_live_pair(oc[i], nc[at], parent_uid, at, depth + 1))
+            else:
+                diff_live_pair(oc[i], nc[i], parent_uid, i, depth + 1)
+    else:
+        if i < nc.length:
+            Some(lone(InsertChild, parent_uid, i, arc_load_builtin(nc[i]).uid, "inserted at {i}"))
+        else:
+            Some(lone(RemoveChild, parent_uid, i, arc_load_builtin(oc[i]).uid, "removed from {i}"))
+
+/// Compare two trees with the default depth bound. Changes come back in
+/// walk order.
+/// 
+/// A tree that fails [`validate_tree`] is still diffable — the diff does
+/// not care about the ownership stamp, only about the values — so the
+/// two checks are independent and a caller may run either, both or
+/// neither.
+export fn diff_widgets(old: Widget, next: Widget) -> Diff:
+    diff_widgets_depth(old, next, diff_max_depth())
+
+/// Compare two trees, descending at most `max_depth` levels.
+/// 
+/// Past the bound a paired node's own properties are still compared and
+/// its children are not, so a caller that needs the whole answer for a
+/// deep tree has to raise this. Exposed rather than hidden because the
+/// bound is a property of the runtime's call-stack budget, not of the
+/// diff.
+export fn diff_widgets_depth(old: Widget, next: Widget, max_depth: Int) -> Diff:
+    let found = diff_pair(old, next, 0, 0 - 1, 0)
+    Diff { n: chain_length(found), head: reverse(found) }
+
+/// INTERNAL — how long a mutation chain is. A walk, because the count
+/// has to be exact and the chain has no length field to keep in step.
+export fn chain_length(head: Option<Mutation>) -> Int:
+    var n = 0; var cur = head; var cont = true
+    while cont:
+        match cur:
+            Some(m):
+                n = n + 1; cur = m.next
+            None:
+                cont = false
+    n
+
+/// How many of the diff's changes are of kind `k` — "how many labels
+/// changed?", which is the question a test and a report both ask.
+export fn count_of(d: Diff, k: MutationKind) -> Int:
+    var n = 0; var cur = d.head; var cont = true
+    while cont:
+        match cur:
+            Some(m):
+                if m.kind == k:
+                    n = n + 1
+                cur = m.next
+            None:
+                cont = false
+    n
+
+/// Whether the diff found a change of kind `k`.
+export fn has_kind(d: Diff, k: MutationKind) -> Bool:
+    count_of(d, k) > 0

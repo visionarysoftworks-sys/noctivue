@@ -1,0 +1,305 @@
+//! ui/state — component state as values, with version-based invalidation.
+//! 
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `print`/`println`/`assert`, so it runs on `run` today
+//! and stays portable to `run-vm`/`build` later.
+//! 
+//! ## What replaced `StateCell<T>`
+//! 
+//! The original module declared `StateCell<T>` with a `subscribers` list
+//! of `() -> ()` and a `set_state` that walked it. Three of those four
+//! ideas cannot be written in this language today, so all three are gone
+//! and what is left is the part that can be:
+//! 
+//! - **No generics.** `StateCell<T>` becomes one [`Cell`] holding a
+//!   tagged [`Value`]. This is
+//!   `docs/MEMORY_MODEL.md` §4 **candidate 2** — "a dedicated,
+//!   value-oriented view-state model; state lives outside the widget
+//!   graph, widgets read it, they don't own it" — which is the candidate
+//!   that *reduces* cycle surface rather than managing it, and it is the
+//!   one the language can express.
+//! - **No list growth.** `subscribers: [() -> ()]` with `push` is
+//!   impossible (lists are fixed-arity, NIR.md §6), so there is no
+//!   subscriber list and no callback registry.
+//! - **No `Map`.** `diff_props` returned `Map<String, Value>`, which does
+//!   not exist either; [`Value`] is the tagged union that replaces it.
+//! 
+//! ## How a re-render is triggered instead
+//! 
+//! By **version counting**, which needs no observer at all:
+//! 
+//! - a [`Cell`] carries `value` and `version`; every `set_*` returns a
+//!   NEW cell and bumps `version` **only when the value actually
+//!   changed**, so re-setting the same text is free;
+//! - a cell also carries `seen`, the version the last build observed;
+//! - [`is_dirty`] is `seen != version`, and [`ack`] records that a
+//!   rebuild has happened.
+//! 
+//! ```text
+//! let tasks = state.text_cell("write docs")
+//! let tree = widget.column([widget.text(state.cell_text(tasks))])
+//! assert(state.is_dirty(tasks))     // a fresh cell has seen 0, version 0
+//! let tasks2 = state.set_text(tasks, "write more docs")
+//! assert(state.is_dirty(tasks2))    // version moved to 1
+//! ```
+//! 
+//! An app that wants "re-render only the subtree that read this cell"
+//! compares the cell's version against the version the subtree was built
+//! with — the same discipline as a Flutter element's `dirty` flag, with
+//! the bookkeeping done by the app instead of by a framework registry.
+//! 
+//! ## Why cells are immutable values
+//! 
+//! `set_*` returns a new `Cell` rather than mutating one. That is not
+//! stylistic: it is what makes "did it change" answerable at all, because
+//! a mutation would have to return a flag and a value change would have
+//! to be detected before overwriting. It also matches how the rest of
+//! this package works — a widget is a value, so state is a value, and a
+//! tree built from a version of the state is a snapshot that cannot drift
+//! under the renderer.
+//! 
+//! ## `Empty` is a real state
+//! 
+//! [`ValueTag`]'s `Empty` is not a null. It is the answer to "this cell
+//! has never been given a value", and the accessors answer for it rather
+//! than trapping: [`cell_text`] gives `""`, [`cell_count`] gives `0`,
+//! [`cell_flag`] gives `false`. A caller that must not accept a default
+//! asks [`cell_tag`] first. This is the honest alternative to the
+//! language's one silent-`None` trap (a bare `String` in an
+//! `Option<String>` position evaluates to `None`), because here the
+//! default is *stated* and *checkable* rather than silent.
+
+/// What a [`Cell`] currently holds. A tagged union, standing in for the
+/// generics this language does not have.
+/// 
+/// Enum variants here are unit variants written `Empty()` in the
+/// declaration; a payload variant type-checks and then fails at run time
+/// with `undefined name`, which is why the payload lives in [`Value`]
+/// beside the tag rather than inside the variant.
+export enum ValueTag:
+    Empty()
+    Str()
+    Count()
+    Flag()
+
+/// A cell's payload, tagged. `tag` says which of the other three fields
+/// is meaningful; the unused ones are at their zero value.
+export struct Value:
+    tag: ValueTag
+    body: String
+    count: Int
+    flag: Bool
+
+/// A component's state cell: a value, a version, and the version the
+/// last render saw.
+/// 
+/// `seen` starts equal to `version` (both 0), so a cell nobody has
+/// written to is **not** dirty. A cell becomes dirty when a `set_*`
+/// actually changes it, and stops being dirty when [`ack`] runs.
+export struct Cell:
+    value: Value
+    version: Int
+    seen: Int
+
+/// INTERNAL — the payload a cell starts with: tag `Empty`, every field
+/// at its zero value.
+export fn empty_value() -> Value:
+    Value { tag: Empty, body: "", count: 0, flag: false }
+
+/// INTERNAL — field-wise `Value` equality. Written out rather than using
+/// `==` on the struct, so "what counts as a change" is one readable
+/// place instead of an assumption about struct comparison.
+export fn same_value(a: Value, b: Value) -> Bool:
+    if a.tag != b.tag:
+        false
+    else:
+        if a.tag == Str:
+            a.body == b.body
+        else:
+            if a.tag == Count:
+                a.count == b.count
+            else:
+                if a.tag == Flag:
+                    a.flag == b.flag
+                else:
+                    true
+
+/// INTERNAL — a cell carrying `v` at version 0, with `seen` 0 so it is
+/// clean. Every `text_cell` / `count_cell` / `flag_cell` funnels through
+/// here, so a new cell is always clean and never dirty by accident.
+export fn fresh(v: Value) -> Cell:
+    Cell { value: v, version: 0, seen: 0 }
+
+/// INTERNAL — the same payload at `version + 1` and still un-acked, i.e.
+/// the shape every real change produces. Kept in one place so "a change
+/// bumps the version and leaves `seen` alone" cannot drift between the
+/// three setters.
+export fn bumped(c: Cell, v: Value) -> Cell:
+    Cell { value: v, version: c.version + 1, seen: c.seen }
+
+/// A cell that has never been given a value. Reads as `""`, `0` and
+/// `false`; see the module doc.
+export fn empty_cell() -> Cell:
+    fresh(empty_value())
+
+/// A cell holding `s`.
+export fn text_cell(s: String) -> Cell:
+    fresh(Value { tag: Str, body: s, count: 0, flag: false })
+
+/// A cell holding `n`.
+export fn count_cell(n: Int) -> Cell:
+    fresh(Value { tag: Count, body: "", count: n, flag: false })
+
+/// A cell holding `b`.
+export fn flag_cell(b: Bool) -> Cell:
+    fresh(Value { tag: Flag, body: "", count: 0, flag: b })
+
+/// The cell's tag. Ask this before reading a value you cannot afford to
+/// default.
+export fn cell_tag(c: Cell) -> ValueTag:
+    c.value.tag
+
+/// The tag's name, for a report or a rendered tree.
+export fn tag_name(t: ValueTag) -> String:
+    if t == Empty:
+        "Empty"
+    else:
+        if t == Str:
+            "Str"
+        else:
+            if t == Count:
+                "Count"
+            else:
+                "Flag"
+
+/// The cell's text, or `""` for a cell that holds something else.
+export fn cell_text(c: Cell) -> String:
+    c.value.body
+
+/// The cell's count, or `0` for a cell that holds something else.
+export fn cell_count(c: Cell) -> Int:
+    c.value.count
+
+/// The cell's flag, or `false` for a cell that holds something else.
+export fn cell_flag(c: Cell) -> Bool:
+    c.value.flag
+
+/// The version the last change made, i.e. how many times this cell has
+/// actually changed value.
+export fn cell_version(c: Cell) -> Int:
+    c.version
+
+/// The version the last render observed.
+export fn cell_seen(c: Cell) -> Int:
+    c.seen
+
+/// `c` holding `s`, with the version bumped **only if `s` differs** from
+/// what `c` already holds.
+/// 
+/// Setting a cell to the value it already has is a no-op, which is what
+/// makes "re-render on change" cheap: a `build` that recomputes the same
+/// text does not dirty anything. Note that this also **re-tags**: setting
+/// text on a count cell turns it into a text cell, and that counts as a
+/// change.
+export fn set_text(c: Cell, s: String) -> Cell:
+    let v = Value { tag: Str, body: s, count: 0, flag: false }
+    if same_value(c.value, v):
+        c
+    else:
+        bumped(c, v)
+
+/// `c` holding `n`, version bumped only if `n` differs. Re-tags, like
+/// [`set_text`].
+export fn set_count(c: Cell, n: Int) -> Cell:
+    let v = Value { tag: Count, body: "", count: n, flag: false }
+    if same_value(c.value, v):
+        c
+    else:
+        bumped(c, v)
+
+/// `c` holding `b`, version bumped only if `b` differs. Re-tags, like
+/// [`set_text`].
+export fn set_flag(c: Cell, b: Bool) -> Cell:
+    let v = Value { tag: Flag, body: "", count: 0, flag: b }
+    if same_value(c.value, v):
+        c
+    else:
+        bumped(c, v)
+
+/// Whether the cell has changed since the last [`ack`]. The whole
+/// re-render trigger, in one comparison.
+export fn is_dirty(c: Cell) -> Bool:
+    c.seen != c.version
+
+/// `c` with `seen` recorded as the current version — "I have rebuilt for
+/// this". Returns the cell unchanged when it was not dirty, so calling it
+/// unconditionally in a render loop is safe.
+export fn ack(c: Cell) -> Cell:
+    if is_dirty(c):
+        Cell { value: c.value, version: c.version, seen: c.version }
+    else:
+        c
+
+/// The cell as `"{tag} {value}@v{version}"` — one line, enough for a
+/// report and byte-exact enough to assert on.
+export fn describe_cell(c: Cell) -> String:
+    "{tag_name(c.value.tag)} {payload(c)}@v{c.version}"
+
+/// INTERNAL — the value half of [`describe_cell`], in the cell's own
+/// tag. An `Empty` cell has no payload to show, so it shows as `-`.
+export fn payload(c: Cell) -> String:
+    if c.value.tag == Str:
+        c.value.body
+    else:
+        if c.value.tag == Count:
+            "{c.value.count}"
+        else:
+            if c.value.tag == Flag:
+                if c.value.flag:
+                    "true"
+                else:
+                    "false"
+            else:
+                "-"
+
+/// How many of `cells` are dirty — "does anything need rebuilding?".
+/// 
+/// The cells are a caller-written literal, because this language cannot
+/// build a list at run time; see `docs/overview.md`.
+export fn dirty_count(cells: [Cell]) -> Int:
+    var n = 0; var i = 0
+    while i < cells.length:
+        if is_dirty(cells[i]):
+            n = n + 1
+        i = i + 1
+    n
+
+/// Whether any of `cells` is dirty. The predicate behind the count, for
+/// a caller that does not want the number.
+export fn any_dirty(cells: [Cell]) -> Bool:
+    var seen = false; var i = 0
+    while i < cells.length:
+        if is_dirty(cells[i]):
+            seen = true
+        i = i + 1
+    seen
+
+/// The total of every [`Count`] cell in `cells`, and the number of text
+/// cells, as a one-line summary.
+/// 
+/// "How many of what" is the question a task list, a form and an
+/// inventory all ask of their state, and answering it from the cells
+/// rather than from a parallel tally means the tally cannot go stale. A
+/// cell that is not a `Count` contributes 0, so mixing cell kinds in
+/// one list is safe.
+export fn summarise(cells: [Cell]) -> String:
+    var total = 0; var texts = 0; var i = 0
+    while i < cells.length:
+        let c: Cell = cells[i]
+        if c.value.tag == Count:
+            total = total + c.value.count
+        else:
+            if c.value.tag == Str:
+                texts = texts + 1
+        i = i + 1
+    "counts={total} texts={texts} dirty={dirty_count(cells)}"

@@ -1,0 +1,630 @@
+//! ui/widget — the declarative widget tree, expressed as plain values.
+//! 
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `print`/`println`/`assert`, so it runs on `run` today
+//! and stays portable to `run-vm`/`build` later.
+//! 
+//! ## What a widget is here
+//! 
+//! A `Widget` is a **value**, not an object: building a node copies it,
+//! and a tree is an ordinary nested value with no heap identity and no
+//! reference counting. That is the single fact the rest of this package
+//! is shaped by, and it is why the cycle story lives in
+//! `cycle_mitigation` rather than here.
+//! 
+//! So the Flutter-shaped DSL of `docs/UI_SPEC.md` §1 —
+//! 
+//! ```text
+//! Dashboard:
+//!     column:
+//!         text("Analytics")
+//!         button("Refresh")
+//! ```
+//! 
+//! — is spelled as ordinary function calls on ordinary values:
+//! 
+//! ```text
+//! column([text("Analytics"), button("Refresh")])
+//! ```
+//! 
+//! A trailing-closure builder block (`button("Refresh"): refresh()`,
+//! `UI_SPEC.md` §2) is *not* available: a function-typed **parameter**
+//! does not type-check today (`E0200` reports `expected '() -> ()',
+//! found '() -> ()'` — the two function types do not unify), so a
+//! callback cannot be passed to `button` the way the DSL wants. What
+//! does work is a **function-typed struct field**, so the callback
+//! travels inside a [`Callback`] value the caller builds:
+//! 
+//! ```text
+//! button_with("Refresh", Callback { present: true, run: refresh })
+//! ```
+//! 
+//! That is the whole reason [`press_with`] exists beside [`button`], and
+//! the reason the field is a named struct rather than a bare
+//! `() -> ()`.
+//! 
+//! ## Depth is the ownership stamp
+//! 
+//! Every node carries `depth`: 0 for a root, parent depth + 1 for a
+//! child. The constructors write it and nothing else can, so
+//! `depth` is a **rank function** over the tree — which is what makes
+//! acyclicity checkable without heap identity. A value that contained
+//! itself would have to be its own ancestor at a strictly smaller depth,
+//! which is impossible; `cycle_mitigation.validate_tree` re-derives every
+//! depth from the root and rejects the first one that disagrees. See
+//! `docs/overview.md` for why this replaces `unowned`.
+//! 
+//! ## Everything is total
+//! 
+//! No constructor, accessor or renderer here can fail. `child_at`
+//! answers `Option` for an out-of-range index rather than panicking, and
+//! `press` answers `false` for a node that is not an enabled button
+//! rather than inventing a callback. The checks that *should* be able to
+//! fail — a tree whose depths disagree — live in
+//! `cycle_mitigation`, and return `Result`.
+//! 
+//! Enum variants here are all **unit** variants (`Panel()`, written
+//! `Panel` at every use). A payload variant type-checks but fails at
+//! run time with `undefined name`, and a unit variant called `None`
+//! collides with `Option`'s, so this package uses neither.
+
+// ── types ───────────────────────────────────────────────────────────────────
+/// What a node is. Eight unit variants: the leaf pair (`Text`,
+/// `Button`), the single-child wrappers (`Container`, `Padding`,
+/// `Center`), and the multi-child containers (`Panel`, `Column`,
+/// `Row`).
+/// 
+/// The variant is the whole type of a node's role, and
+/// [`is_leaf`] / [`is_single`] / [`is_multi`] are the three predicates
+/// `cycle_mitigation` validates against.
+export enum WidgetKind:
+    Panel()
+    Column()
+    Row()
+    Text()
+    Button()
+    Container()
+    Padding()
+    Center()
+
+/// Inset padding, in whole cells on each side.
+/// 
+/// `Int`, not `Float`: a widget tree here is a value, and the language
+/// has no portable `round`, so a fractional inset could not be turned
+/// into a column offset without `to_int` (which is `run`-only and would
+/// break the package's portability). Cells are also the unit a text UI
+/// actually lays out in.
+export struct EdgeInsets:
+    left: Int
+    top: Int
+    right: Int
+    bottom: Int
+
+/// An alignment, in **tenths**: `0` is start, `5` is centre, `10` is
+/// end — `docs/UI_SPEC.md`'s normalized `0.0`–`1.0` scaled by ten.
+/// 
+/// Tenths rather than a `Float` for the same reason [`EdgeInsets`] is
+/// `Int`: a normalized fraction is not comparable exactly and not
+/// convertible to a cell offset without a rounding builtin the language
+/// does not have portably. Tenths are exact, so `with_alignment` changes
+/// are detected by `==` and the diff never misses one.
+export struct Alignment:
+    x: Int
+    y: Int
+
+/// A button's action.
+/// 
+/// It exists as a struct because a **function-typed parameter does not
+/// type-check** today (see the module doc): a callback cannot be passed
+/// to a function directly, so it is carried by value inside a named
+/// field, which does work. `present` is a separate `Bool` because
+/// function values cannot be compared, so "has a callback" has to be a
+/// field rather than a comparison against a sentinel function.
+/// 
+/// A widget holds a `Callback` by value, so a callback can never form a
+/// reference cycle with the tree that holds it — the cycle
+/// `docs/MEMORY_MODEL.md` §4 warns about cannot arise from a value.
+export struct Callback:
+    present: Bool
+    run: () -> ()
+
+/// A node in the widget tree.
+/// 
+/// Nine fields, and **every literal must name all nine**: a literal
+/// missing a field is a distinct incomplete struct type in this
+/// language. The constructors below are the supported way to build one;
+/// [`with_text`] / [`with_enabled`] / [`with_insets`] /
+/// [`with_alignment`] / [`with_uid`] are the supported way to change
+/// one. `tests/ui_test.nv` writes exactly one literal by hand, and it
+/// is deliberately malformed, because that is the case
+/// `cycle_mitigation.validate_tree` exists to catch.
+/// 
+/// - `children` is owned by the parent and empty for a leaf.
+/// - `text` is the content of a `Text` or the label of a `Button`, and
+///   `""` for every other kind.
+/// - `enabled` is `false` for a disabled control; it is meaningful for
+///   any kind and [`render`] marks it `off`.
+/// - `uid` is a caller-assigned identity, `0` for "none". A non-zero
+///   uid must be unique among a node's children, which
+///   `cycle_mitigation.validate_tree` checks; the diff uses it to spot
+///   a child that moved.
+/// - `depth` is the ownership stamp described in the module doc.
+/// - `on_pressed` is [`no_press`] unless the node came from
+///   [`press_with`].
+export struct Widget:
+    kind: WidgetKind
+    children: [Arc<Widget>]
+    text: String
+    enabled: Bool
+    padding: EdgeInsets
+    alignment: Alignment
+    uid: Int
+    depth: Int
+    on_pressed: Callback
+    version: Int
+
+// ── internals (defined before use; `export`ed because the linker drops
+// private items of dependency files — see rule 1 in libs/README.md) ─────────
+/// INTERNAL — the callback stored in a node that has no action. It has
+/// an empty body and no return type, because a function-typed
+/// *parameter* does not type-check and there is no `() -> ()` return
+/// type that a body can satisfy; it is never invoked either way, since
+/// [`press`] checks `present` first. It exists only to give the field a
+/// value. Exported for linking, because [`no_press`] is called from
+/// `cycle_mitigation` and the linker drops private items of dependency
+/// files.
+export fn ignore_press():
+
+/// INTERNAL — every field of a fresh node, in one place, so the eight
+/// constructors below differ only in what they pass. `uid` starts at 0
+/// and `on_pressed` at the absent callback.
+/// INTERNAL - the highest version among shared children, or 0 when
+/// there are none. A node's own version is one past this, so any change
+/// to a leaf bumps every version on its path to the root — which is what
+/// lets an identity-based diff walk only the changed path instead of the
+/// whole tree. Reads through the `Arc`s (never copies the subtrees) to
+/// get there.
+export fn max_child_version(kids: [Arc<Widget>]) -> Int:
+    var best = 0
+    var i = 0
+    while i < kids.length:
+        let v = arc_load_builtin(kids[i]).version
+        if v > best:
+            best = v
+        i = i + 1
+    best
+
+export managed fn make_node(k: WidgetKind, kids: [Arc<Widget>], body: String, on: Bool, insets: EdgeInsets, at: Alignment, level: Int) -> Arc<Widget>:
+    heap_alloc_builtin(Widget {
+    kind: k,
+    children: kids,
+    text: body,
+    enabled: on,
+    padding: insets,
+    alignment: at,
+    uid: 0,
+    depth: level,
+    on_pressed: no_press(),
+    version: 1 + max_child_version(kids),
+})
+
+/// INTERNAL — a copy of `w` with one field replaced. Every `with_*`
+/// below is a one-line call into here, because a `Widget` literal
+/// written by hand would have to name all nine fields and would not be
+/// able to change only one.
+export managed fn rebuild(w: Widget, k: WidgetKind, kids: [Arc<Widget>], body: String, on: Bool, insets: EdgeInsets, at: Alignment, id: Int, level: Int, cb: Callback) -> Arc<Widget>:
+    heap_alloc_builtin(Widget {
+    kind: k,
+    children: kids,
+    text: body,
+    enabled: on,
+    padding: insets,
+    alignment: at,
+    uid: id,
+    depth: level,
+    on_pressed: cb,
+    version: 1 + max_child_version(kids),
+})
+
+/// INTERNAL — the body both button constructors share: a leaf with the
+/// one-cell vertical and two-cell horizontal insets a label needs, and
+/// then the caller's callback grafted on. It is a separate step because
+/// `make_node` always installs [`no_press`], and one of the two
+/// constructors wants that while the other does not.
+export managed fn make_button(label: String, cb: Callback) -> Arc<Widget>:
+    let w = make_node(Button, [], label, true, edges(2, 1, 2, 1), align_center(), 0)
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, old.children, old.text, old.enabled, old.padding, old.alignment, old.uid, old.depth, cb)
+
+// ── leaf and shape predicates ───────────────────────────────────────────────
+/// True for `Text` and `Button`: the two kinds that take no children.
+/// A leaf with children is a malformed tree and
+/// `cycle_mitigation.validate_tree` rejects it.
+export fn is_leaf(k: WidgetKind) -> Bool:
+    k == Text || k == Button
+
+/// True for `Container`, `Padding` and `Center`: the wrappers that take
+/// exactly one child, because each of them exists to decorate one node.
+export fn is_single(k: WidgetKind) -> Bool:
+    k == Container || k == Padding || k == Center
+
+/// True for `Panel`, `Column` and `Row`: the containers that take zero
+/// or more children.
+export fn is_multi(k: WidgetKind) -> Bool:
+    k == Panel || k == Column || k == Row
+
+/// The kind's name, as written in the source. Used in error messages and
+/// in [`render`], so a rendered tree and a rejected tree name a node the
+/// same way.
+export fn kind_name(k: WidgetKind) -> String:
+    if k == Panel:
+        "Panel"
+    else:
+        if k == Column:
+            "Column"
+        else:
+            if k == Row:
+                "Row"
+            else:
+                if k == Text:
+                    "Text"
+                else:
+                    if k == Button:
+                        "Button"
+                    else:
+                        if k == Container:
+                            "Container"
+                        else:
+                            if k == Padding:
+                                "Padding"
+                            else:
+                                "Center"
+
+// ── value constructors for the property types ───────────────────────────────
+/// Zero on all four sides — the padding of a node built by a
+/// constructor.
+export fn no_edges() -> EdgeInsets:
+    EdgeInsets { left: 0, top: 0, right: 0, bottom: 0 }
+
+/// Insets of `left`, `top`, `right`, `bottom` cells.
+export fn edges(left: Int, top: Int, right: Int, bottom: Int) -> EdgeInsets:
+    EdgeInsets { left: left, top: top, right: right, bottom: bottom }
+
+/// The neutral alignment: centred on both axes, which is what a wrapper
+/// uses when the caller says nothing. [`render`] treats it as the
+/// default and omits it.
+export fn align_center() -> Alignment:
+    Alignment { x: 5, y: 5 }
+
+/// Start-aligned horizontally, centred vertically — the alignment
+/// [`text`] uses.
+export fn align_start() -> Alignment:
+    Alignment { x: 0, y: 5 }
+
+/// Alignment at tenths `x` and `y`. Nothing is clamped: out-of-range
+/// tenths are a caller bug to be caught by the app's own layout, not a
+/// value this package should quietly repair.
+export fn align_at(x: Int, y: Int) -> Alignment:
+    Alignment { x: x, y: y }
+
+/// INTERNAL — field-wise `EdgeInsets` equality. Struct equality is not
+/// used here so that the comparison is explicit about which fields
+/// count; `==` on a struct is not part of this package's vocabulary.
+export fn same_insets(a: EdgeInsets, b: EdgeInsets) -> Bool:
+    a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
+
+/// INTERNAL — field-wise `Alignment` equality, for the same reason as
+/// [`same_insets`].
+export fn same_align(a: Alignment, b: Alignment) -> Bool:
+    a.x == b.x && a.y == b.y
+
+// ── callback ────────────────────────────────────────────────────────────────
+/// The absent callback. Every constructor puts this in a node's
+/// `on_pressed`; [`press_with`] replaces it.
+export fn no_press() -> Callback:
+    Callback { present: false, run: ignore_press }
+
+// ── tree constructors ───────────────────────────────────────────────────────
+/// A `Panel` over `children` — the unopinionated container, kept from
+/// the original API where the kind existed but had no constructor.
+export managed fn panel(children: [Arc<Widget>]) -> Arc<Widget>:
+    make_node(Panel, children, "", true, no_edges(), align_center(), 0)
+
+/// A `Column`: `children` stacked in order.
+export managed fn column(children: [Arc<Widget>]) -> Arc<Widget>:
+    make_node(Column, children, "", true, no_edges(), align_center(), 0)
+
+/// A `Row`: `children` side by side in order.
+export managed fn row(children: [Arc<Widget>]) -> Arc<Widget>:
+    make_node(Row, children, "", true, no_edges(), align_center(), 0)
+
+/// A `Text` leaf carrying `content`. A leaf: no constructor here ever
+/// gives it children, and `validate_tree` rejects one that has.
+export managed fn text(content: String) -> Arc<Widget>:
+    make_node(Text, [], content, true, no_edges(), align_start(), 0)
+
+/// A `Button` leaf labelled `label`, with **no** action. Use
+/// [`press_with`] when the button does something.
+export managed fn button(label: String) -> Arc<Widget>:
+    make_button(label, no_press())
+
+/// A `Button` leaf labelled `label` that runs `cb` when pressed.
+/// 
+/// `cb` is a [`Callback`] rather than a bare function because a
+/// function-typed parameter does not type-check; see the module doc for
+/// the diagnostic and `docs/overview.md` for the consequence.
+export managed fn press_with(label: String, cb: Callback) -> Arc<Widget>:
+    make_button(label, cb)
+
+/// A `Container` wrapping exactly one child.
+export managed fn container(child: Arc<Widget>) -> Arc<Widget>:
+    make_node(Container, [child], "", true, no_edges(), align_center(), 0)
+
+/// A `Padding` wrapping exactly one child with `insets` around it.
+export managed fn padded(child: Arc<Widget>, insets: EdgeInsets) -> Arc<Widget>:
+    make_node(Padding, [child], "", true, insets, align_center(), 0)
+
+/// A `Center` wrapping exactly one child.
+/// 
+/// The node's own `alignment` is left at [`align_center`]; a caller that
+/// wants a different one uses [`with_alignment`].
+export managed fn center(child: Arc<Widget>) -> Arc<Widget>:
+    make_node(Center, [child], "", true, no_edges(), align_center(), 0)
+
+// ── accessors ───────────────────────────────────────────────────────────────
+/// The node's kind.
+export fn kind_of(w: Widget) -> WidgetKind:
+    w.kind
+
+/// The node's children, in order. An empty list for a leaf.
+export fn kids(w: Widget) -> [Arc<Widget>]:
+    w.children
+
+/// How many children the node has.
+export fn child_count(w: Widget) -> Int:
+    w.children.length
+
+/// The child at `i`, or `None` when `i` is out of range.
+/// 
+/// `Option` rather than a panic: an index is the one thing a caller can
+/// get wrong without the compiler helping, and "no such child" is an
+/// answer, not a crash.
+export fn child_at(w: Widget, i: Int) -> Option<Widget>:
+    let n: Int = w.children.length
+    if i < 0 || i >= n:
+        None
+    else:
+        Some(w.children[i])
+
+/// The text of a `Text` or the label of a `Button`; `""` for every
+/// other kind.
+export fn label_of(w: Widget) -> String:
+    w.text
+
+/// Whether the node is enabled. Always `true` unless a caller cleared
+/// it with [`with_enabled`].
+export fn is_enabled(w: Widget) -> Bool:
+    w.enabled
+
+/// The node's insets.
+export fn insets_of(w: Widget) -> EdgeInsets:
+    w.padding
+
+/// The node's alignment, in tenths.
+export fn alignment_of(w: Widget) -> Alignment:
+    w.alignment
+
+/// The node's caller-assigned identity, or `0` for none.
+export fn uid_of(w: Widget) -> Int:
+    w.uid
+
+/// The node's depth: `0` at a root, parent depth + 1 below one.
+export fn depth_of(w: Widget) -> Int:
+    w.depth
+
+/// Whether the node carries an action.
+export fn has_callback(w: Widget) -> Bool:
+    w.on_pressed.present
+
+/// Total cells of horizontal padding (`left + right`) — the number a
+/// row/column budget is actually about.
+export fn h_pad(w: Widget) -> Int:
+    w.padding.left + w.padding.right
+
+/// Total cells of vertical padding (`top + bottom`).
+export fn v_pad(w: Widget) -> Int:
+    w.padding.top + w.padding.bottom
+
+// ── with_* (one field changed, the rest carried) ────────────────────────────
+/// `w` with different text. The only way to retitle a node without
+/// writing a nine-field literal.
+export managed fn with_text(w: Arc<Widget>, body: String) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(
+    old,
+    old.kind,
+    old.children,
+    body,
+    old.enabled,
+    old.padding,
+    old.alignment,
+    old.uid,
+    old.depth,
+    old.on_pressed,
+)
+
+/// `w` enabled (`true`) or disabled (`false`). A disabled button
+/// refuses to fire; a disabled leaf still renders, marked `off`.
+export managed fn with_enabled(w: Arc<Widget>, on: Bool) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, old.children, old.text, on, old.padding, old.alignment, old.uid, old.depth, old.on_pressed)
+
+/// `w` with different insets.
+export managed fn with_insets(w: Arc<Widget>, insets: EdgeInsets) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, old.children, old.text, old.enabled, insets, old.alignment, old.uid, old.depth, old.on_pressed)
+
+/// `w` with a different alignment, in tenths.
+export managed fn with_alignment(w: Arc<Widget>, at: Alignment) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, old.children, old.text, old.enabled, old.padding, at, old.uid, old.depth, old.on_pressed)
+
+/// `w` with a caller-assigned identity. A non-zero uid must be unique
+/// among a node's siblings, which `cycle_mitigation.validate_tree`
+/// enforces and the diff uses to spot a moved child.
+export managed fn with_uid(w: Arc<Widget>, id: Int) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, old.children, old.text, old.enabled, old.padding, old.alignment, id, old.depth, old.on_pressed)
+
+/// `w` with its children replaced. Not stamped with a depth: a
+/// re-parented child keeps the depth its own parent chain implies, and
+/// `validate_tree` re-derives every depth anyway.
+export managed fn with_children(w: Arc<Widget>, cs: [Arc<Widget>]) -> Arc<Widget>:
+    let old = arc_load_builtin(w)
+    rebuild(old, old.kind, cs, old.text, old.enabled, old.padding, old.alignment, old.uid, old.depth, old.on_pressed)
+
+// ── firing ──────────────────────────────────────────────────────────────────
+/// Fire `w`'s action if it has one, and report whether it fired.
+/// 
+/// `false` for a node that is not a `Button`, for a disabled button,
+/// and for a button built with [`button`] rather than [`press_with`] —
+/// three different "nothing happened" cases that a caller usually wants
+/// to tell apart, so [`is_button`] and [`has_callback`] are exported
+/// alongside.
+export fn press(w: Widget) -> Bool:
+    if w.kind != Button:
+        false
+    else:
+        if w.enabled == false:
+            false
+        else:
+            if w.on_pressed.present == false:
+                false
+            else:
+                let fired: Callback = w.on_pressed; fired.run(); true
+
+/// Whether `w` is a `Button`, enabled or not.
+export fn is_button(w: Widget) -> Bool:
+    w.kind == Button
+
+/// Fire every enabled, action-carrying button in the tree, depth first,
+/// and report how many fired.
+/// 
+/// A "click everything" for a demo and a test: it is how a test drives
+/// a tree without knowing the tree's shape, and how an app answers
+/// "the user pressed the only button".
+export fn press_all(w: Widget) -> Int:
+    var n = 0
+    if press(w):
+        n = 1
+    let cs: [Arc<Widget>] = w.children; var i = 0
+    while i < cs.length:
+        n = n + press_all(arc_load_builtin(cs[i])); i = i + 1
+    n
+
+// ── rendering ───────────────────────────────────────────────────────────────
+/// INTERNAL — `n` spaces, for the indent [`render`] uses. A loop rather
+/// than a literal so a caller can render an arbitrary depth.
+export fn spaces(n: Int) -> String:
+    var out = ""; var i = 0
+    while i < n:
+        out = out + " "; i = i + 1
+    out
+
+/// INTERNAL — one node's own line, with no indent and no children: the
+/// kind, the label in quotes, then the properties that differ from a
+/// node's defaults. Omitting the defaults is what keeps a rendered tree
+/// readable — a tree of nine-field nodes where every line said
+/// `pad=0,0,0,0 align=5,5` would be noise.
+export fn describe_node(w: Widget) -> String:
+    var s = kind_name(w.kind)
+    if w.text.length > 0:
+        s = s + " \"" + w.text + "\""
+    if w.enabled == false:
+        s = s + " off"
+    if w.uid > 0:
+        s = s + " uid={w.uid}"
+    if same_insets(w.padding, no_edges()) == false:
+        s = s + " pad={w.padding.left},{w.padding.top},{w.padding.right},{w.padding.bottom}"
+    if same_align(w.alignment, align_center()) == false:
+        s = s + " align={w.alignment.x},{w.alignment.y}"
+    if w.on_pressed.present:
+        s = s + " press"
+    s
+
+/// The tree as indented text, one node per line, two spaces per level.
+/// 
+/// This is a **value rendering, not a backend**: it is the tree written
+/// out, and it is what makes the package testable with plain `assert`
+/// calls on a string. `docs/UI_SPEC.md` §5 defers every rendering
+/// backend until UI-M1, and a terminal backend is the one thing a
+/// library of this shape can do without a language change — but this is
+/// deliberately *not* it, and it paints nothing.
+/// 
+/// Recursion depth is the tree's own depth.
+export fn render(w: Widget) -> String:
+    render_node(w, 0)
+
+/// INTERNAL — [`render`]'s per-node step: the node's own line, then one
+/// `\n`-joined line per child, two spaces deeper.
+export fn render_node(w: Widget, pad: Int) -> String:
+    let head = spaces(pad) + describe_node(w); let cs: [Arc<Widget>] = w.children
+    if cs.length == 0:
+        head
+    else:
+        var out = head; var i = 0
+        while i < cs.length:
+            out = out + "\n" + render_node(arc_load_builtin(cs[i]), pad + 2); i = i + 1
+        out
+
+/// How many nodes the tree has, `w` included. A shape question, not a
+/// rendering one; handy for a test that asserts a refactor changed the
+/// tree's size and nothing else.
+export fn node_count(w: Widget) -> Int:
+    var n = 1; let cs: [Arc<Widget>] = w.children; var i = 0
+    while i < cs.length:
+        n = n + node_count(arc_load_builtin(cs[i])); i = i + 1
+    n
+
+/// How many nodes of kind `k` the tree has. `node_count` narrowed to one
+/// kind, for a test that cares about leaves or about buttons.
+export fn count_of_kind(w: Widget, k: WidgetKind) -> Int:
+    var n = 0
+    if w.kind == k:
+        n = 1
+    let cs: [Arc<Widget>] = w.children; var i = 0
+    while i < cs.length:
+        n = n + count_of_kind(arc_load_builtin(cs[i]), k); i = i + 1
+    n
+
+/// The widest row in the tree, measured in the **display width** of the
+/// labels: two for a `Button` (its insets) and the label's own byte
+/// length otherwise.
+/// 
+/// Byte length, and it is called out rather than hidden: `String.length`
+/// is UTF-8 bytes while `s[i]` is characters, and this package measures
+/// what a terminal paints in cells. A label with a non-ASCII character
+/// is therefore over-measured, by design of the language rather than by
+/// choice here — `libs/terminal` is the package that measures cells
+/// properly, and it needs no `ui` dependency to do it.
+export fn widest_row(w: Widget) -> Int:
+    let here = node_width(w); let cs: [Arc<Widget>] = w.children; var best = here; var i = 0
+    while i < cs.length:
+        let sub = widest_row(arc_load_builtin(cs[i]))
+        if sub > best:
+            best = sub
+        i = i + 1
+    best
+
+/// INTERNAL — [`widest_row`]'s per-node width: a button's label plus its
+/// horizontal insets, any other labelled node's label, and zero for an
+/// unlabelled container — so a container's width is its widest child,
+/// not its own (absent) label.
+export fn node_width(w: Widget) -> Int:
+    if w.text.length == 0:
+        0
+    else:
+        if w.kind == Button:
+            w.text.length + h_pad(w)
+        else:
+            w.text.length

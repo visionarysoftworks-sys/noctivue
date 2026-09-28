@@ -1,4 +1,8 @@
-//! Noctivue Language Server Protocol (LSP) server.
+//! noctivue-analyzer — Noctivue Language Server Protocol (LSP) server.
+//!
+//! Engine name: `noctivue-analyzer` (the rust-analyzer / tsserver equivalent
+//! for Noctivue: hover, go-to-definition, completions, references).
+//! Binary name: `noctivue-lsp` (kept for VS Code extension + script compat).
 //!
 //! This server wraps the Noctivue compiler frontend and provides LSP features:
 //! - Diagnostics (textDocument/publishDiagnostics)
@@ -13,14 +17,20 @@ use anyhow::Result;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
 use compiler::analysis::{
-    analyze_file, diagnostic_to_lsp, find_definition_at, get_completions, get_hover, span_to_range,
+    analyze_file_with_roots, collect_impl_spans, definition_name_span, diagnostic_to_lsp,
+    find_cross_file_target, find_definition_at, find_item_span, find_trait_context, find_type_at,
+    fs_path_to_uri, get_completions, get_hover, identifier_at, name_span_in, nominal_name_of,
+    parse_resolved, span_to_range, uri_to_fs_path,
 };
 
 mod nestpkg;
 
 /// Bump on every behavior-changing server release so the `window/logMessage`
 /// beacon in the client's Output panel identifies the running binary.
-const SERVER_VERSION: &str = "0.0.10-nestpkg1";
+///
+/// Engine: `noctivue-analyzer`. The beacon keeps the `noctivue-lsp` binary
+/// name in parentheses so old Output-panel filters still match.
+const SERVER_VERSION: &str = "0.0.13-xfile";
 
 struct ServerState {
     connection: Connection,
@@ -34,6 +44,9 @@ impl ServerState {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             definition_provider: Some(OneOf::Left(true)),
+            // noctivue-analyzer: TS-parity navigation.
+            type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+            implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(false),
                 trigger_characters: Some(vec![".".to_string(), ":".to_string(), "(".to_string()]),
@@ -81,7 +94,7 @@ impl ServerState {
         let init_response = InitializeResult {
             capabilities: self.capabilities.clone(),
             server_info: Some(ServerInfo {
-                name: "noctivue-lsp".to_string(),
+                name: "noctivue-analyzer".to_string(),
                 version: Some(SERVER_VERSION.to_string()),
             }),
             ..Default::default()
@@ -102,12 +115,13 @@ impl ServerState {
         }
 
         // Version beacon: proves in the client's Output panel exactly which
-        // server binary is answering requests.
+        // engine binary is answering requests. Engine name first, binary in
+        // parens for back-compat with old Output-panel filters.
         let _ = self.connection.sender.send(Message::Notification(Notification::new(
             "window/logMessage".to_string(),
             serde_json::json!({
                 "type": 3,
-                "message": format!("noctivue-lsp {SERVER_VERSION} ready"),
+                "message": format!("noctivue-analyzer {SERVER_VERSION} ready (noctivue-lsp)"),
             }),
         )));
 
@@ -143,6 +157,8 @@ impl ServerState {
         match req.method.as_str() {
             "textDocument/hover" => self.handle_hover(req),
             "textDocument/definition" => self.handle_definition(req),
+            "textDocument/typeDefinition" => self.handle_type_definition(req),
+            "textDocument/implementation" => self.handle_implementation(req),
             "textDocument/completion" => self.handle_completion(req),
             "textDocument/references" => self.handle_references(req),
             "textDocument/rename" => self.handle_rename(req),
@@ -235,7 +251,7 @@ impl ServerState {
             self.publish_diagnostics(uri, Vec::new());
             return;
         }
-        let result = analyze_file(uri.to_string(), text);
+        let result = analyze_file_with_roots(uri.to_string(), text, &package_roots_for(uri));
         let diagnostics: Vec<Diagnostic> = result
             .diagnostics
             .iter()
@@ -272,7 +288,11 @@ impl ServerState {
                 let is_lock = nestpkg::is_lock_uri(&uri);
                 return nestpkg::get_hover(text, position, is_lock);
             }
-            let analysis = analyze_file(uri.to_string(), text);
+            // noctivue-analyzer: hover uses the same import-aware analysis
+            // as diagnostics so `path:` deps don't produce false
+            // unknowns at the hovered call site.
+            let analysis =
+                analyze_file_with_roots(uri.to_string(), text, &package_roots_for(&uri));
             let label = uri.as_str().rsplit('/').next().unwrap_or("untitled.nv").to_string();
             get_hover(&analysis.resolved, &analysis.typed, &analysis.source, position, &label)
         }).flatten();
@@ -303,20 +323,236 @@ impl ServerState {
         }
         let position = params.text_document_position_params.position;
 
-        let result = self.documents.get(&uri).and_then(|text| {
-            let analysis = analyze_file(uri.to_string(), text);
-            find_definition_at(&analysis.resolved, &analysis.source, position).map(|def| {
-                Location::new(
+        let result = self.documents.get(&uri).cloned().and_then(|text| {
+            // noctivue-analyzer: same import-aware analysis as diagnostics;
+            // goto targets are name-only spans (see `definition_name_span`).
+            // Cross-file (imports, flat dep uses, stdlib) resolves through
+            // the module graph before falling back to same-file.
+            let roots = package_roots_for(&uri);
+            let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+            let single = find_definition_at(
+                &analysis.resolved,
+                &analysis.typed,
+                &analysis.source,
+                position,
+            );
+            let ident = identifier_at(&text, position);
+            // Cross-file first for imports and unknown names; same-file
+            // locals/fields/variants never leave the file.
+            let cross_first = match (&single, &ident) {
+                (Some(def), _) => matches!(
+                    def.kind,
+                    compiler::analysis::DefinitionKind::Import
+                ),
+                (None, Some(_)) => true,
+                (None, None) => false,
+            };
+            if cross_first {
+                if let Some(name) = ident {
+                    if let Some(loc) = self.cross_file_location(&uri, &analysis.resolved, &name, &roots) {
+                        return Some(loc);
+                    }
+                }
+            }
+            if let Some(def) = single {
+                let name_span = definition_name_span(&analysis.source, &def);
+                return Some(Location::new(
                     uri.clone(),
-                    span_to_range(&analysis.source, &def.span),
-                )
-            })
+                    span_to_range(&analysis.source, &name_span),
+                ));
+            }
+            None
         });
 
         self.connection.sender.send(Message::Response(Response::new_ok(
             req.id,
             serde_json::to_value(result).unwrap(),
         )));
+    }
+
+    fn handle_type_definition(&mut self, req: Request) {
+        let params: GotoDefinitionParams = match serde_json::from_value(req.params) {
+            Ok(p) => p,
+            Err(e) => {
+                self.send_error(req.id, format!("Invalid typeDefinition params: {e}"));
+                return;
+            }
+        };
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+                req.id,
+                serde_json::Value::Null,
+            )));
+            return;
+        }
+        let position = params.text_document_position_params.position;
+        let result = self.documents.get(&uri).cloned().and_then(|text| {
+            let roots = package_roots_for(&uri);
+            let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+            // Expression type first (`user.name` → field type).
+            let mut nominal = find_type_at(&analysis.typed, &text, position)
+                .and_then(|ty| nominal_name_of(&ty));
+            // Fallback: cursor on a type name itself (`User` in `-> User`).
+            if nominal.is_none() {
+                if let Some(ident) = identifier_at(&text, position) {
+                    let is_type = find_item_span(&analysis.resolved, &ident).is_some_and(
+                        |(kind, _, _)| {
+                            matches!(
+                                kind,
+                                compiler::analysis::DefinitionKind::Struct
+                                    | compiler::analysis::DefinitionKind::Enum
+                                    | compiler::analysis::DefinitionKind::Trait
+                            )
+                        },
+                    );
+                    if is_type {
+                        nominal = Some(ident);
+                    }
+                }
+            }
+            let name = nominal?;
+            // Same-file first, then graph (deps, vendor/, stdlib).
+            if let Some((_, span, _)) = find_item_span(&analysis.resolved, &name) {
+                let range = span_to_range(&text, &name_span_in(&text, &span, &name));
+                return Some(Location::new(uri.clone(), range));
+            }
+            self.cross_file_location(&uri, &analysis.resolved, &name, &roots)
+        });
+        let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+            req.id,
+            serde_json::to_value(result).unwrap(),
+        )));
+    }
+
+    fn handle_implementation(&mut self, req: Request) {
+        let params: GotoDefinitionParams = match serde_json::from_value(req.params) {
+            Ok(p) => p,
+            Err(e) => {
+                self.send_error(req.id, format!("Invalid implementation params: {e}"));
+                return;
+            }
+        };
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+                req.id,
+                serde_json::Value::Null,
+            )));
+            return;
+        }
+        let position = params.text_document_position_params.position;
+        let result: Vec<Location> = self
+            .documents
+            .get(&uri)
+            .cloned()
+            .map(|text| {
+                let roots = package_roots_for(&uri);
+                let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+                let ident = identifier_at(&text, position).unwrap_or_default();
+                let Some((trait_name, method)) = find_trait_context(
+                    &analysis.resolved,
+                    &text,
+                    position,
+                    &ident,
+                ) else {
+                    return Vec::new();
+                };
+                let mut out = Vec::new();
+                // Same-file impls.
+                for span in
+                    collect_impl_spans(&analysis.resolved, &text, &trait_name, method.as_deref())
+                {
+                    out.push(Location::new(uri.clone(), span_to_range(&text, &span)));
+                }
+                // Cross-file impls across the graph closure.
+                out.extend(self.cross_file_impls(&uri, &trait_name, method.as_deref(), &roots));
+                out
+            })
+            .unwrap_or_default();
+        let _ = self.connection.sender.send(Message::Response(Response::new_ok(
+            req.id,
+            serde_json::to_value(result).unwrap(),
+        )));
+    }
+
+    /// Resolve `ident` through the module graph to a Location in another
+    /// file (imports, flat dep uses, stdlib). Returns `None` when the name
+    /// is same-file or unresolvable. Open documents shadow disk reads so
+    /// unsaved edits still jump correctly.
+    fn cross_file_location(
+        &self,
+        from_uri: &Uri,
+        program: &compiler::ast::Program,
+        ident: &str,
+        roots: &[std::path::PathBuf],
+    ) -> Option<Location> {
+        let from_disk = uri_to_fs_path(from_uri.as_str())?;
+        if !from_disk.is_file() {
+            return None;
+        }
+        let (target_path, item) = find_cross_file_target(&from_disk, program, ident, roots)?;
+        let (target_uri, target_text) = self.target_source(&target_path)?;
+        match item {
+            Some(item_name) => {
+                let target_program = parse_resolved(&target_text);
+                let (_, span, _) = find_item_span(&target_program, &item_name)?;
+                let range =
+                    span_to_range(&target_text, &name_span_in(&target_text, &span, &item_name));
+                Some(Location::new(target_uri, range))
+            }
+            // `import pkg` (bare module, no item): jump to file start.
+            None => Some(Location::new(
+                target_uri,
+                Range::new(Position::new(0, 0), Position::new(0, 0)),
+            )),
+        }
+    }
+
+    /// All cross-file `impl Trait` method locations (excludes the current file).
+    fn cross_file_impls(
+        &self,
+        from_uri: &Uri,
+        trait_name: &str,
+        method: Option<&str>,
+        roots: &[std::path::PathBuf],
+    ) -> Vec<Location> {
+        let Some(from_disk) = uri_to_fs_path(from_uri.as_str()) else {
+            return Vec::new();
+        };
+        let Ok(graph) = compiler::modules::ModuleGraph::load_with(
+            &[from_disk.clone()],
+            roots,
+        ) else {
+            return Vec::new();
+        };
+        let canonical = from_disk.canonicalize().unwrap_or(from_disk);
+        let mut out = Vec::new();
+        for file in &graph.files {
+            if file.path == canonical {
+                continue;
+            }
+            let (uri, text) = match self.target_source(&file.path) {
+                Some(t) => t,
+                None => continue,
+            };
+            let program = parse_resolved(&text);
+            for span in collect_impl_spans(&program, &text, trait_name, method) {
+                out.push(Location::new(uri.clone(), span_to_range(&text, &span)));
+            }
+        }
+        out
+    }
+
+    /// Target file URI + text: open-document state wins, else disk.
+    fn target_source(&self, path: &std::path::Path) -> Option<(Uri, String)> {
+        let uri_str = fs_path_to_uri(path);
+        let uri: Uri = uri_str.parse().ok()?;
+        if let Some(text) = self.documents.get(&uri) {
+            return Some((uri, text.clone()));
+        }
+        let text = std::fs::read_to_string(path).ok()?;
+        Some((uri, text))
     }
 
     fn handle_completion(&mut self, req: Request) {
@@ -334,7 +570,8 @@ impl ServerState {
             if nestpkg::is_nestpkg_uri(&uri) {
                 return nestpkg::get_completions(&uri, text, position);
             }
-            let analysis = analyze_file(uri.to_string(), text);
+            let analysis =
+                analyze_file_with_roots(uri.to_string(), text, &package_roots_for(&uri));
             get_completions(&analysis.resolved, &analysis.source, position)
         }).unwrap_or_default();
 
@@ -553,6 +790,70 @@ fn is_artifact_uri(uri: &Uri) -> bool {
     let s = uri.as_str();
     let path = s.split('?').next().unwrap_or(s);
     path.ends_with(".nvir") || path.ends_with(".nvc")
+}
+
+/// Package roots for the module graph, derived from the file's own
+/// project manifest: the directories holding each declared `path:`
+/// dependency.
+///
+/// The editor was reporting a false `E0101 cannot resolve imported
+/// module` plus a flood of false `E0201 unknown identifier` squiggles for
+/// any project with a first-party dependency, because the graph was built
+/// with no roots while `noct run` on the very same file succeeded. The
+/// CLI had the identical bug; both are fixed by handing the graph the
+/// roots the manifest declares.
+///
+/// Two limits, stated rather than hidden:
+/// - The content store is NOT supplied. Its layout lives in the
+///   toolchain (`noct-cli/src/store.rs`), not the compiler or the shared
+///   `nestpkg` crate, and duplicating that XDG/`NOCT_STORE` logic here
+///   would be a second source of truth that drifts. An import that
+///   resolves only through the store can still show a false `E0101` in
+///   the editor; `noct get` (or a committed `vendor/`) avoids it.
+/// - Path dependencies are read from the nearest `nestpkg.nvpm`, walking
+///   up from the file, which is the same project the CLI resolves against.
+fn package_roots_for(uri: &Uri) -> Vec<std::path::PathBuf> {
+    let Some(disk) = uri_to_fs_path(uri.as_str()) else {
+        return Vec::new();
+    };
+    let mut dir = disk.parent().map(|p| p.to_path_buf());
+    let mut manifest_dir = None;
+    while let Some(d) = dir.clone() {
+        let candidate = d.join("nestpkg.nvpm");
+        if candidate.is_file() {
+            manifest_dir = Some(d);
+            break;
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    let Some(manifest_dir) = manifest_dir else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(manifest_dir.join("nestpkg.nvpm")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = ::nestpkg::parse_manifest(&text) else {
+        // A malformed manifest is the manifest language's job to report,
+        // not this function's: returning no roots degrades to the old
+        // single-file behaviour instead of inventing errors.
+        return Vec::new();
+    };
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for dep in manifest.dependencies.iter().chain(&manifest.dev_dependencies) {
+        let ::nestpkg::Source::Path(rel) = &dep.source else {
+            continue;
+        };
+        let dir = manifest_dir.join(rel);
+        // The resolver's roots hold packages, so hand over the containing
+        // directory: it finds `<root>/<pkg>/lib/…` by listing them.
+        if let Some(parent) = dir.parent() {
+            let parent = parent.to_path_buf();
+            if parent.is_dir() && !roots.contains(&parent) {
+                roots.push(parent);
+            }
+        }
+    }
+    roots
 }
 
 fn occurrences(text: &str, word: &str) -> Vec<Range> {

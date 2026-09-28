@@ -1,0 +1,11 @@
+// @skip-test (module-graph fixture: covered by compiler::modules::tests)
+import support::export_all as b
+
+export fn root_fn() -> String:
+    "root"
+
+main():
+    let s = b::BarrelStruct { x: 1 }
+    let n: Int = s.x
+    println(b.barrel_fn())
+    println("field-ok")

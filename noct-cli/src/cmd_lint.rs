@@ -34,18 +34,33 @@
 //! warning, never a false positive).
 //!
 //! Rule L-003 (default-off, opt-in via `--style` / `--include-style`):
-//! a PUBLIC item (an `export`-wrapped function, struct, enum, or
-//! trait — the only visibility the AST exposes) missing consecutive
-//! `///` doc comments. Exported members (struct fields, enum
-//! variants, trait methods) carry no per-member visibility in the
-//! AST, so every member of an exported parent is treated as public.
-//! Presence uses the shared `analysis::doc_comment_for` rule (one
-//! rule, two consumers with hover/`noct doc`). Private (non-exported)
-//! items never warn.
-//!
-//! Usage:
-//!   noct lint [file.nv ...] [--json] [--fix] [--style|--include-style]
-//!   noct lint --help
+/// a PUBLIC item (an `export`-wrapped function, struct, enum, or
+/// trait — the only visibility the AST exposes) missing consecutive
+/// `///` doc comments. Exported members (struct fields, enum
+/// variants, trait methods) carry no per-member visibility in the
+/// AST, so every member of an exported parent is treated as public.
+/// Presence uses the shared `analysis::doc_comment_for` rule (one
+/// rule, two consumers with hover/`noct doc`). Private (non-exported)
+/// items never warn.
+///
+/// Rule L-004 (default-off, opt-in via `--style` / `--include-style`):
+/// prefer whole-module import (`import m`) over 3+ per-item imports
+/// (`import m::A`, `import m::B`, `import m::C`) from the same module.
+/// This reduces visual noise and makes re-exports (`export import m`)
+/// practical. The threshold is 3 because 1-2 explicit imports are
+/// idiomatic for single uses; at 3+ a module import is cleaner.
+///
+/// Rule L-005 (default-off, opt-in via `--style` / `--include-style`):
+/// fallible functions should return `Result<T, String>` or `Result<T, ErrorInfo>`
+/// — ad-hoc error types (e.g., `Result<T, MyError>`) are flagged. The stdlib
+/// convention is `Result<T, String>` for all fallible functions; `ErrorInfo`
+/// is the structured alternative. Application error enums are permitted but
+/// should be documented. This rule catches unintentional deviations from the
+/// `Result<T, String>` convention.
+///
+/// Usage:
+///   noct lint [file.nv ...] [--json] [--fix] [--style|--include-style]
+///   noct lint --help
 
 use std::collections::HashSet;
 use std::fs;
@@ -53,7 +68,7 @@ use std::path::Path;
 
 use compiler::analysis::doc_comment_for;
 use compiler::ast::{
-    Block, Expr, FunctionBody, FunctionDecl, Item, MatchStmt, Pattern, Program, Stmt, TypeExpr,
+    Block, Expr, FunctionBody, FunctionDecl, ImportDecl, Item, MatchStmt, Pattern, Program, Stmt, TypeExpr,
 };
 
 pub fn run(args: &[String]) -> i32 {
@@ -77,7 +92,7 @@ pub fn run(args: &[String]) -> i32 {
                 println!("    --json  Output warnings as JSON to stdout");
                 println!("    --fix   Apply L-001 autofixes (bare-ident → Ident() in match arms)");
                 println!("    --style, --include-style");
-                println!("            Enable default-off style rules (L-003: public items need `///` docs)");
+                println!("            Enable default-off style rules (L-003: public items need `///` docs, L-004: prefer whole-module import, L-005: prefer Result<T, String> over ad-hoc error types)");
                 return 0;
             }
             other => {
@@ -220,8 +235,8 @@ fn print_json(all: &[(String, String, Vec<Warning>)]) {
 /// Parse `source` (lex+parse only — all rules run pre-typeck by
 /// design) and return all warnings. Parse errors never block the
 /// rules (the parser returns a partial tree; reporting syntax is
-/// `diagnostics`' job, not lint's). L-003 runs only when
-/// `include_style` is set (default-off style rule).
+/// `diagnostics`' job, not lint's). L-003, L-004, and L-005 run only when
+/// `include_style` is set (default-off style rules).
 fn lint_file(path: &str, source: &str, include_style: bool) -> Vec<Warning> {
     let mut sink = compiler::diagnostics::DiagnosticSink::new();
     let tokens = compiler::lexer::lex(source, &mut sink);
@@ -233,6 +248,8 @@ fn lint_file(path: &str, source: &str, include_style: bool) -> Vec<Warning> {
     check_unused_imports(&program, source, &graph_import_exports(path, &program), &mut out);
     if include_style {
         check_missing_docs(&program, source, &mut out);
+        check_import_style(&program, source, &mut out);
+        check_error_convention(&program, source, &mut out);
     }
     // Stable order: by line, then rule id on ties.
     out.sort_by(|a, b| (a.line, a.rule).cmp(&(b.line, b.rule)));
@@ -343,6 +360,14 @@ fn check_item(item: &Item, variants: &HashSet<String>, source: &str, out: &mut V
         }
         Item::Mod(m) => check_stmts(&m.items, variants, source, out),
         Item::Export(inner) => check_item(inner, variants, source, out),
+        // `export *` re-exports names this file already declares, and
+        // those declarations are linted by their own `Item::Export`
+        // arms above, so there is nothing extra to walk. Stated
+        // explicitly rather than left to `_ => {}` so a future change
+        // to the form's meaning has to confront this. A bogus name in
+        // `export * except x` is not this pass's job: the module
+        // graph reports it loudly as E0110.
+        Item::ExportAll(_) | Item::ExportAllExcept(_) => {}
         _ => {}
     }
 }
@@ -552,6 +577,9 @@ fn collect_item_refs(item: &Item, refs: &mut HashSet<String>) {
             }
         }
         Item::Export(inner) => collect_item_refs(inner, refs),
+        Item::ExportAll(_) => {}
+        Item::ExportAllExcept(_) => {}
+        Item::ReExport(_) => {}, // ReExport wraps ImportDecl, not an Item
     }
 }
 
@@ -780,5 +808,125 @@ fn check_missing_docs(program: &Program, source: &str, out: &mut Vec<Warning>) {
 fn check_doc(source: &str, out: &mut Vec<Warning>, kind: &str, name: &str, span_start: usize) {
     if doc_comment_for(source, span_start).is_none() {
         out.push(warn_l003(kind, name, line_of(source, span_start)));
+    }
+}
+
+/// L-004: Prefer whole-module import over 3+ per-item imports from one module.
+/// For each module path that has 3+ item imports (e.g., `import m::A`, `import m::B`, `import m::C`),
+/// suggest consolidating to a single `import m` (or `import m as alias`).
+fn check_import_style(program: &Program, source: &str, out: &mut Vec<Warning>) {
+    use std::collections::HashMap;
+    // Count item imports per module path
+    let mut module_imports: HashMap<Vec<String>, Vec<&ImportDecl>> = HashMap::new();
+    for import in &program.imports {
+        if import.path.len() >= 2 {
+            // This is an item import (module::item), not a module import
+            let module_path = import.path[..import.path.len() - 1].to_vec();
+            module_imports.entry(module_path).or_default().push(import);
+        }
+    }
+    for (module_path, imports) in module_imports {
+        if imports.len() >= 3 {
+            // Report on the first import of this group
+            let first = imports[0];
+            let module_str = module_path.join("::");
+            out.push(warn_l004(
+                &module_str,
+                imports.len(),
+                line_of(source, first.span.start),
+            ));
+        }
+    }
+}
+
+fn warn_l004(module_path: &str, count: usize, line: usize) -> Warning {
+    Warning {
+        rule: "L-004",
+        line,
+        message: format!(
+            "warning[L-004]: {count} item imports from `{module_path}` — consider `import {module_path}` instead"
+        ),
+        details: vec![
+            "  = note: whole-module import reduces visual noise and enables re-exports".to_string(),
+            format!("  = help: replace with `import {module_path}` and use `{module_path}::Item`"),
+        ],
+        fix: None,
+    }
+}
+
+/// L-005: Fallible functions should return `Result<T, String>` or `Result<T, ErrorInfo>`.
+/// Flags ad-hoc error types in function return types.
+fn check_error_convention(program: &Program, source: &str, out: &mut Vec<Warning>) {
+    for item in &program.items {
+        check_item_error_convention(item, source, out);
+    }
+}
+
+fn check_item_error_convention(item: &Item, source: &str, out: &mut Vec<Warning>) {
+    match item {
+        Item::Function(f) => {
+            if let Some(ret) = &f.return_ty {
+                check_type_for_adhoc_error(ret, source, out, f.span.start);
+            }
+        }
+        Item::Task(t) => {
+            // Tasks return Int handle, not Result
+        }
+        Item::BareDecl(b) => {
+            if let Some(ret) = &b.return_ty {
+                check_type_for_adhoc_error(ret, source, out, b.span.start);
+            }
+        }
+        Item::Mod(m) => {
+            for s in &m.items {
+                check_stmt_error_convention(s, source, out);
+            }
+        }
+        Item::Export(inner) => check_item_error_convention(inner, source, out),
+        _ => {}
+    }
+}
+
+fn check_stmt_error_convention(stmt: &Stmt, source: &str, out: &mut Vec<Warning>) {
+    match stmt {
+        Stmt::Function(f) => {
+            if let Some(ret) = &f.return_ty {
+                check_type_for_adhoc_error(ret, source, out, f.span.start);
+            }
+        }
+        Stmt::Task(t) => {
+            // Tasks return Int handle, not Result
+        }
+        _ => {}
+    }
+}
+
+fn check_type_for_adhoc_error(ty: &TypeExpr, source: &str, out: &mut Vec<Warning>, span_start: usize) {
+    // Check for Result<T, E> where E is not String and not ErrorInfo
+    if let TypeExpr::Named(name, args, _) = ty {
+        if name == "Result" && args.len() == 2 {
+            if let TypeExpr::Named(inner_name, _, _) = &args[1] {
+                // Get the last segment (unqualified name) for comparison
+                let simple_name = inner_name.split("::").last().unwrap_or(inner_name);
+                if simple_name != "String" && simple_name != "ErrorInfo" {
+                    out.push(warn_l005(inner_name, line_of(source, span_start)));
+                }
+            }
+        }
+    }
+}
+
+fn warn_l005(error_type: &str, line: usize) -> Warning {
+    Warning {
+        rule: "L-005",
+        line,
+        message: format!(
+            "warning[L-005]: fallible function uses ad-hoc error type `{error_type}` — prefer `Result<T, String>` or `Result<T, ErrorInfo>`"
+        ),
+        details: vec![
+            "  = note: stdlib convention is Result<T, String> for fallible functions".to_string(),
+            format!("  = help: change `{error_type}` to `String` or use `ErrorInfo`"),
+        ],
+        fix: None,
     }
 }

@@ -122,6 +122,61 @@ fn spawn_server() -> (std::process::Child, Conn) {
     (child, conn)
 }
 
+/// Cross-file goto (noctivue-analyzer): a flat `helper()` use from a
+/// `path:` dep jumps to the dep's `lib/main.nv`, not to null.
+#[test]
+fn definition_over_stdio_jumps_to_path_dep() {
+    let base = std::env::temp_dir().join(format!(
+        "noct-lsp-xfile-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    let dep_lib = base.join("libs").join("dep").join("lib");
+    std::fs::create_dir_all(&dep_lib).expect("dep lib");
+    let app_lib = base.join("app").join("lib");
+    std::fs::create_dir_all(&app_lib).expect("app lib");
+    std::fs::write(dep_lib.join("main.nv"), "export fn helper() -> Int:\n    7\n").expect("dep");
+    std::fs::write(
+        base.join("app").join("nestpkg.nvpm"),
+        "package:\n    name: app\n    version: 0.1.0\n\ndependencies:\n    dep:\n        version: =0.1.0\n        path: ../libs/dep\n",
+    )
+    .expect("manifest");
+    let main_path = app_lib.join("main.nv");
+    let src = "import dep\n\nmain():\n    let n: Int = helper()\n    print(\"{n}\")\n";
+    std::fs::write(&main_path, src).expect("main");
+    let uri = format!("file:///{}", main_path.to_string_lossy().replace('\\', "/"));
+
+    let (mut child, mut conn) = spawn_server();
+    conn.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{}}}"#);
+    let init = conn.recv_response(1);
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+    // New capabilities must be advertised (TS parity).
+    let caps = init.get("result").and_then(|r| r.get("capabilities")).cloned().unwrap_or_default();
+    let caps = serde_json::to_string(&caps).unwrap_or_default();
+    assert!(caps.contains("typeDefinitionProvider"), "missing typeDefinition: {caps}");
+    assert!(caps.contains("implementationProvider"), "missing implementation: {caps}");
+
+    conn.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"noctivue","version":1,"text":src}}})
+            .to_string(),
+    );
+    // `helper` use on line 3 (0-based), inside the call.
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri},"position":{"line":3,"character":19}}})
+            .to_string(),
+    );
+    let def = conn.recv_response(2);
+    let result = def.get("result").cloned().unwrap_or(serde_json::Value::Null);
+    let text = serde_json::to_string(&result).unwrap_or_default();
+    assert!(
+        text.contains("dep") && text.contains("main.nv"),
+        "cross-file goto missed dep main: {text}"
+    );
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn nestpkg_hover_over_stdio_explains_tier() {
     let (mut child, mut conn) = spawn_server();

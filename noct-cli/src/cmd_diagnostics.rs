@@ -23,7 +23,14 @@ pub fn run(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("main.nv");
 
-    let graph = match compiler::modules::ModuleGraph::load(&[Path::new(path).to_path_buf()]) {
+    // `read_module_graph`, not `ModuleGraph::load`: this command must
+    // resolve imports exactly the way `noct run` does, including the
+    // content store, `vendor/`, and manifest `path:` dependencies. It
+    // used to call `load` directly, so any project with a declared
+    // dependency reported `E0101 cannot resolve imported module` here
+    // while `noct run` on the same file was perfectly happy — a
+    // diagnostic that contradicts the build it is supposed to explain.
+    let graph = match crate::cmd_run::read_module_graph(&[path]) {
         Ok(graph) => graph,
         Err(e) => {
             eprintln!("error: cannot load `{path}`: {e}");

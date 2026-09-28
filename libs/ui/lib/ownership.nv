@@ -1,0 +1,107 @@
+//! ARC-backed ownership for the widget tree (UI-M1, gate criterion a).
+//!
+//! The value-based tree (`widget.nv`) and its diffing
+//! (`cycle_mitigation.nv`) are pure values: a `Widget` is copied when it
+//! is passed around, so nothing there is owned by anything. This module
+//! puts ownership on the managed heap instead, and it is deliberately a
+//! THIN layer over the seven builtins rather than a new model:
+//!
+//! ```text
+//! node_new(w)              w -> Arc<Node>, no parent (a root)
+//! node_child(parent, w)    w -> Arc<Node>, Some(unowned back-ref)
+//! node_body(node)          Arc<Node> -> Widget (the value, for diffing)
+//! node_parent_tag(node)    Arc<Node> -> the parent's tag, or "root"
+//! node_observe(node)       Arc<Node> -> Weak<Node> (non-owning watcher)
+//! ```
+//!
+//! The shape is a flat arena, not a nested tree, and the reason is a real
+//! constraint of the managed heap rather than laziness: the heap is
+//! write-once from `.nv` — you can allocate a value and read it back, but
+//! you cannot store into an object you already hold. So a parent that is
+//! created complete can never afterwards gain a strong `kids` list, which
+//! means a `parent -> children` strong edge cannot be built after the
+//! fact. What CAN be built, and what this module is, is the direction
+//! that does not need mutation: every child is allocated with an
+//! `unowned` back-reference to a parent that already exists, while the
+//! application holds every node strongly in a flat list. No strong cycle
+//! is possible by construction, which is precisely what makes the
+//! `unowned` back-reference sound: a child can never keep its parent
+//! alive by accident.
+//!
+//! Criterion (b) accounting: each child carries exactly ONE non-owning
+//! reference (its parent back-ref) and each root carries zero. A `Weak`
+//! appears only as a transient observer, never as structure. The gate's
+//! bar is "at most 2 non-owning references per node"; the steady state
+//! uses half of it.
+
+import widget::Widget
+
+export struct LiveNode:
+    body: Widget
+    parent: Option<Unowned<LiveNode>>
+
+/// A root: a widget on the heap with no parent. Takes the `Arc` the
+/// constructors return — the widget is already allocated, so this only
+/// adds the ownership wrapper around it.
+export fn node_new(a: Arc<Widget>) -> Arc<LiveNode>:
+    heap_alloc_builtin(LiveNode { body: arc_load_builtin(a), parent: None })
+
+/// A child of an existing parent: same, plus the back-reference.
+/// `parent` must be a live `Arc` (it always is — the caller holds it),
+/// so `unowned_create_builtin` cannot trap here.
+export fn node_child(parent: Arc<LiveNode>, a: Arc<Widget>) -> Arc<LiveNode>:
+    let back = unowned_create_builtin(parent)
+    heap_alloc_builtin(LiveNode { body: arc_load_builtin(a), parent: Some(back) })
+
+/// The widget value inside a node. For diffing: the diffing layer walks
+/// values (`Widget`), so this is the bridge between the owned node and
+/// the value tree it mirrors.
+export fn node_body(node: Arc<LiveNode>) -> Widget:
+    arc_load_builtin(node).body
+
+/// The parent's tag, or `"root"` when there is no parent. Traverses the
+/// real back-reference rather than a cached copy, so it reports the
+/// parent as it IS — this is the traversal that proves the unowned chain
+/// is live.
+export fn node_parent_tag(node: Arc<LiveNode>) -> String:
+    let back = arc_load_builtin(node).parent
+    match back:
+        Some(u): unowned_load_builtin(u).body.text
+        None: "root"
+
+/// A non-owning watcher. Watching is the one `Weak` use: it never keeps
+/// anything alive, and `weak_load_builtin` yields `None` once every
+/// strong reference is gone (see `libs/ui/tests/`).
+export fn node_observe(node: Arc<LiveNode>) -> Weak<LiveNode>:
+    weak_create_builtin(node)
+
+/// How many positions differ between two renders of the same arena, by
+/// HEAP IDENTITY rather than by value.
+///
+/// This is the re-render a UI actually performs: the old frame and the
+/// new frame share almost every node (same `Arc`s, same heap objects),
+/// and only the changed positions need work. Comparing `arc_id`s is two
+/// integer reads per position — no value is loaded, no `Mutation` chain
+/// is built, nothing is copied — so a frame in which one leaf of a
+/// thousand changed costs a thousand comparisons plus the one changed
+/// subtree, not a thousand deep walks.
+///
+/// `old[i]` and `new[i]` are the same position in two consecutive
+/// frames. A position counts as changed unless both sides hold the very
+/// same heap object. The caller then diffs the CHANGED positions by
+/// value (`cycle_mitigation::diff_widgets` on the two bodies), so this
+/// is a pre-pass that turns re-render from O(tree) into
+/// O(changed), not a replacement for the value diff.
+export fn diff_identity_count(old: [Arc<LiveNode>], new: [Arc<LiveNode>]) -> Int:
+    let changed = 0
+    let i = 0
+    let n = old.length
+    while i < n:
+        let a = old[i]
+        let b = new[i]
+        if arc_id_builtin(a) == arc_id_builtin(b):
+            i = i + 1
+        else:
+            changed = changed + 1
+            i = i + 1
+    changed

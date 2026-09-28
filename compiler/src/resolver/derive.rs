@@ -578,6 +578,7 @@ fn build_to_json(tname: &str, fields: &[(String, FieldKind)], span: &Span) -> Fu
             span: span.clone(),
         }),
         span: span.clone(),
+        is_managed: false,
     }
 }
 
@@ -966,6 +967,7 @@ fn build_from_json(tname: &str, fields: &[(String, FieldKind)], span: &Span) -> 
             span: span.clone(),
         }),
         span: span.clone(),
+        is_managed: false,
     }
 }
 

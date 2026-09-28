@@ -1,53 +1,226 @@
-//! semver/version — strict `MAJOR.MINOR.PATCH` versions and ordering.
+//! semver/version — versions with pre-release and build metadata,
+//! and the two orders they need.
 //!
-//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! Status: first-party library v0.2.0 (native tier). Pure `.nv`: no
 //! builtins beyond `panic`/`assert`, so it runs on `run` today and
 //! stays portable to `run-vm`/`build` later.
 //!
-//! The accepted shape is deliberately the strict one the package
-//! manager already requires in `nestpkg.nvpm` (P-003 §2): exactly three
-//! dot-separated numeric fields, digits only, no leading zeros, no
-//! pre-release or build metadata. A version this module rejects is one
-//! the manifest parser rejects, so a dependency's declared version and
-//! its declared requirement can never disagree about what is spellable.
+//! ## Accepted spelling
+//!
+//! `MAJOR.MINOR.PATCH` with an optional `-pre-release` and an optional
+//! `+build-metadata`:
+//!
+//! - the three core fields are digits only, no leading zeros
+//!   (`01.0.0` is an error — `01` and `1` must not be two spellings
+//!   of one version);
+//! - a pre-release is dot-separated, non-empty identifiers of ASCII
+//!   alphanumerics and `-`; an identifier that is wholly numeric may
+//!   not carry a leading zero (`1.0.0-01` is an error, `1.0.0-0` and
+//!   `1.0.0-0A` are not);
+//! - build metadata is dot-separated, non-empty identifiers of the same
+//!   character class, and there a numeric identifier MAY carry a
+//!   leading zero (`1.0.0+001` is fine). The spec allows it, and build
+//!   metadata never affects precedence.
+//!
+//! ## Two orders, and they are not the same relation
+//!
+//! - [`core_cmp`] — the numeric core only, so `1.2.3-rc.1` and `1.2.3`
+//!   are equal. This is the relation P-003 §3 fixes and the `nestpkg`
+//!   crate implements in `req_satisfied`, which is why
+//!   `requirement.nv` matches on it.
+//! - [`version_cmp`] — SemVer *precedence*: pre-release aware, build
+//!   metadata ignored. `1.0.0-alpha < 1.0.0`, and `1.0.0+a` and
+//!   `1.0.0+b` are equal here but are not the same version — use
+//!   [`build_eq`] to tell those apart.
+//!
+//! `version_cmp` is therefore a total order on precedence *classes*,
+//! not on spellings: the spec's own `1.0.0+build == 1.0.0` means a
+//! total order over spellings cannot exist without inventing a rule
+//! the spec does not have. Both claims are tested in
+//! `tests/semver_test.nv`.
+//!
+//! ## Parity with the manifest, and exactly where it stops
+//!
+//! P-003 v1 (`nestpkg/src/lib.rs`, `SemVer::parse`) still rejects
+//! pre-release and build metadata: it splits on `.` and demands digits.
+//! This module is deliberately one step AHEAD of that grammar, and the
+//! gap is one-directional and loud rather than silent:
+//!
+//! - every spelling the manifest accepts, this module parses the same
+//!   way and orders the same way — `tests/semver_test.nv` keeps the
+//!   "toolchain parity" block for that;
+//! - this module additionally accepts spellings the manifest cannot
+//!   produce, so nothing in the toolchain can yet hand a consumer a
+//!   pre-release version, and no manifest can be widened by a caller
+//!   that reaches for this parser;
+//! - `requirement.nv` therefore matches on [`core_cmp`] exactly as the
+//!   crate does, and `parse_requirement` REFUSES a pre-release with an
+//!   error naming the manifest grammar rather than quietly widening a
+//!   range to a semantics the manifest cannot express.
+//!
+//! When P-003 grows, one commit must switch `requirement.nv` to
+//! `version_cmp`. Until then this module is the tested, spec-shaped
+//! implementation waiting for that step — deliberately never ahead in
+//! the one place where being ahead would change what a dependency
+//! means.
 //!
 //! Fields are scanned by index range rather than sliced into strings:
 //! the language has neither a slice expression nor a `char -> String`
-//! conversion, so materialising "1", "2", "3" would need machinery
-//! this library should not grow.
+//! conversion, so a range is materialised by walking it one character
+//! at a time. Each walk spends a BYTE budget rather than testing
+//! `i < s.length`, because `String.length` counts UTF-8 bytes while
+//! `s[i]` counts characters — and because the parser rejects
+//! non-ASCII up front (`is_ascii_run`), a character index and a byte
+//! position are the same number everywhere below, so no walk can step
+//! past the end of a caller-supplied string.
 //!
-//! Digit scanning lives in `digits` (same library, internal).
+//! Digit and character-class scanning lives in `digits` (same
+//! library, internal).
 
 import digits
 
 /// A parsed version. Exported because callers hold it across module
 /// boundaries; constructed with the named-field literal form.
+///
+/// `pre` and `build` hold the section text WITHOUT its `-` / `+`
+/// sigil, and are the empty string when the section is absent — the
+/// parser rejects an empty section, so emptiness is a sound "absent".
 export struct Version:
     major: Int
     minor: Int
     patch: Int
+    pre: String
+    build: String
+
+/// INTERNAL — one dot-separated pre-release identifier plus the cursor
+/// just past it, and whether that identifier is wholly numeric (which
+/// decides the comparison rule: numeric identifiers compare
+/// numerically and rank below alphanumeric ones).
+export struct PreField:
+    text: String
+    numeric: Bool
+    nxt: Int
 
 // ── internals (defined before use, and `export`ed for linking) ─────────────
 //
-// Both helpers are `export` only because the linker drops private items
-// of dependency files (rule 1 in `libs/README.md`, compiler/src/modules.rs):
-// when this package is consumed, its `lib/*.nv` are dependencies, so a
-// private helper called by an exported function would vanish and fail
-// resolution. Application code should not import them. They are defined
-// above their callers because the resolver is single-pass.
-/// INTERNAL — index of the first `.` at or after `start`, or -1.
-export fn index_of_dot(s: String, start: Int) -> Int:
-    var i = start; var found = 0 - 1
-    while i < s.length:
-        if s[i] == '.' && found < 0:
+// Every helper below is `export` only because the linker drops private
+// items of dependency files (rule 1 in `libs/README.md`,
+// compiler/src/modules.rs): when this package is consumed, its
+// `lib/*.nv` are dependencies, so a private helper called by an
+// exported function would vanish and fail resolution. Application code
+// should not import them. They are defined above their callers because
+// the resolver is single-pass.
+/// INTERNAL — `i` when it is a real index, otherwise `fallback`.
+export fn or_fallback(i: Int, fallback: Int) -> Int:
+    if i < 0:
+        fallback
+    else:
+        i
+
+/// INTERNAL — index of the first `target` in the char range
+/// `[start, end)`, or -1. `end` is a BYTE bound (`String.length`
+/// counts bytes, `s[i]` counts characters), so the walk spends bytes:
+/// a multi-byte char costs its own width, which is what stops a
+/// non-ASCII input from running off the end of the string.
+export fn index_of_char(s: String, target: Char, start: Int, end: Int) -> Int:
+    var i = start; var found = 0 - 1; var budget = end - start
+    while budget > 0:
+        let c = s[i]; let cs = "{c}"
+        if c == target && found < 0:
             found = i
-        i = i + 1
+        budget = budget - cs.length; i = i + 1
     found
 
-/// INTERNAL — value of the field `s[start..end)`, validating digits,
-/// emptiness, and leading zeros. `end <= start` means an empty field,
-/// which is an error (so `1..3` and `.1.2` are both rejected rather than
-/// read as 0).
+/// INTERNAL — true when every char in `[start, end)` is one byte wide,
+/// i.e. the range is pure ASCII.
+///
+/// This is the guard that makes every other index below unambiguous.
+/// `String.length` counts UTF-8 bytes while `s[i]` counts characters, so
+/// on non-ASCII input a character index and a byte position are
+/// different numbers and a range walk can step past the end of the
+/// string. The SemVer grammar is ASCII anyway (identifiers are
+/// `[0-9A-Za-z-]`), so `parse_version_from` refuses non-ASCII up front
+/// with a named error instead of guessing.
+export fn is_ascii_run(s: String, start: Int, end: Int) -> Bool:
+    var ok = true; var i = start; var budget = end - start
+    while budget > 0:
+        let c = s[i]; let cs = "{c}"
+        if cs.length != 1:
+            ok = false
+        budget = budget - cs.length; i = i + 1
+    ok
+
+/// INTERNAL — the text of the char range `[start, end)`, materialised
+/// by concatenation. `String` has no slice expression and there is no
+/// `char -> String` conversion, so this is the only way to get a
+/// substring, and `version.nv` keeps it in one place for that reason.
+export fn copy_range(s: String, start: Int, end: Int) -> String:
+    var out = ""; var i = start; var budget = end - start
+    while budget > 0:
+        let c = s[i]; let cs = "{c}"; out = out + cs; budget = budget - cs.length; i = i + 1
+    out
+
+/// INTERNAL — true when `[start, end)` is non-empty and every char in
+/// it is a digit. Wholly-numeric-ness is what makes a pre-release
+/// identifier compare numerically.
+export fn is_numeric_run(s: String, start: Int, end: Int) -> Bool:
+    if end <= start:
+        false
+    else:
+        var ok = true; var i = start; var budget = end - start
+        while budget > 0:
+            let c = s[i]; let cs = "{c}"
+            if is_digit(c) == false:
+                ok = false
+            budget = budget - cs.length; i = i + 1
+        ok
+
+/// INTERNAL — true when `[start, end)` is non-empty and every char in
+/// it is an ASCII alphanumeric or `-`: the character class the spec
+/// allows inside one identifier.
+export fn is_ident_run(s: String, start: Int, end: Int) -> Bool:
+    if end <= start:
+        false
+    else:
+        var ok = true; var i = start; var budget = end - start
+        while budget > 0:
+            let c = s[i]; let cs = "{c}"
+            if is_ascii_alphanumeric(c) == false && c != '-':
+                ok = false
+            budget = budget - cs.length; i = i + 1
+        ok
+
+/// INTERNAL — validate the dot-separated identifier list in
+/// `[start, end)`: at least one identifier, every identifier non-empty
+/// and drawn from the identifier character class, and — when
+/// `strict_numeric` is set — no wholly-numeric identifier with a
+/// leading zero. Pre-release sets it (the spec forbids `01`); build
+/// metadata does not (the spec allows `+001`).
+export fn valid_dotted_idents(s: String, start: Int, end: Int, strict_numeric: Bool) -> Bool:
+    if end <= start:
+        false
+    else:
+        var seg = start; var good = false; var cont = true
+        while cont:
+            let dot = index_of_char(s, '.', seg, end); let stop = or_fallback(dot, end)
+            if is_ident_run(s, seg, stop) == false:
+                cont = false
+            else:
+                if strict_numeric && is_numeric_run(s, seg, stop) && stop - seg > 1 && s[seg] == '0':
+                    cont = false
+                else:
+                    if dot < 0:
+                        cont = false; good = true
+                    else:
+                        seg = dot + 1
+        good
+
+/// INTERNAL — value of the core field `s[start..end)`, validating
+/// digits, emptiness, and leading zeros. `end <= start` means an empty
+/// field, which is an error (so `1..3` and `.1.2` are both rejected
+/// rather than read as 0). `end` is a byte bound and the walk spends
+/// it, so a non-ASCII char ends in a `non-digit` error instead of an
+/// out-of-range panic.
 export fn field_value(s: String, start: Int, end: Int) -> Result<Int, String>:
     if end <= start:
         Err("empty field in version: {s}")
@@ -55,30 +228,86 @@ export fn field_value(s: String, start: Int, end: Int) -> Result<Int, String>:
         if s[start] == '0' && end - start > 1:
             Err("leading zero (expected strict MAJOR.MINOR.PATCH): {s}")
         else:
-            var acc = 0; var i = start; var bad = false
-            while i < end:
-                let d = digit_value(s[i])
+            var acc = 0; var i = start; var budget = end - start; var bad = false
+            while budget > 0:
+                let c = s[i]; let cs = "{c}"; let d = digit_value(c)
                 if d < 0:
                     bad = true
                 else:
                     acc = acc * 10 + d
-                i = i + 1
+                budget = budget - cs.length; i = i + 1
             if bad:
                 Err("non-digit in version field: {s}")
             else:
                 Ok(acc)
 
+/// INTERNAL — the three core fields of `s[start..end)`, where `end` is
+/// the position of the `-`, `+`, or the end of the string. Keeping the
+/// core in its own function is what lets the suffixes be parsed without
+/// the dot scan ever seeing a dot inside `rc.1`.
+export fn parse_core(s: String, start: Int, end: Int) -> Result<Version, String>:
+    let first_dot = index_of_char(s, '.', start, end)
+    if first_dot < 0:
+        Err("not MAJOR.MINOR.PATCH: {s}")
+    else:
+        let second_dot = index_of_char(s, '.', first_dot + 1, end)
+        if second_dot < 0:
+            Err("not MAJOR.MINOR.PATCH: {s}")
+        else:
+            if index_of_char(s, '.', second_dot + 1, end) >= 0:
+                Err("too many fields (expected MAJOR.MINOR.PATCH): {s}")
+            else:
+                // Field ranges are absolute [start, end) index pairs,
+                // not lengths: minor spans first_dot+1 .. second_dot.
+                let major = field_value(s, start, first_dot)?
+                let minor = field_value(s, first_dot + 1, second_dot)?
+                let patch = field_value(s, second_dot + 1, end)?
+                Ok(Version { major: major, minor: minor, patch: patch, pre: "", build: "" })
+
+/// INTERNAL — the pre-release text for a `-` at `dash` running to
+/// `stop`, or `""` when `dash` is -1. Validation is the spec's: dotted
+/// identifiers of alphanumerics and hyphens, and no leading zero in a
+/// wholly-numeric identifier.
+export fn parse_pre(s: String, dash: Int, stop: Int) -> Result<String, String>:
+    if dash < 0:
+        Ok("")
+    else:
+        if valid_dotted_idents(s, dash + 1, stop, true) == false:
+            Err("bad pre-release (expected dotted alphanumerics and hyphens, no leading zero): {s}")
+        else:
+            Ok(copy_range(s, dash + 1, stop))
+
+/// INTERNAL — the build-metadata text for a `+` at `plus` running to
+/// the end of the string, or `""` when `plus` is -1. Same identifier
+/// class as a pre-release, but a numeric identifier may carry a
+/// leading zero.
+export fn parse_build(s: String, plus: Int) -> Result<String, String>:
+    if plus < 0:
+        Ok("")
+    else:
+        if valid_dotted_idents(s, plus + 1, s.length, false) == false:
+            Err("bad build metadata (expected dot-separated alphanumerics and hyphens): {s}")
+        else:
+            Ok(copy_range(s, plus + 1, s.length))
+
 // ── public API ──────────────────────────────────────────────────────────────
-/// Parse a strict `MAJOR.MINOR.PATCH` version.
+/// Parse `MAJOR.MINOR.PATCH[-pre-release][+build-metadata]`.
 ///
-/// Rejects (as `Err`, never a silent guess): a wrong field count, a
-/// non-digit char, an empty field, and leading zeros (`01.0.0`) — the
-/// last because `01` and `1` must not be two spellings of one version.
-/// Pre-release and build metadata are also rejected (v0.1.0 scope).
+/// Rejects (as `Err`, never a silent guess): a wrong core field count,
+/// a non-digit char, an empty field, leading zeros in a core field
+/// (`01.0.0`), a pre-release or build section that is empty or has an
+/// empty identifier (`1.0.0-`, `1.0.0-a..b`, `1.0.0+`), an identifier
+/// character outside the spec's class (`1.0.3-!`), a leading zero in a
+/// wholly-numeric pre-release identifier (`1.0.0-01`), and a second
+/// `+` (`1.0.0+a+b`).
+///
+/// The manifest grammar (P-003 v1) rejects the two suffix sections
+/// outright; this parser accepts them on purpose. See the module doc
+/// for the one-directional gap and what it does NOT change.
 export fn parse_version(s: String) -> Result<Version, String>:
     parse_version_from(s, 0)
 
-/// Parse a strict `MAJOR.MINOR.PATCH` version starting at `start`.
+/// Parse a version starting at `start`, with the same grammar.
 ///
 /// Exists so a requirement can drop a leading `=` without slicing: the
 /// language has no slice expression and no `char -> String`
@@ -88,30 +317,46 @@ export fn parse_version_from(s: String, start: Int) -> Result<Version, String>:
     if start >= s.length:
         Err("empty version")
     else:
-        let first_dot = index_of_dot(s, start)
-        if first_dot < 0:
-            Err("not MAJOR.MINOR.PATCH: {s}")
+        // ASCII first, over the WHOLE string: it is what makes every
+        // index below a byte position AND a character position at the
+        // same time (see is_ascii_run), the grammar is ASCII anyway,
+        // and a range that started at a non-zero `start` could not make
+        // that claim about the part before it.
+        if is_ascii_run(s, 0, s.length) == false:
+            Err("non-ASCII character in version (the SemVer grammar is ASCII): {s}")
         else:
-            let second_dot = index_of_dot(s, first_dot + 1)
-            if second_dot < 0:
-                Err("not MAJOR.MINOR.PATCH: {s}")
-            else:
-                if index_of_dot(s, second_dot + 1) >= 0:
-                    Err("too many fields (expected MAJOR.MINOR.PATCH): {s}")
-                else:
-                    // Field ranges are absolute [start, end) index pairs,
-                    // not lengths: minor spans first_dot+1 .. second_dot.
-                    let major = field_value(s, start, first_dot)?
-                    let minor = field_value(s, first_dot + 1, second_dot)?
-                    let patch = field_value(s, second_dot + 1, s.length)?
-                    Ok(Version { major: major, minor: minor, patch: patch })
+            // Order of the split: the first `+` ends the version part,
+            // and the first `-` BEFORE it ends the core. A `-` inside
+            // build metadata (`1.0.0+build-1`) is therefore not
+            // mistaken for the pre-release sigil, and a `.` inside
+            // either suffix is not mistaken for a fourth core field.
+            let plus = index_of_char(s, '+', start, s.length)
+            let version_end = or_fallback(plus, s.length)
+            let dash = index_of_char(s, '-', start, version_end)
+            let core = parse_core(s, start, or_fallback(dash, version_end))?
+            let pre = parse_pre(s, dash, version_end)?; let build = parse_build(s, plus)?
+            Ok(Version { major: core.major, minor: core.minor, patch: core.patch, pre: pre, build: build })
 
-/// Canonical rendering — the exact inverse of [`parse_version`].
+/// Canonical rendering — the exact inverse of [`parse_version`], so
+/// the suffixes survive a round trip (`1.0.0-0A.is.legal+001` renders
+/// exactly as it was spelled).
 export fn version_to_string(v: Version) -> String:
-    "{v.major}.{v.minor}.{v.patch}"
+    var out = "{v.major}.{v.minor}.{v.patch}"
+    if v.pre.length > 0:
+        out = out + "-" + v.pre
+    if v.build.length > 0:
+        out = out + "+" + v.build
+    out
 
-/// Total order: -1 when `a < b`, 0 when equal, 1 when `a > b`.
-export fn version_cmp(a: Version, b: Version) -> Int:
+/// Core order: -1 when `a`'s `MAJOR.MINOR.PATCH` is below `b`'s, 0 when
+/// equal, 1 when above. Pre-release and build metadata are IGNORED,
+/// so this is the relation P-003 §3 and the `nestpkg` crate's
+/// `req_satisfied` use, and the one `requirement.nv` matches on.
+///
+/// Use [`version_cmp`] for the SemVer precedence order instead: the
+/// two disagree on exactly the inputs this module accepts beyond the
+/// manifest grammar.
+export fn core_cmp(a: Version, b: Version) -> Int:
     if a.major != b.major:
         if a.major < b.major:
             0 - 1
@@ -132,22 +377,160 @@ export fn version_cmp(a: Version, b: Version) -> Int:
                 else:
                     0
 
-/// `a == b`.
+/// `a`'s core equals `b`'s core (`1.2.3-rc.1` and `1.2.3` are equal).
+export fn core_eq(a: Version, b: Version) -> Bool:
+    core_cmp(a, b) == 0
+
+/// `a`'s core is below `b`'s.
+export fn core_lt(a: Version, b: Version) -> Bool:
+    core_cmp(a, b) < 0
+
+/// `a`'s core is at or above `b`'s.
+export fn core_gte(a: Version, b: Version) -> Bool:
+    core_cmp(a, b) >= 0
+
+/// INTERNAL — the identifier beginning at `from`, plus the cursor just
+/// past it (past the end of `s` when it is the last one, which is how
+/// the caller sees the list end). `PreField.numeric` records whether
+/// the identifier is wholly digits, because that picks the comparison
+/// rule. The cursor is a char index and the dot scan is byte-bounded,
+/// so this cannot run off the end of a hand-built non-ASCII string.
+export fn next_pre_field(s: String, from: Int) -> PreField:
+    let dot = index_of_char(s, '.', from, s.length); let stop = or_fallback(dot, s.length)
+    PreField { text: copy_range(s, from, stop), numeric: is_numeric_run(s, from, stop), nxt: stop + 1 }
+
+/// INTERNAL — compare two wholly-numeric identifier texts NUMERICALLY,
+/// so `2` precedes `11`. Length-first is exact rather than lucky: the
+/// parser guarantees no leading zero in such an identifier, so more
+/// digits always means a larger number. Equal lengths fall through to
+/// a character walk — safe on the `while i < a.length` form precisely
+/// because the precondition is "ASCII digits", where a byte count is a
+/// character count. A non-numeric run never reaches this function:
+/// `next_pre_field` marks it, and `pre_field_cmp` only calls this when
+/// both sides are marked.
+export fn num_text_cmp(a: String, b: String) -> Int:
+    if a.length < b.length:
+        0 - 1
+    else:
+        if a.length > b.length:
+            1
+        else:
+            var i = 0; var c = 0
+            while i < a.length && c == 0:
+                if a[i] < b[i]:
+                    c = 0 - 1
+                else:
+                    if a[i] > b[i]:
+                        c = 1
+                i = i + 1
+            c
+
+/// INTERNAL — compare one identifier from each side, field by field:
+/// two numeric identifiers compare numerically, and a numeric one
+/// always ranks BELOW an alphanumeric one (the spec's `1.0.0-1 <
+/// 1.0.0-alpha`, which is why `alpha` cannot be sorted by treating
+/// digits as text).
+export fn pre_field_cmp(x: PreField, y: PreField) -> Int:
+    if x.numeric && y.numeric:
+        num_text_cmp(x.text, y.text)
+    else:
+        if x.numeric:
+            0 - 1
+        else:
+            if y.numeric:
+                1
+            else:
+                if x.text < y.text:
+                    0 - 1
+                else:
+                    if x.text > y.text:
+                        1
+                    else:
+                        0
+
+/// INTERNAL — compare two pre-release section texts field by field.
+/// The FIRST difference decides; if one list is a prefix of the other,
+/// the SHORTER one has lower precedence (`alpha` precedes
+/// `alpha.1`), and two identical texts are equal.
+export fn pre_cmp(a: String, b: String) -> Int:
+    var ia = 0; var ib = 0; var result = 0; var cont = true
+    while cont:
+        if ia >= a.length:
+            if ib >= b.length:
+                result = 0
+            else:
+                result = 0 - 1
+            cont = false
+        else:
+            if ib >= b.length:
+                result = 1; cont = false
+            else:
+                let fa = next_pre_field(a, ia); let fb = next_pre_field(b, ib)
+                let c = pre_field_cmp(fa, fb)
+                if c == 0:
+                    ia = fa.nxt; ib = fb.nxt
+                else:
+                    result = c; cont = false
+    result
+
+/// SemVer precedence: -1 when `a` precedes `b`, 0 when they have equal
+/// precedence, 1 when `a` follows `b`. Four rules, in order:
+///
+/// 1. compare `MAJOR`, then `MINOR`, then `PATCH` ([`core_cmp`]);
+/// 2. a version WITH a pre-release precedes the same version WITHOUT
+///    one (`1.0.0-alpha < 1.0.0`) — a pre-release is unfinished work;
+/// 3. otherwise compare the pre-release identifiers field by field
+///    ([`pre_cmp`]): numeric fields compare numerically and rank below
+///    alphanumeric ones, and when all compared fields are equal the
+///    version with MORE fields follows (`alpha` < `alpha.1`);
+/// 4. build metadata is ignored entirely, so `1.0.0+build` and
+///    `1.0.0` have equal precedence. They are still different
+///    versions; [`build_eq`] is how you tell them apart.
+///
+/// Because of rule 4 this is a total order on precedence classes, not
+/// on spellings — the spec has no rule to break that tie and inventing
+/// one would make this library disagree with every other SemVer
+/// implementation.
+export fn version_cmp(a: Version, b: Version) -> Int:
+    let c = core_cmp(a, b)
+    if c != 0:
+        c
+    else:
+        if a.pre.length == 0:
+            if b.pre.length == 0:
+                0
+            else:
+                1
+        else:
+            if b.pre.length == 0:
+                0 - 1
+            else:
+                pre_cmp(a.pre, b.pre)
+
+/// Equal PRECEDENCE — not the same spelling. `1.0.0+build` and
+/// `1.0.0` are equal here; see rule 4 of [`version_cmp`].
 export fn version_eq(a: Version, b: Version) -> Bool:
     version_cmp(a, b) == 0
 
-/// `a < b`.
+/// `a` precedes `b` in precedence.
 export fn version_lt(a: Version, b: Version) -> Bool:
     version_cmp(a, b) < 0
 
-/// `a <= b`.
+/// `a` precedes `b` or has the same precedence.
 export fn version_lte(a: Version, b: Version) -> Bool:
     version_cmp(a, b) <= 0
 
-/// `a > b`.
+/// `a` follows `b` in precedence.
 export fn version_gt(a: Version, b: Version) -> Bool:
     version_cmp(a, b) > 0
 
-/// `a >= b`.
+/// `a` follows `b` or has the same precedence.
 export fn version_gte(a: Version, b: Version) -> Bool:
     version_cmp(a, b) >= 0
+
+/// Same build metadata — the part of the spelling that precedence
+/// ignores. `build_eq(parse("1.0.0+a"), parse("1.0.0+b"))` is false
+/// while `version_eq` on the same pair is true, which is the whole of
+/// rule 4 stated as an API.
+export fn build_eq(a: Version, b: Version) -> Bool:
+    a.build == b.build

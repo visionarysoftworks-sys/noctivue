@@ -1,0 +1,82 @@
+//! ARC ownership smoke test (UI-M1 gate criterion a).
+//!
+//! Run: `noct test` from `libs/ui` (no lockfile needed: this package has
+//! no dependencies), or `noct run tests/ownership_test.nv` from here.
+//!
+//! What this proves, step by step: a widget goes onto the managed heap,
+//! a child is allocated with a live back-reference to its parent, the
+//! back-reference resolves to the parent through the real `unowned` chain
+//! (not a cached copy), a `Weak` observer reports the parent while it is
+//! alive, and the dangling case is the VM's/interpreter's loud trap
+//! rather than a silent default. One function per section and bind-then-
+//! assert throughout, because a flat `main` this long overflows the tree-
+//! walking interpreter's stack and a call inside a call inside an
+//! `assert` does too.
+
+import ownership::node_new
+import ownership::node_child
+import ownership::node_body
+import ownership::node_parent_tag
+import ownership::node_observe
+import widget::text
+import widget::column
+
+fn t_root_has_no_parent() -> String:
+    let w = text("R")
+    let r = node_new(w)
+    let tag = node_parent_tag(r)
+    let body_text = node_body(r).text
+    assert(tag == "root", "expected")
+    assert(body_text == "R", "expected")
+    "root-ok"
+
+fn t_child_points_back_at_the_parent() -> String:
+    let r = node_new(text("R"))
+    let k = node_child(r, text("K"))
+    let tag = node_parent_tag(k)
+    assert(tag == "R", "expected")
+    "backref-ok"
+
+fn t_weak_observes_a_live_parent() -> String:
+    let r = node_new(text("R"))
+    let w = node_observe(r)
+    let opt = weak_load_builtin(w)
+    match opt:
+        Some(a): "weak-some"
+        None: "weak-none"
+
+fn t_releasing_everything_starves_the_weak() -> String:
+    let r = node_new(text("R"))
+    let w = node_observe(r)
+    arc_release_builtin(r)
+    let opt = weak_load_builtin(w)
+    match opt:
+        Some(a): "weak-some"
+        None: "weak-none"
+
+fn t_column_of_nodes_stays_addressable() -> String:
+    let r = node_new(text("R"))
+    let k1 = node_child(r, text("K1"))
+    let k2 = node_child(r, text("K2"))
+    let t1 = node_parent_tag(k1)
+    let t2 = node_parent_tag(k2)
+    assert(t1 == "R", "expected")
+    assert(t2 == "R", "expected")
+    "arena-ok"
+
+main():
+    let a = t_root_has_no_parent()
+    assert(a == "root-ok", "expected")
+    println(a)
+    let b = t_child_points_back_at_the_parent()
+    assert(b == "backref-ok", "expected")
+    println(b)
+    let c = t_weak_observes_a_live_parent()
+    assert(c == "weak-some", "expected")
+    println(c)
+    let d = t_releasing_everything_starves_the_weak()
+    assert(d == "weak-none", "expected")
+    println(d)
+    let e = t_column_of_nodes_stays_addressable()
+    assert(e == "arena-ok", "expected")
+    println(e)

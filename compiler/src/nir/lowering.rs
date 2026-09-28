@@ -1,7 +1,7 @@
 //! NIR lowering — convert HIR to NIR.
 
 use crate::hir::items::{Function, Module, TypedArm, TypedExpr, TypedLit, TypedPattern, TypedStmt};
-use crate::hir::types::Ty;
+use crate::hir::types::{Mode as HirMode, Ty};
 use crate::nir::instr::{CmpOp, ConstValue, Instr};
 use crate::nir::module::NirModule;
 use crate::nir::types::{BlockId, FuncId, FuncSig, Mode, NirTy, ValueId};
@@ -216,10 +216,15 @@ impl LoweringContext {
             .map(|(_, id, _)| *id)
             .unwrap_or(FuncId::UNRESOLVED);
 
+        // Use the function's mode for all types in this function
+        let func_mode = match func.mode {
+            HirMode::Native => Mode::Native,
+            HirMode::Managed => Mode::Managed,
+        };
         let sig = self.func_infos.iter()
             .find(|(n, _, _)| n == &name)
             .map(|(_, _, s)| s.clone())
-            .unwrap_or_else(|| FuncSig::new(vec![], NirTy::new(func.return_ty.clone(), self.mode), self.mode));
+            .unwrap_or_else(|| FuncSig::new(vec![], NirTy::new(func.return_ty.clone(), func_mode), func_mode));
 
         let entry_block = self.module.new_block_id();
         let mut block = crate::nir::module::Block::new(entry_block);
@@ -483,6 +488,11 @@ impl LoweringContext {
                 nir_block.add_instr(Instr::FsWrite { dst, path, contents });
                 Some(dst)
             }
+            "fs_list_dir_builtin" => {
+                let path = self.host_arg(arg_vals, 0, true, nir_block);
+                nir_block.add_instr(Instr::FsListDir { dst, path });
+                Some(dst)
+            }
             "fs_modified_millis_builtin" => {
                 let path = self.host_arg(arg_vals, 0, true, nir_block);
                 nir_block.add_instr(Instr::FsModifiedMillis { dst, path });
@@ -533,6 +543,121 @@ impl LoweringContext {
             "task_cancel_builtin" => {
                 let handle = self.host_arg(arg_vals, 0, false, nir_block);
                 emit_unit(self, Instr::TaskCancel { handle }, dst, nir_block)
+            }
+            _ => None,
+        }
+    }
+
+    /// Lower one managed-mode (ARC) builtin call to its dedicated
+    /// instruction. Returns `Some(dst)` when `name` is a managed builtin,
+    /// `None` otherwise so the caller falls through to ordinary `Call` lowering.
+    fn lower_managed_builtin(
+        &mut self,
+        name: &str,
+        arg_vals: &[ValueId],
+        dst: ValueId,
+        nir_block: &mut crate::nir::module::Block,
+    ) -> Option<ValueId> {
+        // Every arm here emits the instruction that ACTUALLY performs the
+        // operation. The previous version of this function fabricated
+        // results instead: `weak_create_builtin` emitted an `ArcRetain`
+        // (silently bumping the refcount it was supposed only to observe)
+        // and then bound its result to a `Const Unit` *typed as* `Weak`,
+        // and `unowned_create_builtin` fabricated a `Const Unit` typed
+        // as `Unowned` with no back-reference behind it at all. Both
+        // produced well-typed values that meant nothing, which is the
+        // silent-no-op failure the runtime invariants ban. `arc_retain`
+        // also disagreed with the interpreter, which returns the `Arc`
+        // while this bound `Unit`.
+        //
+        // Type arguments are `Unknown`, matching the typeck signatures in
+        // `typeck::Typeck::new`; the wrapper NAME is what carries the
+        // meaning, and the VM re-derives the value from the heap.
+        let mode = self.mode;
+        let arc_ty = || NirTy::new(Ty::Named("Arc".to_string(), vec![Ty::Unknown]), mode);
+        let weak_ty = || NirTy::new(Ty::Named("Weak".to_string(), vec![Ty::Unknown]), mode);
+        let unowned_ty = || NirTy::new(Ty::Named("Unowned".to_string(), vec![Ty::Unknown]), mode);
+        // Bind `dst` to Unit for the statement-shaped refcount ops.
+        fn unit(
+            slf: &mut LoweringContext,
+            dst: ValueId,
+            mode: crate::nir::types::Mode,
+            nb: &mut crate::nir::module::Block,
+        ) -> Option<ValueId> {
+            nb.add_instr(Instr::Const {
+                dst,
+                value: ConstValue::Unit,
+                ty: NirTy::new(Ty::Unit, mode),
+            });
+            Some(dst)
+        }
+        match name {
+            // `T -> Arc<T>`: move the value onto the managed heap.
+            "heap_alloc_builtin" => {
+                let val = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = arc_ty();
+                nir_block.add_instr(Instr::HeapAlloc { dst, src: val, ty });
+                Some(dst)
+            }
+            // `Arc<T> -> Arc<T>`: one more strong reference to the SAME
+            // object, returned so the count bump is usable as a value.
+            "arc_retain_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::ArcRetain { src });
+                nir_block.add_instr(Instr::Move { dst, src });
+                Some(dst)
+            }
+            // `Arc<T> -> ()`: drop one strong reference.
+            "arc_release_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::ArcRelease { src });
+                unit(self, dst, mode, nir_block)
+            }
+            // `Arc<T> -> T`: read through the strong reference.
+            "arc_load_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = NirTy::new(Ty::Unknown, mode);
+                nir_block.add_instr(Instr::ArcLoad { dst, src, ty });
+                Some(dst)
+            }
+            // `Arc<T> -> Int`: heap identity.
+            "arc_id_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                nir_block.add_instr(Instr::ArcId { dst, src });
+                Some(dst)
+            }
+            // `Arc<T> -> Weak<T>`: observe without owning. Deliberately
+            // does NOT retain, which is the whole difference from
+            // `arc_retain_builtin`.
+            "weak_create_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = weak_ty();
+                nir_block.add_instr(Instr::WeakCreate { dst, src, ty });
+                Some(dst)
+            }
+            // `Weak<T> -> Option<Arc<T>>`: upgrade, or `None` if freed.
+            "weak_load_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = NirTy::new(
+                    Ty::Option(Box::new(Ty::Named("Arc".to_string(), vec![Ty::Unknown]))),
+                    mode,
+                );
+                nir_block.add_instr(Instr::WeakLoad { dst, src, ty });
+                Some(dst)
+            }
+            // `Arc<T> -> Unowned<T>`: a real back-reference, not refcounted.
+            "unowned_create_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = unowned_ty();
+                nir_block.add_instr(Instr::UnownedCreate { dst, src, ty });
+                Some(dst)
+            }
+            // `Unowned<T> -> T`: the pointee, trapping when it is gone.
+            "unowned_load_builtin" => {
+                let src = self.host_arg(arg_vals, 0, false, nir_block);
+                let ty = NirTy::new(Ty::Unknown, mode);
+                nir_block.add_instr(Instr::UnownedLoad { dst, src, ty });
+                Some(dst)
             }
             _ => None,
         }
@@ -1267,7 +1392,15 @@ impl LoweringContext {
                 if let TypedExprKind::Ident(name) = &callee.kind {
                     if name == "print" || name == "println" {
                         let print_val = arg_vals.first().copied().unwrap_or(ValueId(0));
-                        nir_block.add_instr(Instr::Print { val: print_val });
+                        // The distinction is real and was being dropped
+                        // here: both names produced the same instruction,
+                        // so `println` on the VM path lost its trailing
+                        // newline. `print` must stay newline-free.
+                        let newline = name == "println";
+                        nir_block.add_instr(Instr::Print {
+                            val: print_val,
+                            newline,
+                        });
                         nir_block.add_instr(Instr::Const {
                             dst,
                             value: ConstValue::Unit,
@@ -1283,6 +1416,10 @@ impl LoweringContext {
                     // panicking the backend.
                     if let Some(host) = self.lower_host_builtin(name, &arg_vals, dst, nir_block) {
                         return host;
+                    }
+                    // UI-S0 (ARC runtime): managed-mode builtins
+                    if let Some(managed) = self.lower_managed_builtin(name, &arg_vals, dst, nir_block) {
+                        return managed;
                     }
                 }
 

@@ -31,7 +31,7 @@ use crate::hir::items::{
     Enum, Function, Module, Struct, Trait, TypedArm, TypedExpr, TypedExprKind, TypedInterpPart,
     TypedLit, TypedPattern, TypedStmt, TypedStmtKind,
 };
-use crate::hir::Ty;
+use crate::hir::types::{Mode, Ty};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -134,6 +134,74 @@ impl<'s> TypeChecker<'s> {
                 Ty::List(Box::new(Ty::Unknown)),
             ),
         );
+        // Phase 6.5 / UI-S0 (managed mode, ARC): the managed-heap
+        // builtins. The heap value types are *named* types rather than
+        // new `Ty` variants: `Arc<T>` is `Ty::Named("Arc", [T])`, which
+        // is exactly what a user annotation already lowers to, so the
+        // type system needs no new case for them.
+        //
+        // The type ARGUMENT is `Unknown`, which is what makes these
+        // signatures precise where it matters and lenient only where
+        // they must be. `Unknown` is compatible with everything, so
+        // `Arc<Int>` satisfies an expected `Arc<Unknown>`; but the
+        // wrapper NAME is still compared, so passing a `Weak` where an
+        // `Arc` is expected is a compile-time `E0200` rather than a
+        // runtime panic. That is the whole point of typing these at
+        // all: without it the builtin table cannot tell a refcount
+        // bump from a weak upgrade.
+        //
+        // Only `Arc<T>` is annotatable in source. `Weak` and `Unowned`
+        // are reserved lexer keywords (token.rs) that the parser never
+        // consumes, so `Weak<T>` in a type position does not parse;
+        // programs obtain those types from inference
+        // (`let w = weak_create_builtin(a)`) and never need to spell
+        // them. Recorded as a limitation rather than worked around by
+        // unreserving keywords.
+        let arc = || Ty::Named("Arc".to_string(), vec![Ty::Unknown]);
+        let weak = || Ty::Named("Weak".to_string(), vec![Ty::Unknown]);
+        let unowned = || Ty::Named("Unowned".to_string(), vec![Ty::Unknown]);
+        // `T -> Arc<T>`: the value is moved onto the managed heap.
+        tc.fn_sigs
+            .insert("heap_alloc_builtin".to_string(), (vec![Ty::Unknown], arc()));
+        // `Arc<T> -> Arc<T>`: a new strong reference to the same object.
+        tc.fn_sigs.insert(
+            "arc_retain_builtin".to_string(),
+            (vec![arc()], arc()),
+        );
+        // `Arc<T> -> ()`: drop one strong reference. Statement-shaped.
+        tc.fn_sigs
+            .insert("arc_release_builtin".to_string(), (vec![arc()], Ty::Unit));
+        // `Arc<T> -> T`: read through a strong reference. The primitive
+        // that makes an `Arc` usable at all — without it a strong
+        // reference is opaque (retainable, releasable, unreadable), so no
+        // structure can be built on the managed heap.
+        tc.fn_sigs
+            .insert("arc_load_builtin".to_string(), (vec![arc()], Ty::Unknown));
+        // `Arc<T> -> Int`: heap identity. The primitive that makes an
+        // identity-based diff possible — and deliberately the ONLY new
+        // surface here, because identity is all a diff needs.
+        tc.fn_sigs
+            .insert("arc_id_builtin".to_string(), (vec![arc()], Ty::Int));
+        // `Arc<T> -> Weak<T>`: a non-owning observer that does not keep
+        // the object alive.
+        tc.fn_sigs
+            .insert("weak_create_builtin".to_string(), (vec![arc()], weak()));
+        // `Weak<T> -> Option<Arc<T>>`: upgrade, or `None` once the last
+        // strong reference is gone. `Option` rather than a panic,
+        // because "already dead" is a normal state for a weak ref.
+        tc.fn_sigs.insert(
+            "weak_load_builtin".to_string(),
+            (vec![weak()], Ty::Option(Box::new(arc()))),
+        );
+        // `Arc<T> -> Unowned<T>`: a checked back-reference that does not
+        // affect the count. Traps on use-after-free (see
+        // `unowned_load_builtin`), which is the deliberate difference
+        // from `weak`.
+        tc.fn_sigs
+            .insert("unowned_create_builtin".to_string(), (vec![arc()], unowned()));
+        // `Unowned<T> -> T`: dereference, trapping if the object is gone.
+        tc.fn_sigs
+            .insert("unowned_load_builtin".to_string(), (vec![unowned()], Ty::Unknown));
         tc.fn_sigs
             .insert("run".to_string(), (vec![Ty::Unknown], Ty::Unit));
         tc.fn_sigs
@@ -154,6 +222,19 @@ impl<'s> TypeChecker<'s> {
         );
         tc.fn_sigs
             .insert("fs_exists".to_string(), (vec![Ty::String], Ty::Bool));
+        tc.fn_sigs.insert(
+            "fs_list_dir_builtin".to_string(),
+            (
+                vec![Ty::String],
+                Ty::Result(
+                    Box::new(Ty::List(Box::new(Ty::Named(
+                        "DirEntry".to_string(),
+                        Vec::new()
+                    )))),
+                    Box::new(Ty::String)
+                ),
+            ),
+        );
         tc.fn_sigs
             .insert("io_write".to_string(), (vec![Ty::String], Ty::Unit));
         tc.fn_sigs
@@ -494,7 +575,8 @@ impl<'s> TypeChecker<'s> {
         let mut functions: Vec<Function> = Vec::new();
         for item in program.items {
             if let Item::Function(f) = item {
-                if let Some(hir_fn) = self.check_function(f, false) {
+                let mode = if f.is_managed { Mode::Managed } else { Mode::Native };
+                if let Some(hir_fn) = self.check_function(f, false, mode) {
                     functions.push(hir_fn);
                 }
             } else if let Item::Task(t) = item {
@@ -507,8 +589,9 @@ impl<'s> TypeChecker<'s> {
                     return_ty: None,
                     body: FunctionBody::Block(t.body.clone()),
                     span: t.span.clone(),
+                    is_managed: false,
                 };
-                if let Some(hir_fn) = self.check_function(f, true) {
+                if let Some(hir_fn) = self.check_function(f, true, Mode::Native) {
                     functions.push(hir_fn);
                 }
             } else if let Item::BareDecl(decl) = item {
@@ -521,8 +604,9 @@ impl<'s> TypeChecker<'s> {
                         return_ty: decl.return_ty.clone(),
                         body: FunctionBody::Block(decl.body.clone()),
                         span: decl.span.clone(),
+                        is_managed: decl.is_managed,
                     };
-                    if let Some(hir_fn) = self.check_function(f, false) {
+if let Some(hir_fn) = self.check_function(f, false, Mode::Native) {
                         functions.push(hir_fn);
                     }
                 }
@@ -682,7 +766,7 @@ impl<'s> TypeChecker<'s> {
 
     // ── Function checking ─────────────────────────────────────────────────────
 
-    fn check_function(&mut self, f: FunctionDecl, is_task: bool) -> Option<Function> {
+    fn check_function(&mut self, f: FunctionDecl, is_task: bool, mode: Mode) -> Option<Function> {
         // Validate: every parameter must have a type annotation (always true
         // for our AST since `Param.ty: TypeExpr` is not optional).
         // Validate: return type must be annotated (E0202 if missing and body
@@ -761,6 +845,7 @@ impl<'s> TypeChecker<'s> {
             params,
             return_ty,
             body: typed_body,
+            mode,
             is_task,
         })
     }
@@ -1051,7 +1136,8 @@ impl<'s> TypeChecker<'s> {
                 // restore the outer depth afterwards so a later `break` in
                 // the enclosing loop still validates.
                 let outer_depth = self.loop_depth;
-                self.check_function(f.clone(), false);
+                let mode = if f.is_managed { Mode::Managed } else { Mode::Native };
+                self.check_function(f.clone(), false, mode);
                 self.loop_depth = outer_depth;
                 None // Local fn defs don't produce a statement in the parent body.
             }
@@ -1070,9 +1156,10 @@ impl<'s> TypeChecker<'s> {
                     return_ty: None,
                     body: FunctionBody::Block(t.body.clone()),
                     span: t.span.clone(),
+                    is_managed: false,
                 };
                 let outer_depth = self.loop_depth;
-                self.check_function(f, true);
+                self.check_function(f, true, Mode::Native);
                 self.loop_depth = outer_depth;
                 None
             }
@@ -1626,7 +1713,26 @@ impl<'s> TypeChecker<'s> {
             .map(|a| self.infer_expr(&a.value, env))
             .collect();
 
-        let ret_ty = match &callee.ty {
+        // Managed (ARC) builtins: infer the payload type `T` from the
+        // argument instead of returning a blanket `Unknown`.
+        //
+        // This is what makes managed mode usable for a real structure.
+        // `unowned_load_builtin: (Unowned<T>) -> T` written with an
+        // `Unknown` return loses `T`, so every field type of a struct
+        // that made a round trip through the heap came back untyped —
+        // and because `Unknown` is compatible with everything, the loss
+        // was silent: a `parent: Option<Unowned<Node>>` field inferred as
+        // `Option<Arc<?>>` and the following call then failed with
+        // `argument 1 type mismatch: expected Unowned<?>, found Arc<?>`.
+        // Binding `T` from the argument keeps the payload's own type.
+        let managed_ret = match &callee.kind {
+            TypedExprKind::Ident(fname) => Self::managed_builtin_return(fname, &args),
+            _ => None,
+        };
+
+        let ret_ty = match managed_ret {
+            Some(ty) => ty,
+            None => match &callee.ty {
             Ty::Fn(param_tys, ret) => {
                 // Check argument count & types if signature is known.
                 if args.len() != param_tys.len() {
@@ -1665,6 +1771,7 @@ impl<'s> TypeChecker<'s> {
             Ty::Error => Ty::Error,
             // Unknown callee type (e.g. stdlib, unresolved) — return Unknown.
             _ => Ty::Unknown,
+            },
         };
 
         TypedExpr {
@@ -1678,6 +1785,58 @@ impl<'s> TypeChecker<'s> {
     }
 
     // ── Binary op inference ───────────────────────────────────────────────────
+
+    /// The payload type `T` of a managed wrapper: `Arc<T>` -> `T`,
+    /// `Weak<T>`/`Unowned<T>` likewise. Anything else (including a bare
+    /// `Unknown`) yields `Unknown`, which keeps the signature lenient
+    /// rather than wrong.
+    fn managed_payload(ty: &Ty) -> Ty {
+        match ty {
+            Ty::Named(name, args) if args.len() == 1 && matches!(name.as_str(), "Arc" | "Weak" | "Unowned") => {
+                args[0].clone()
+            }
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// Return type of a managed builtin, with `T` bound from its
+    /// argument. `None` means "not a managed builtin", so the caller
+    /// falls through to ordinary signature lookup.
+    ///
+    /// The `fn_sigs` table still carries the monomorphic form, and is what
+    /// checks arity and the wrapper NAME (`arc_retain_builtin` on a `Weak`
+    /// is still an `E0200`). This function only refines the result type,
+    /// which the table cannot express.
+    fn managed_builtin_return(name: &str, args: &[TypedExpr]) -> Option<Ty> {
+        let arg_ty = |i: usize| -> Ty { args.get(i).map(|a| a.ty.clone()).unwrap_or(Ty::Unknown) };
+        let wrap = |n: &str, t: Ty| Ty::Named(n.to_string(), vec![t]);
+        Some(match name {
+            // `T -> Arc<T>`
+            "heap_alloc_builtin" => wrap("Arc", arg_ty(0)),
+            // `Arc<T> -> Arc<T>`: the same strong reference, returned so
+            // the count bump is usable as a value.
+            "arc_retain_builtin" => arg_ty(0),
+            // `Arc<T> -> ()`
+            "arc_release_builtin" => Ty::Unit,
+            // `Arc<T> -> T`: the pointee's own type, bound from the
+            // argument. Cannot fail — holding an `Arc` means the object is
+            // alive — which is what distinguishes it from `unowned_load`.
+            "arc_load_builtin" => Self::managed_payload(&arg_ty(0)),
+            // `Arc<T> -> Int`: identity is not generic in the payload.
+            "arc_id_builtin" => Ty::Int,
+            // `Arc<T> -> Weak<T>`
+            "weak_create_builtin" => wrap("Weak", Self::managed_payload(&arg_ty(0))),
+            // `Weak<T> -> Option<Arc<T>>`
+            "weak_load_builtin" => {
+                Ty::Option(Box::new(wrap("Arc", Self::managed_payload(&arg_ty(0)))))
+            }
+            // `Arc<T> -> Unowned<T>`
+            "unowned_create_builtin" => wrap("Unowned", Self::managed_payload(&arg_ty(0))),
+            // `Unowned<T> -> T`: the pointee's own type comes back intact.
+            "unowned_load_builtin" => Self::managed_payload(&arg_ty(0)),
+            _ => return None,
+        })
+    }
 
     fn infer_binop(&mut self, bo: &ast::BinOpExpr, env: &mut LocalEnv) -> TypedExpr {
         let left = self.infer_expr(&bo.left, env);

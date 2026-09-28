@@ -240,10 +240,17 @@ pub fn run(args: &[String]) -> i32 {
                     doc.push_str("\n\n");
                 }
             }
+            // `export *` adds no items of its own: the flat linker
+            // already contributes every export this file declares, so
+            // there is nothing to document that the `Item::Export` arms
+            // did not already cover. Spelled out rather than left to
+            // `_ => {}`, so the reason survives a future change to the
+            // form's meaning. A bogus name in `export * except x` is
+            // reported by the module graph as E0110, not here.
+            Item::ExportAll(_) | Item::ExportAllExcept(_) => {}
             _ => {}
         }
     }
-
     match output_file {
         None => {
             print!("{doc}");

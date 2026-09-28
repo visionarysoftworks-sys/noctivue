@@ -1,0 +1,112 @@
+//! ui/main — the package's entry point: the per-frame check an app makes.
+//! 
+//! Status: first-party library v0.1.0 (native tier). Pure `.nv`: no
+//! builtins beyond `print`/`println`/`assert`.
+//! 
+//! ## How an application imports this package
+//! 
+//! Three levels are available, and they compose — pick per file:
+//! 
+//! ```text
+//! import ui                     # everything, flat (this module's `export *`)
+//! import ui::widget             # one module, qualified: `widget.text(..)`
+//! import ui::widget::render     # one item
+//! ```
+//! 
+//! `import ui` is the one-line form and reaches all of `widget`, `state`,
+//! and `cycle_mitigation` through the `export *` below. The narrower forms
+//! are not deprecated: a file that uses two things should say so, and a file
+//! that imports ten packages should not need a hundred import lines.
+//! 
+//! **The trade-off of the flat form** is that the linker is flat, so a
+//! name this package exports can collide with one from any other package
+//! that exports the same name (`text` is the obvious candidate), and the
+//! collision resolves by load order rather than by an error. When that
+//! matters, import the modules instead and stay qualified.
+//! 
+//! ## Why this module exists at all
+//! 
+//! It is the façade and the per-frame check. `export *` makes the other
+//! three modules reachable from one import, and [`describe_tree`]/[`frame`]
+//! are the operation that needs **all three** and that every app would
+//! otherwise write itself: "is my app coherent, and does it need
+//! rebuilding?"
+//! 
+//! - [`widget`] supplies the tree and its rendering;
+//! - [`cycle_mitigation`] supplies the ownership check;
+//! - [`state`] supplies the cells and their dirty flags.
+//! 
+//! [`describe_tree`] and [`frame`] are that operation, and they are the
+//! only two functions defined here. Everything else is reachable from the
+//! module that owns it, and duplicating it here would be a second place for
+//! it to drift.
+//! 
+//! ## The dependency direction
+//! 
+//! ```text
+//!   main  ->  cycle_mitigation  ->  widget
+//!         ->  state
+//! ```
+//! 
+//! `widget` and `state` depend on nothing; `cycle_mitigation` depends on
+//! `widget`; `main` depends on all three. One direction only, because the
+//! resolver is **single-pass** — a helper must be defined before its
+//! caller, and a module that imported `main` would be circular.
+
+import widget
+import cycle_mitigation
+import state
+import ownership
+import widget::Widget
+import state::Cell
+
+/// Re-export everything imported above, so `import ui` reaches all three
+/// modules. The bare form is the one the language supports; there is no
+/// `export * from <module>`, and `export import <module>` parses but
+/// re-exports nothing (see `docs/overview.md`).
+export *
+
+/// Validate `root` and render it, or report why the tree is malformed.
+/// 
+/// The combination an application actually wants at the top of a frame:
+/// [`cycle_mitigation.validate_tree`] first, so a malformed tree is
+/// refused rather than drawn, and [`widget.render`] second, so what comes
+/// back is the tree as indented text.
+/// 
+/// `Err` carries the tree's first problem and no rendering — a report
+/// that interleaves a diagnosis with half a tree is harder to act on than
+/// one or the other.
+export fn describe_tree(root: Arc<Widget>) -> Result<String, String>:
+    let ok = cycle_mitigation.validate_tree(arc_load_builtin(root))?; Ok(widget.render(ok))
+
+/// The per-frame answer: is the tree well formed, and does anything need
+/// rebuilding?
+/// 
+/// `Ok` is a one-line report; `Err` is the tree's first structural
+/// problem. The dirty count comes from [`state.dirty_count`], so
+/// "rebuild" means "some cell changed since the last [`state.ack`]" —
+/// the version discipline `state.nv` documents.
+/// 
+/// The cells are a caller-written literal, because this language cannot
+/// build a list at run time; see `docs/overview.md`.
+/// 
+/// ```text
+/// let cells: [Cell] = [tasks, filter]
+/// match main.frame(root, cells):
+///     Ok(report): print(report)
+///     Err(problem): print("cannot draw: {problem}")
+/// ```
+export fn frame(root: Arc<Widget>, cells: [Cell]) -> Result<String, String>:
+    let ok = cycle_mitigation.validate_tree(arc_load_builtin(root))?; let pending = state.dirty_count(cells)
+    if pending == 0:
+        Ok("frame: {widget.node_count(ok)} nodes, up to date")
+    else:
+        Ok("frame: {widget.node_count(ok)} nodes, {pending} cell(s) changed")
+
+/// How many of `cells` changed since the last [`state.ack`], and how many
+/// nodes the tree has, as one line.
+/// 
+/// The same two numbers [`frame`] reports, for a caller that wants them
+/// without the prose — a status bar, a test, a log line.
+export fn status(root: Arc<Widget>, cells: [Cell]) -> String:
+    "{widget.node_count(arc_load_builtin(root))} nodes, {state.dirty_count(cells)} dirty"

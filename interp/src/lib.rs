@@ -57,6 +57,7 @@ use compiler::hir;
 use compiler::hir::items::{
     Enum, Function, Struct, TypedArm, TypedExprKind, TypedInterpPart, TypedPattern, TypedStmtKind,
 };
+use crate::arc::{ArcValue, HeapRegistry, UnownedValue, WeakValue};
 
 // ── Phase 5: net.http server state (interpreter) ──────────────────────────────
 
@@ -98,6 +99,8 @@ fn track_up(gauge: &AtomicU64, peak: &AtomicU64) {
 // ADR-020 (mono millis) + ADR-021 (no global entropy). The clock is a
 // process-wide `Instant` epoch (arbitrary, never goes backward); the RNG
 // is a per-interpreter handle registry in the `DbRegistry` shape (u64
+
+mod arc;
 // handles, `next` pre-increments so the first handle is 1). Determinism
 // bar: same seed → same sequence, in this runtime and in the VM (which
 // mirrors this algorithm exactly — see `compiler/src/nir/vm.rs`).
@@ -320,6 +323,12 @@ pub enum Value {
         ret_ty: compiler::hir::Ty,
         env: ScopeStack,
     },
+    /// Managed mode: strong reference (Arc) to a heap-allocated value.
+    Arc(ArcValue),
+    /// Managed mode: weak reference to a heap-allocated value.
+    Weak(WeakValue),
+    /// Managed mode: unowned reference to a heap-allocated value (traps if dangling).
+    Unowned(UnownedValue),
 }
 
 impl std::fmt::Display for Value {
@@ -349,6 +358,9 @@ impl std::fmt::Display for Value {
             Value::Result(Err(e)) => write!(f, "Err({e})"),
             Value::Fn(name) => write!(f, "<fn {name}>"),
             Value::Closure { params, .. } => write!(f, "<closure with {} params>", params.len()),
+            Value::Arc(arc) => write!(f, "<arc @{}>", arc.heap_id.0),
+            Value::Weak(weak) => write!(f, "<weak @{:?}>", weak),
+            Value::Unowned(unowned) => write!(f, "<unowned @{}>", unowned.heap_id.0),
         }
     }
 }
@@ -449,6 +461,10 @@ pub struct Interpreter {
     enums: HashMap<String, Enum>,
     /// Global scope containing enum variants and other globals.
     root_scope: HashMap<String, Value>,
+    /// Managed-mode heap registry (UI-S0: ARC runtime).
+    /// Interior mutability: eval_builtin only has &self, single-threaded.
+    /// Cleared on every `run`.
+    heap: RefCell<HeapRegistry>,
     /// Open SQLite connections by opaque handle id (Phase 5/M4:
     /// `db_*_builtin`). Interior mutability: `eval_builtin` only has
     /// `&self`, and the interpreter is single-threaded. Cleared on
@@ -905,6 +921,7 @@ impl Interpreter {
             structs: HashMap::new(),
             enums: HashMap::new(),
             root_scope: HashMap::new(),
+            heap: RefCell::new(HeapRegistry::new()),
             db: RefCell::new(DbRegistry::default()),
             json_docs: RefCell::new(JsonRegistry::default()),
             rng: RefCell::new(RngRegistry::default()),
@@ -923,6 +940,7 @@ impl Interpreter {
             structs: self.structs.clone(),
             enums: self.enums.clone(),
             root_scope: self.root_scope.clone(),
+            heap: RefCell::new(HeapRegistry::new()),
             db: RefCell::new(DbRegistry::default()),
             json_docs: RefCell::new(JsonRegistry::default()),
             rng: RefCell::new(RngRegistry::default()),
@@ -940,6 +958,8 @@ impl Interpreter {
         self.structs.clear();
         self.enums.clear();
         self.root_scope.clear();
+        // Clear managed-mode heap registry (UI-S0: ARC runtime)
+        self.heap.borrow_mut().objects.clear();
         // Reconcile the process-wide open-connection gauge with the
         // registry being dropped here: programs that exit with open
         // handles still close them (RAII), but only `db_close` calls
@@ -1347,10 +1367,27 @@ impl Interpreter {
                 | "time_mono_ms_builtin"
                 | "rng_seed_builtin"
                 | "rng_next_builtin"
+                // Phase 6.5 / UI-S0 (managed mode, ARC). These have
+                // `eval_builtin` arms but were missing here, which made
+                // every one of them unreachable from `.nv` — a program
+                // naming one got `E0201 unknown identifier` and the arms
+                // were dead code. Typeck signatures and the NIR/VM
+                // mirror live in `compiler/`; this list is the third
+                // place the same seven names must appear.
+                | "heap_alloc_builtin"
+                | "arc_retain_builtin"
+                | "arc_release_builtin"
+                | "arc_load_builtin"
+                | "arc_id_builtin"
+                | "weak_create_builtin"
+                | "weak_load_builtin"
+                | "unowned_create_builtin"
+                | "unowned_load_builtin"
                 | "run"
                 | "fs_read_text"
                 | "fs_write_text"
                 | "fs_exists"
+                | "fs_list_dir_builtin"
                 | "io_write"
                 | "io_writeln"
                 | "env_get_builtin"
@@ -1387,6 +1424,64 @@ impl Interpreter {
                 | "http_server_serve_loop"
                 | "http_server_shutdown"
         )
+    }
+
+    /// Read one directory level as sorted `DirEntry` values.
+    ///
+    /// Sorting uses byte ordering over UTF-8 names so listings are stable
+    /// across filesystems and processes. Entries are identified by basename;
+    /// callers use `fs/path::path_join` to reach them. The result is a
+    /// point-in-time view: an entry can disappear before its type is read,
+    /// in which case it is classified as neither a file nor a directory.
+    fn list_dir_entries(path: &str) -> std::result::Result<Box<Value>, Box<Value>> {
+        let read_dir = std::fs::read_dir(path).map_err(|error| {
+            Box::new(Value::String(format!(
+                "cannot list directory `{path}`: {error}"
+            )))
+        })?;
+        let mut names = Vec::new();
+        for entry in read_dir {
+            let entry = entry.map_err(|error| {
+                Box::new(Value::String(format!(
+                    "cannot list directory `{path}`: {error}"
+                )))
+            })?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                Box::new(Value::String(format!(
+                    "directory `{path}` contains a non-UTF-8 file name"
+                )))
+            })?;
+            names.push(name);
+        }
+        names.sort();
+
+        let mut values = Vec::with_capacity(names.len());
+        for name in names {
+            let full_path = std::path::Path::new(path).join(&name);
+            let (is_dir, is_file) = match std::fs::symlink_metadata(&full_path) {
+                Ok(metadata) => {
+                    let file_type = metadata.file_type();
+                    if file_type.is_symlink() {
+                        match std::fs::metadata(&full_path) {
+                            Ok(target) => (target.is_dir(), target.is_file()),
+                            Err(_) => (false, false),
+                        }
+                    } else {
+                        (file_type.is_dir(), file_type.is_file())
+                    }
+                }
+                Err(_) => (false, false),
+            };
+            values.push(Value::Struct {
+                name: "DirEntry".to_string(),
+                fields: HashMap::from([
+                    ("name".to_string(), Value::String(name)),
+                    ("is_dir".to_string(), Value::Bool(is_dir)),
+                    ("is_file".to_string(), Value::Bool(is_file)),
+                ]),
+            });
+        }
+        Ok(Box::new(Value::List(values)))
     }
 
     /// Evaluate a built-in function by name.  Returns `None` if the name is
@@ -1487,6 +1582,14 @@ impl Interpreter {
                     Some(Ok(Value::Bool(std::path::Path::new(path).exists())))
                 }
                 _ => Some(Ok(Value::Bool(false))),
+            },
+            "fs_list_dir_builtin" => match args.first() {
+                Some(Value::String(path)) => {
+                    Some(Ok(Value::Result(Self::list_dir_entries(path))))
+                }
+                _ => Some(Ok(Value::Result(Err(Box::new(Value::String(
+                    "fs_list_dir: expected path String".to_string(),
+                )))))),
             },
             "env_get_builtin" => match args.first() {
                 Some(Value::String(name)) => Some(Ok(Value::Option(
@@ -2413,6 +2516,142 @@ impl Interpreter {
                 }
                 _ => Some(Err(RuntimeError::Panic(
                     "rng_next_builtin: expected handle Int".to_string(),
+                ))),
+            },
+            // UI-S0 (ARC runtime): managed-mode builtins
+            // heap_alloc: allocate a value on the managed heap, returns Arc<Value>
+            "heap_alloc_builtin" => match args.first() {
+                Some(value) => {
+                    let mut heap = self.heap.borrow_mut();
+                    let heap_id = heap.alloc(value.clone());
+                    Some(Ok(Value::Arc(ArcValue::new(heap_id))))
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "heap_alloc_builtin: expected a value".to_string(),
+                ))),
+            },
+            // arc_retain: increment strong count (clone an Arc)
+            "arc_retain_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => {
+                    let mut heap = self.heap.borrow_mut();
+                    match heap.retain(arc.heap_id) {
+                        Ok(()) => Some(Ok(Value::Arc(arc.clone()))),
+                        Err(e) => Some(Err(RuntimeError::Panic(e))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "arc_retain_builtin: expected Arc value".to_string(),
+                ))),
+            },
+            // arc_release: decrement strong count (drop an Arc)
+            "arc_release_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => {
+                    let mut heap = self.heap.borrow_mut();
+                    match heap.release(arc.heap_id) {
+                        Ok(()) => Some(Ok(Value::Unit)),
+                        Err(e) => Some(Err(RuntimeError::Panic(e))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "arc_release_builtin: expected Arc value".to_string(),
+                ))),
+            },
+            // arc_load: read the value behind a strong reference. This is
+            // the primitive that makes an `Arc` usable at all: without it
+            // a strong reference is opaque — you can retain and release it
+            // but never inspect what it points at, so no data structure
+            // could be built on the managed heap. (It is the strong
+            // counterpart of `unowned_load_builtin`; unlike `weak_load`
+            // it cannot fail, because holding an `Arc` means the object is
+            // alive by definition.)
+            "arc_load_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => {
+                    let heap = self.heap.borrow();
+                    match heap.get(arc.heap_id) {
+                        Some(obj) => {
+                            let value = match obj.value.read() {
+                                Ok(v) => v.clone(),
+                                Err(_) => {
+                                    return Some(Err(RuntimeError::Panic(format!(
+                                        "arc_load_builtin: heap object {} is poisoned",
+                                        arc.heap_id.0
+                                    ))))
+                                }
+                            };
+                            Some(Ok(value))
+                        }
+                        None => Some(Err(RuntimeError::Panic(format!(
+                            "arc_load_builtin: heap object {} not found (dangling strong reference)",
+                            arc.heap_id.0
+                        )))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "arc_load_builtin: expected Arc value".to_string(),
+                ))),
+            },
+            // arc_id: the heap identity of a strong reference, as an Int.
+            // This is what makes an identity-based diff possible: two
+            // `Arc`s to the same heap object report the same id, so a
+            // re-render can skip a shared subtree without loading or
+            // comparing a single value. It exposes nothing but identity —
+            // no address, no count — so it cannot be used to forge a
+            // reference, only to recognise one.
+            "arc_id_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => Some(Ok(Value::Int(arc.heap_id.0 as i128))),
+                _ => Some(Err(RuntimeError::Panic(
+                    "arc_id_builtin: expected Arc value".to_string(),
+                ))),
+            },
+            // weak_load: upgrade a Weak reference to Option<Arc>
+            "weak_load_builtin" => match args.first() {
+                Some(Value::Weak(weak)) => {
+                    let heap = self.heap.borrow();
+                    match weak.upgrade() {
+                        Some(arc) => Some(Ok(Value::Option(Some(Box::new(Value::Arc(arc)))))),
+                        None => Some(Ok(Value::Option(None))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "weak_load_builtin: expected Weak value".to_string(),
+                ))),
+            },
+            // unowned_load: access an Unowned reference (traps if dangling)
+            "unowned_load_builtin" => match args.first() {
+                Some(Value::Unowned(unowned)) => {
+                    let heap = self.heap.borrow();
+                    if let Some(obj) = heap.get(unowned.heap_id) {
+                        let value = obj.value.read().unwrap().clone();
+                        Some(Ok(value))
+                    } else {
+                        Some(Err(RuntimeError::Panic(format!(
+                            "unowned_load_builtin: unowned reference trap - heap object {} deallocated",
+                            unowned.heap_id.0
+                        ))))
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "unowned_load_builtin: expected Unowned value".to_string(),
+                ))),
+            },
+            // weak_create: create a Weak reference from an Arc
+            "weak_create_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => {
+                    let heap = self.heap.borrow();
+                    match heap.weak(arc.heap_id) {
+                        Ok(weak_val) => Some(Ok(Value::Weak(weak_val))),
+                        Err(e) => Some(Err(RuntimeError::Panic(e))),
+                    }
+                }
+                _ => Some(Err(RuntimeError::Panic(
+                    "weak_create_builtin: expected Arc value".to_string(),
+                ))),
+            },
+            // unowned_create: create an Unowned reference from an Arc
+            "unowned_create_builtin" => match args.first() {
+                Some(Value::Arc(arc)) => Some(Ok(Value::Unowned(UnownedValue::new(arc.heap_id)))),
+                _ => Some(Err(RuntimeError::Panic(
+                    "unowned_create_builtin: expected Arc value".to_string(),
                 ))),
             },
             // panic / assert
@@ -3405,6 +3644,9 @@ fn serialize_value(value: &Value) -> std::result::Result<String, String> {
         Value::Fn(_) | Value::Closure { .. } => {
             return Err("cannot serialize function value to JSON".to_string());
         }
+        Value::Arc(_) | Value::Weak(_) | Value::Unowned(_) => {
+            return Err("cannot serialize managed reference to JSON".to_string());
+        }
     };
     Ok(s)
 }
@@ -4218,6 +4460,50 @@ mod tests {
             .filter_map(|d| d.code.as_deref())
             .collect();
         assert!(codes.contains(&"E1000"), "expected E1000, got {codes:?}");
+    }
+
+    // ─── Phase 5: filesystem directory listing ────────────────────────────────
+
+    #[test]
+    fn interp_fs_list_dir_sorted_names_and_kinds() {
+        let root = std::env::temp_dir().join(format!(
+            "noctivue-fs-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("test directory");
+        std::fs::write(root.join("zeta.txt"), b"z").expect("seed file");
+        std::fs::write(root.join("alpha.txt"), b"a").expect("seed file");
+        std::fs::create_dir_all(root.join("beta-dir")).expect("seed directory");
+
+        // Forward slashes keep the temp path portable inside `.nv` literals.
+        let lit = root.to_string_lossy().replace('\\', "/");
+        let (exit, sink) = run_source(&format!(
+            "fn main():\n    match fs_list_dir_builtin(\"{lit}\"):\n        Ok(entries):\n            if entries.length != 3:\n                panic(\"wrong count\")\n            let first = entries[0]\n            let second = entries[1]\n            let third = entries[2]\n            if first.name != \"alpha.txt\":\n                panic(\"wrong first name\")\n            if first.is_dir || first.is_file == false:\n                panic(\"wrong first kind\")\n            if second.name != \"beta-dir\":\n                panic(\"wrong second name\")\n            if second.is_dir == false || second.is_file:\n                panic(\"wrong second kind\")\n            if third.name != \"zeta.txt\":\n                panic(\"wrong third name\")\n            if third.is_dir || third.is_file == false:\n                panic(\"wrong third kind\")\n            \"directory-ok\"\n        Err(e):\n            panic(\"listing failed\")\n"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(exit, 0, "diagnostics: {:#?}", sink.diagnostics());
+        assert!(!sink.has_errors(), "unexpected errors: {:#?}", sink.diagnostics());
+    }
+
+    #[test]
+    fn interp_fs_list_dir_rejects_missing_and_non_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "noctivue-fs-list-missing-{}",
+            std::process::id()
+        ));
+        let lit = root.to_string_lossy().replace('\\', "/");
+        let file = format!("{lit}-file.txt");
+        std::fs::write(&file, b"x").expect("seed file");
+        let (exit, sink) = run_source(&format!(
+            "fn main():\n    match fs_list_dir_builtin(\"{lit}-absent\"):\n        Ok(_):\n            panic(\"missing path listed\")\n        Err(_):\n            match fs_list_dir_builtin(\"{file}\"):\n                Ok(_):\n                    panic(\"file listed as directory\")\n                Err(_):\n                    \"listing-rejected\"\n"
+        ));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(exit, 0, "diagnostics: {:#?}", sink.diagnostics());
+        assert!(!sink.has_errors(), "unexpected errors: {:#?}", sink.diagnostics());
     }
 
     // ─── Phase 5: net.http ────────────────────────────────────────────────────

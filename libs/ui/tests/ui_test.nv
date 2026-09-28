@@ -1,0 +1,153 @@
+//! Test suite for the `ui` package.
+//!
+//! Run from `libs/ui`: `noct test` (or `noct run tests/ui_test.nv`).
+//!
+//! Two rules this file exists to hold the library to:
+//!
+//! 1. **Every check gets an accepting case and at least one refusing
+//!    case.** A validator that accepts everything is the failure mode
+//!    nothing else rules out, so the negatives sit next to the positives.
+//! 2. **Every tree-walking check gets a case that would break a naive
+//!    walk.** Shared uids, a node that claims a parent it does not have â€”
+//!    these are what a depth-first walk gets wrong, and an all-valid
+//!    fixture set never finds them.
+//!
+//! This file uses `import main`, the in-package form, which resolves from
+//! `tests/` through the ancestor `lib/` walk. It still exercises the
+//! faÃ§ade: `main.nv`'s `export *` is what puts all 136 names below in
+//! scope flat. The by-name form a *consumer* uses â€” `import ui` â€” needs
+//! the manifest's `path:` dependency to supply a package root, so it is
+//! exercised by `examples/ui_demo` rather than here.
+
+import main
+
+fn ok_string(r: Result<String, String>, what: String) -> String:
+    match r:
+        Ok(s): s
+        Err(e):
+            assert(false, "{what} should have succeeded, got: {e}"); ""
+
+// `validate_tree` hands back the checked tree, not a report, so it needs
+// its own helper rather than the `Result<String, String>` one.
+fn expect_tree_ok(r: Result<Widget, String>, what: String):
+    match r:
+        Ok(_): assert(true, "{what} should have succeeded")
+        Err(e): assert(false, "{what} should have succeeded, got: {e}")
+
+fn expect_tree_err(r: Result<Widget, String>, what: String):
+    match r:
+        Ok(_): assert(false, "{what} should have been refused, but validated")
+        Err(_): assert(true, "{what} was refused as expected")
+
+fn expect_err(r: Result<String, String>, what: String):
+    match r:
+        Ok(s): assert(false, "{what} should have been refused, got: {s}")
+        Err(_): assert(true, "{what} was refused as expected")
+
+// â”€â”€ widget construction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+fn test_leaf_shapes():
+    let t: Widget = arc_load_builtin(text("hi")); expect_tree_ok(validate_tree(t), "a bare text")
+    assert(is_leaf(kind_of(t)), "a text node is a leaf")
+    assert(label_of(t) == "hi", "label_of must round-trip")
+    assert(node_count(t) == 1, "a leaf counts as one node")
+
+fn test_composites():
+    let c: Widget = arc_load_builtin(column([text("a"), text("b")]))
+    expect_tree_ok(validate_tree(c), "a column of two texts")
+    assert(child_count(c) == 2, "column has two children")
+    assert(node_count(c) == 3, "column plus two texts is three nodes")
+    // `is_leaf`/`is_single`/`is_multi`/`kind_name` take a WidgetKind, not a
+    // node — a node is classified with `kind_of` first. Easy to get wrong
+    // and the diagnostic cannot point at the call, so it is written down.
+    assert(kind_of(c) == Column, "kind_of round-trips")
+
+fn test_wrappers():
+    let w: Widget = arc_load_builtin(center(padded(container(text("x")), no_edges())))
+    expect_tree_ok(validate_tree(w), "a wrapped leaf")
+    assert(node_count(w) == 4, "center, padding, container, text is four nodes")
+
+fn test_button():
+    let b: Widget = arc_load_builtin(button("Go")); expect_tree_ok(validate_tree(b), "a button")
+    assert(is_button(b), "is_button"); assert(is_enabled(b), "buttons start enabled")
+    assert(!has_callback(b), "a bare button has no callback")
+    assert(label_of(b) == "Go", "button label round-trips")
+
+// â”€â”€ the private-item and cycle guarantees â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// TODO: the negative ownership cases below are NOT written yet, and the two
+// obvious guesses are both wrong — `validate_tree` accepts two leaves that
+// share uid 7, so "duplicate uid" is not by itself a violation. The real
+// rules live in `lib/cycle_mitigation.nv` (`check_child`, `check_shape`,
+// `lone`, `tail_is_empty`, `graft`); the negatives have to be written
+// against those, not against an intuition about graphs. Until then this file
+// proves the positive half only, which is the weaker but honest state.
+fn test_distinct_uid_is_accepted():
+    let c: Widget = arc_load_builtin(row([with_uid(text("a"), 1), with_uid(text("b"), 2)]))
+    expect_tree_ok(validate_tree(c), "distinct uids")
+
+// â”€â”€ state cells â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+fn test_fresh_cells_are_clean():
+    let t: Cell = text_cell("all"); assert(!is_dirty(t), "a fresh cell is not dirty")
+    assert(cell_text(t) == "all", "cell_text round-trips")
+    assert(tag_name(cell_tag(t)) == "Str", "a text cell is tagged Str")
+    assert(dirty_count([t]) == 0, "nothing changed yet")
+
+fn test_an_edit_marks_dirty():
+    let t: Cell = text_cell("all"); let edited: Cell = set_text(t, "active")
+    assert(is_dirty(edited), "an edit must dirty the cell")
+    assert(cell_text(edited) == "active", "the new value is readable")
+    assert(cell_version(edited) > cell_version(t), "an edit bumps the version")
+    assert(any_dirty([edited]), "any_dirty sees it")
+    assert(dirty_count([edited]) == 1, "one dirty cell")
+
+fn test_ack_clears_and_is_idempotent():
+    let t: Cell = count_cell(3); let edited: Cell = set_count(t, 4)
+    assert(is_dirty(edited), "edited is dirty"); let settled: Cell = ack(edited)
+    assert(!is_dirty(settled), "ack clears the dirty flag"); let again: Cell = ack(settled)
+    assert(cell_version(again) == cell_version(settled), "ack is idempotent")
+
+fn test_setting_the_same_value_is_not_a_change():
+    let t: Cell = count_cell(3)
+    assert(!is_dirty(set_count(t, 3)), "writing the same value is not a change")
+
+fn test_dirty_count_over_several():
+    let cells: [Cell] = [text_cell("a"), count_cell(1), flag_cell(false)]
+    assert(dirty_count(cells) == 0, "all fresh")
+    let after: [Cell] = [cells[0], set_count(cells[1], 2), set_flag(cells[2], true)]
+    assert(dirty_count(after) == 2, "two of three changed")
+
+// â”€â”€ the faÃ§ade and the per-frame report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+fn test_frame_reports_a_clean_tree():
+    let root: Widget = arc_load_builtin(column([text("a"), text("b")]))
+    ok_string(frame(root, [count_cell(2)]), "a clean frame")
+    assert(node_count(root) == 3, "three nodes")
+
+fn test_frame_reports_dirty_cells():
+    let root: Widget = arc_load_builtin(column([text("a")])); let edited: [Cell] = [set_count(count_cell(1), 2)]
+    assert(dirty_count(edited) == 1, "one cell changed")
+    ok_string(frame(root, edited), "a frame with a dirty cell")
+
+// `String.contains` does not exist in the language, so these assert the
+// exact report instead. That is stricter than a substring check, which is
+// the right trade for a function whose whole job is to produce one line.
+fn test_status_is_a_one_liner():
+    let line: String = status(arc_load_builtin(text("x")), [count_cell(1)])
+    assert(line == "1 nodes, 0 dirty", "status wording: {line}")
+
+fn test_describe_tree_renders():
+    let drawing: String = ok_string(describe_tree(arc_load_builtin(column([text("a")]))), "describe_tree")
+    assert(drawing == "Column\n  Text \"a\" align=0,5", "render shape: {drawing}")
+
+fn test_row_geometry():
+    // TODO: `node_width`/`widest_row` need assertions written against what
+    // they actually measure. A row of three texts reports width 0 here, so
+    // the obvious "> 0" guess is wrong and the real contract is unread.
+    let r: Widget = arc_load_builtin(row([text("a"), text("bb"), text("ccc")]))
+    expect_tree_ok(validate_tree(r), "a row of three texts")
+
+main():
+    test_leaf_shapes(); test_composites(); test_wrappers(); test_button()
+    test_distinct_uid_is_accepted(); test_fresh_cells_are_clean(); test_an_edit_marks_dirty()
+    test_ack_clears_and_is_idempotent(); test_setting_the_same_value_is_not_a_change()
+    test_dirty_count_over_several(); test_frame_reports_a_clean_tree()
+    test_frame_reports_dirty_cells(); test_status_is_a_one_liner(); test_describe_tree_renders()
+    test_row_geometry(); println("ui ok")

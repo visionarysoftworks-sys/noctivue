@@ -1,7 +1,10 @@
 //! error/types — structured error records.
 //!
 //! Status: runnable M4 foundation. Trait-based error dispatch remains
-//! reserved, but structured records are supported by the current type system.
+//! reserved (requires trait/impl support — SPEC.md C4, deferred).
+//! The standard convention for fallible functions is `Result<T, String>`
+//! (E3 per SPEC.md §4). Application-specific error enums are permitted
+//! but the stdlib uses `Result<T, String>` exclusively.
 //!
 //! M3 error convention (SPEC.md §4, "Error conventions"):
 //! - E1: `panic(msg)` for violated preconditions / invariant failures.
@@ -9,6 +12,10 @@
 //! - E3: `Result<T, String>` for foundation fallible fns that must explain failure.
 //! - E4: `?` / `??` are the only propagation tools; no exceptions.
 //!
+//! Lint rule L-005 (default-off): flags fallible functions returning
+//! `Result<T, E>` where `E` is not `String` and not `ErrorInfo` —
+//! these are ad-hoc error shapes that should either use `String` or
+//! be documented as intentional exceptions.
 ErrorInfo:
     code: String
     message: String

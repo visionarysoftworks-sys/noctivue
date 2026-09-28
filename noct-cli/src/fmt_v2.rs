@@ -617,6 +617,18 @@ fn print_item(item: &Item, level: usize, cx: &mut Cx, suffix: &str) -> Vec<Strin
             v.extend(print_stmts(&m.items, level + 1, cx));
             v
         }
+        Item::ReExport(import) => {
+            let path = import.path.join("::");
+            let alias = import.alias.as_deref().map(|a| format!(" as {a}")).unwrap_or_default();
+            vec![indent_lines(&format!("export import {path}{alias}"), level)]
+        }
+        Item::ExportAll(_) => {
+            vec![indent_lines("export *", level)]
+        }
+        Item::ExportAllExcept(e) => {
+            let excluded = e.excluded.join(", ");
+            vec![indent_lines(&format!("export * except {excluded}"), level)]
+        }
         Item::Export(inner) => {
             // Print the inner item at this level (preserving its
             // relative indentation), then prefix `export ` to its
@@ -652,6 +664,9 @@ fn item_span(item: &Item) -> compiler::diagnostics::Span {
         Item::Impl(ib) => ib.span.clone(),
         Item::Const(c) => c.span.clone(),
         Item::Mod(m) => m.span.clone(),
+        Item::ReExport(r) => r.span.clone(),
+        Item::ExportAll(e) => e.span.clone(),
+        Item::ExportAllExcept(e) => e.span.clone(),
         Item::Export(inner) => item_span(inner),
     }
 }
@@ -1506,6 +1521,13 @@ fn ast_eq_item(a: &Item, b: &Item) -> bool {
             x.name == y.name
                 && x.items.len() == y.items.len()
                 && x.items.iter().zip(&y.items).all(|(m, n)| ast_eq_stmt(m, n))
+        }
+        (Item::ReExport(x), Item::ReExport(y)) => {
+            x.path == y.path && x.alias == y.alias
+        }
+        (Item::ExportAll(_), Item::ExportAll(_)) => true,
+        (Item::ExportAllExcept(x), Item::ExportAllExcept(y)) => {
+            x.excluded == y.excluded
         }
         (Item::Export(x), Item::Export(y)) => ast_eq_item(x, y),
         _ => false,

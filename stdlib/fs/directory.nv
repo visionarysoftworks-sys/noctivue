@@ -1,5 +1,39 @@
-
-//! fs/directory — reserved directory enumeration API.
+//! fs/directory — immediate directory listings.
 //!
-//! Status: reserved until list construction and directory ordering rules
-//! are finalized.
+//! Status: runnable M4 interpreter and NIR VM surface. Native builds fail
+//! loudly: aggregate `Result<[DirEntry], String>` values have no native
+//! representation yet.
+
+/// One immediate child of a directory.
+DirEntry:
+    name: String
+    is_dir: Bool
+    is_file: Bool
+
+/// List a directory's immediate children in UTF-8 byte order.
+///
+/// Names are basenames, not full paths; join them with
+/// `fs/path::path_join` when opening entries. Hidden entries are included.
+/// Directory symlinks are classified by their target. An entry that cannot
+/// be classified after listing is neither a file nor a directory. The
+/// result is a point-in-time view: filesystem changes during or after the
+/// read do not revise it. A missing path, an inaccessible path, a
+/// non-directory path, or a non-UTF-8 child name is an `Err`.
+fn dir_list(path: String) -> Result<[DirEntry], String>:
+    fs_list_dir_builtin(path)
+
+/// Entry basename, as returned by `dir_list`.
+fn dir_name(entry: DirEntry) -> String:
+    entry.name
+
+/// True when the entry is a directory.
+fn dir_is_directory(entry: DirEntry) -> Bool:
+    entry.is_dir
+
+/// True when the entry is a regular file.
+fn dir_is_file(entry: DirEntry) -> Bool:
+    entry.is_file
+
+/// True when the entry is neither a directory nor a regular file.
+fn dir_is_other(entry: DirEntry) -> Bool:
+    !entry.is_dir && !entry.is_file

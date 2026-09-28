@@ -45,24 +45,49 @@ fn main():
 
 ## 4. One Official Runtime (M4 floor: blocking threads; M5: executor per ADR-024)
 
-- M4 floor (today, unchanged): real OS threads
+- M4 floor (what runs today, unchanged): real OS threads
   (`std::thread::spawn`), one per task call. This is the
   structured-concurrency floor, not a tuned executor.
 - No shared mutable state crosses threads: arguments and return
   values are the only channel. Each worker gets a fresh interpreter
   with empty `db`/JSON/task registries (handles are meaningless
   across threads).
-- M5 executor (ADR-024, merging `docs/EXECUTOR_DESIGN_DRAFT.md`):
-  a fixed work-stealing pool (default `available_parallelism`
-  capped at 64, `NOCT_WORKERS` override) plus ONE readiness thread
-  owning the non-blocking listener/connection set and the tickless
-  mono-ms timer heap (ADR-020), plus a bounded blocking bridge
-  (default cap = worker count, queue-full is a loud `Err`) for
-  SQLite calls, legacy blocking sections, and sync-`await` joins.
-  `task`/`await` source semantics are preserved; the
-  thread-per-connection model is retired with no dual-runtime flag
-  period. Connections become executor tasks; the M4 wire contract
-  is unchanged.
+- **Shipped, and observable, from the M5 core** (ADR-024) - these are
+  runtime behavior today, not design intent:
+  - A worker cap. `executor_worker_count()` is
+    `available_parallelism` capped at 64, or `NOCT_WORKERS` (a
+    positive integer; a bad value is a loud error naming the env var
+    and the offending text). `spawn_task` **refuses** past the cap
+    with a loud `task spawn refused: worker pool exhausted`. This is
+    a new observable failure that is NOT in ADR-024's
+    explicitly-breaking list; it is called out there as a known
+    contract gap for the ADR owner to resolve.
+  - A bounded blocking bridge, cap = worker count (`blocking_bridge_cap`),
+    queue-full is a loud `Err`, with a 30 s watchdog.
+  - Process-wide gauges: `live_executor_tasks`, `peak_executor_tasks`,
+    `bridge_depth`, `bridge_peak`.
+  - Cooperative cancellation, reachable from a user program:
+    `task_cancel_builtin(id)` (typeck `(Int) -> Unit`) wrapped as
+    `task::task_cancel`. The cancel checkpoint sits in `sleep`
+    (including `sleep(0)`); `await` on a cancelled task yields the
+    pinned `Err(task {id} cancelled)`, so `?` composes it unchanged.
+    Cancelling a finished task is a no-op success; an unknown handle
+    is a loud `E1002`.
+  - `TicklessTimerHeap` exists but is **orphaned** - nothing drains
+    it, so it is unreachable from a program by design, not by
+    oversight. Deferred to Wave 2 by owner decision (2026-09-26):
+    Wave 2 may not start until it is surfaced or deleted. Surfacing it
+    needs the readiness thread below.
+- **NOT shipped (Wave 2):** the work-stealing pool, the single
+  readiness thread owning the non-blocking listener/connection set
+  and the timer heap (ADR-020), and any VM/native task support - the
+  NIR VM spawns no tasks and Cranelift rejects `Instr::TaskCancel`
+  loudly (`noct run-vm` / `noct build` refuse any program with a
+  `task` declaration at all). Cancellation parity is therefore
+  interpreter-only so far: same refusal, exit 1, on every backend.
+- M5 target: retire thread-per-connection with no dual-runtime flag
+  period. `task`/`await` source semantics are preserved; connections
+  become executor tasks; the M4 wire contract is unchanged.
 
 ## 5. Channels & Synchronization (M5 surface per ADR-024)
 

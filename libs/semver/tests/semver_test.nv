@@ -1,5 +1,17 @@
 //! Smoke test for semver (run: noct run tests/semver_test.nv,
 //! or project mode: noct test from libs/semver).
+//!
+//! The precedence blocks (rules 1-4) are why this file asserts things a
+//! manifest can never ask for: `version.nv` accepts pre-release and
+//! build metadata one step ahead of P-003, and each rule of the SemVer
+//! precedence order is pinned by a case here, so the day the manifest
+//! grammar moves the rules are already tested.
+//!
+//! Shape rules this file has to respect, both learned the hard way
+//! from the tree-walking interpreter: one function per section (a flat
+//! `main` this long overflows its stack), and no call nested inside a
+//! call inside an `assert` — bind with `let` first and assert on the
+//! bound value, so the live call chain stays short.
 
 import version
 import requirement
@@ -11,9 +23,26 @@ fn check_version(text: String, major: Int, minor: Int, patch: Int):
             assert(v.patch == patch, "patch of {text}")
         Err(e): assert(false, "expected {text} to parse: {e}")
 
+// Full spelling: the two suffix sections as well as the core, plus the
+// round trip (rendering must give back the exact spelling).
+fn check_full(text: String, major: Int, minor: Int, patch: Int, pre: String, build: String):
+    match parse_version(text):
+        Ok(v):
+            assert(v.major == major, "major of {text}"); assert(v.minor == minor, "minor of {text}")
+            assert(v.patch == patch, "patch of {text}"); assert(v.pre == pre, "pre of {text}")
+            assert(v.build == build, "build of {text}"); let rendered = version_to_string(v)
+            assert(rendered == text, "round-trip of {text} gave {rendered}")
+        Err(e): assert(false, "expected {text} to parse: {e}")
+
+fn check_round_trip(text: String):
+    let v = parse_version(text)?; let rendered = version_to_string(v)
+    assert(rendered == text, "round-trip of {text} gave {rendered}")
+
 fn check_version_err(text: String):
     match parse_version(text):
-        Ok(v): assert(false, "expected `{text}` to be rejected, got {v.major}.{v.minor}.{v.patch}")
+        Ok(v):
+            let rendered = version_to_string(v)
+            assert(false, "expected `{text}` to be rejected, got {rendered}")
         Err(_): assert(true, "err as expected")
 
 fn check_satisfied(req: String, ver: String, want: Bool):
@@ -26,69 +55,244 @@ fn check_req_err(req: String):
         Ok(_): assert(false, "expected `{req}` to be rejected")
         Err(_): assert(true, "err as expected")
 
+// Precedence order (`version_cmp`), with antisymmetry checked on every
+// pair so a one-sided comparison cannot pass.
+fn check_cmp_v(va: Version, vb: Version, want: Int, what: String):
+    assert(version_cmp(va, vb) == want, "cmp {what} should be {want}"); let flipped = 0 - want
+    assert(version_cmp(vb, va) == flipped, "cmp {what} must be antisymmetric")
+
 fn check_cmp(a: String, b: String, want: Int):
+    let va = parse_version(a)?; let vb = parse_version(b)?; check_cmp_v(va, vb, want, "({a}, {b})")
+
+// Core order (`core_cmp`): the relation P-003's `req_satisfied` uses.
+fn check_core_cmp(a: String, b: String, want: Int):
     let va = parse_version(a)?; let vb = parse_version(b)?
-    assert(version_cmp(va, vb) == want, "cmp({a}, {b}) should be {want}")
-    assert(version_cmp(vb, va) == 0 - want, "cmp must be antisymmetric")
+    assert(core_cmp(va, vb) == want, "core_cmp({a}, {b}) should be {want}"); let flipped = 0 - want
+    assert(core_cmp(vb, va) == flipped, "core_cmp must be antisymmetric")
+
+// One link of the canonical spec chain, on pre-bound versions: `va`
+// precedes `vb` in precedence and every derived relation agrees.
+fn check_precedes_v(va: Version, vb: Version, what: String):
+    check_cmp_v(va, vb, 0 - 1, what); assert(version_lt(va, vb), "lt {what}")
+    assert(version_lte(va, vb), "lte {what}")
+    assert(version_gt(vb, va), "gt is the mirror of {what}")
+    assert(version_gte(vb, va), "gte is the mirror of {what}")
+
+fn check_precedes(a: String, b: String):
+    let va = parse_version(a)?; let vb = parse_version(b)?; check_precedes_v(va, vb, "({a}, {b})")
 
 fn check_upper_bound(req: String, want: String):
-    let r = parse_requirement(req)?
-    assert(version_to_string(caret_upper_bound(r.base)) == want, "caret upper bound of {req}")
+    let r = parse_requirement(req)?; let bound = caret_upper_bound(r.base)
+    let rendered = version_to_string(bound)
+    assert(rendered == want, "caret upper bound of {req} was {rendered}")
 
-main():
-    // ── strict parsing ──
-    check_version("0.0.0", 0, 0, 0)
-    check_version("1.2.3", 1, 2, 3); check_version("10.20.30", 10, 20, 30)
-    check_version("2147483647.0.1", 2147483647, 0, 1); check_version_err(""); check_version_err("1")
-    check_version_err("1.2"); check_version_err("1.2.3.4"); check_version_err("1.2.x")
-    check_version_err("v1.2.3"); check_version_err("1..3"); check_version_err("01.0.0")
-    check_version_err("1.02.3"); check_version_err("1.2.03"); check_version_err("1.2.-3")
-    check_version_err(" 1.2.3"); check_version_err("1.2.3 ")
-    // Pre-release and build metadata are out of scope for v0.1.0, and
-    // are rejected rather than silently truncated.
-    check_version_err("1.2.3-alpha")
-    check_version_err("1.2.3+build"); check_version_err("1.2.3-rc.1")
-    // Round-trip: parse then render must give back the exact spelling.
-    assert(version_to_string(parse_version("7.8.9")?) == "7.8.9", "round-trip")
-    println("parse: ok")
-    // ── ordering ──
-    check_cmp("1.0.0", "1.0.0", 0)
-    check_cmp("1.0.0", "1.0.1", 0 - 1); check_cmp("1.0.1", "1.0.0", 1)
-    check_cmp("1.0.0", "1.1.0", 0 - 1); check_cmp("2.0.0", "1.99.99", 1)
-    check_cmp("0.9.9", "1.0.0", 0 - 1)
-    assert(version_eq(parse_version("1.2.3")?, parse_version("1.2.3")?), "eq")
-    assert(version_lt(parse_version("1.2.3")?, parse_version("1.2.4")?), "lt")
-    assert(version_gte(parse_version("1.2.3")?, parse_version("1.2.3")?), "gte")
-    assert(version_lte(parse_version("1.2.2")?, parse_version("1.2.3")?), "lte")
-    println("order: ok")
-    // ── caret semantics (P-003 3) ──
-    check_satisfied("1.2.3", "1.2.3", true)
-    check_satisfied("1.2.3", "1.9.0", true); check_satisfied("1.2.3", "1.2.2", false)
-    check_satisfied("1.2.3", "2.0.0", false); check_satisfied("1.2.3", "0.9.9", false)
-    check_satisfied("0.2.3", "0.2.3", true); check_satisfied("0.2.3", "0.2.9", true)
-    check_satisfied("0.2.3", "0.3.0", false); check_satisfied("0.0.3", "0.0.3", true)
-    check_satisfied("0.0.3", "0.0.4", false); check_upper_bound("1.2.3", "2.0.0")
-    check_upper_bound("0.2.3", "0.3.0"); check_upper_bound("0.0.3", "0.0.4"); println("caret: ok")
-    // ── exact pins ──
-    check_satisfied("=1.2.3", "1.2.3", true)
-    check_satisfied("=1.2.3", "1.2.4", false); check_satisfied("=1.2.3", "1.2.2", false)
-    check_satisfied("=0.0.1", "0.0.1", true); check_satisfied("=0.0.1", "0.0.2", false)
-    println("exact: ok")
-    // ── requirement spelling ──
-    check_req_err("")
-    check_req_err(">=1.0.0"); check_req_err(">1.0.0"); check_req_err("<2.0.0")
+fn test_core_parse():
+    check_version("0.0.0", 0, 0, 0); check_version("1.2.3", 1, 2, 3)
+    check_version("10.20.30", 10, 20, 30); check_version("2147483647.0.1", 2147483647, 0, 1)
+    check_version_err(""); check_version_err("1"); check_version_err("1.2")
+    check_version_err("1.2.3.4"); check_version_err("1.2.x"); check_version_err("v1.2.3")
+    check_version_err("1..3"); check_version_err("01.0.0"); check_version_err("1.02.3")
+    check_version_err("1.2.03"); check_version_err("1.2.-3"); check_version_err(" 1.2.3")
+    check_version_err("1.2.3 ")
+    // A `.` inside a suffix is an identifier separator, not a fourth
+    // core field; a `-` inside build metadata is not the sigil.
+    check_full("1.2.3-alpha.1", 1, 2, 3, "alpha.1", "")
+    check_full("1.2.3+build-1", 1, 2, 3, "", "build-1")
+    check_full("1.2.3-rc.1+build.5", 1, 2, 3, "rc.1", "build.5"); check_round_trip("7.8.9")
+    check_round_trip("1.2.3-rc.1+build.5"); println("parse: ok")
+
+// v0.2.0 accepts the suffixes the v0.1.0 parser rejected. This is the
+// deliberate one-step-ahead-of-P-003 decision: the manifest grammar
+// still refuses these, and `requirement.nv` refuses them too, so no
+// meaning a manifest can declare changes.
+fn test_suffixes():
+    check_full("1.2.3-alpha", 1, 2, 3, "alpha", ""); check_full("1.2.3+build", 1, 2, 3, "", "build")
+    check_full("1.0.0-0", 1, 0, 0, "0", ""); check_full("1.0.0-0A", 1, 0, 0, "0A", "")
+    check_full("1.0.0-alpha0.valid", 1, 0, 0, "alpha0.valid", "")
+    check_full("1.0.0-alpha.0.valid", 1, 0, 0, "alpha.0.valid", "")
+    let long_build = "0.build.1-rc.10000aaa-very-long"
+    check_full("1.0.0+0.build.1-rc.10000aaa-very-long", 1, 0, 0, "", long_build)
+    // A numeric build identifier MAY carry a leading zero (the spec
+    // says so); a numeric pre-release identifier may not.
+    check_full("1.0.0+001", 1, 0, 0, "", "001")
+    check_version_err("1.0.0-001")
+    // An absent section is the empty string, not a sentinel.
+    check_full("7.8.9", 7, 8, 9, "", "")
+    println("suffixes: ok")
+
+fn test_suffix_errors():
+    check_version_err("1.2.3-"); check_version_err("1.2.3+"); check_version_err("1.2.3-+build")
+    check_version_err("1.2.3-.alpha"); check_version_err("1.2.3-alpha.")
+    check_version_err("1.2.3-alpha..1"); check_version_err("1.2.3-01")
+    check_version_err("1.2.3-alpha.01"); check_version_err("1.0.0-0.01")
+    check_version_err("1.2.3-alpha!"); check_version_err("1.2.3-al pha")
+    check_version_err("1.2.3+bu ild"); check_version_err("1.2.3+a+b")
+    check_version_err("1.2.3+build."); check_version_err("1.2.3+build..1")
+    check_version_err("1.2.3-rc.1+build+2")
+    // The grammar is ASCII, so a multi-byte char is a named error and
+    // never a walk off the end of the string (byte length != character
+    // count). Both positions matter: a multi-byte char BEFORE a later
+    // field is the case that would run off.
+    check_version_err("1.2.3-é")
+    check_version_err("1.é.3"); check_version_err("é"); println("suffix errors: ok")
+
+fn test_order():
+    check_cmp("1.0.0", "1.0.0", 0); check_cmp("1.0.0", "1.0.1", 0 - 1)
+    check_cmp("1.0.1", "1.0.0", 1); check_cmp("1.0.0", "1.1.0", 0 - 1)
+    check_cmp("2.0.0", "1.99.99", 1); check_cmp("0.9.9", "1.0.0", 0 - 1)
+    let a = parse_version("1.2.3")?; let b = parse_version("1.2.4")?
+    let c = parse_version("1.2.2")?; assert(version_eq(a, a), "eq"); assert(version_lt(a, b), "lt")
+    assert(version_gte(a, a), "gte"); assert(version_lte(c, b), "lte"); println("order: ok")
+
+// Rule 1: the numeric core decides before anything about suffixes.
+fn test_rule_1():
+    check_cmp("1.0.0-alpha", "1.0.0-beta", 0 - 1); check_cmp("1.0.0", "1.0.1-alpha", 0 - 1)
+    check_cmp("1.0.0-alpha", "1.0.1", 0 - 1); check_cmp("1.0.1-alpha", "1.0.0", 1)
+    check_cmp("2.0.0", "1.9.9-rc.1", 1); println("rule 1 (core first): ok")
+
+// Rule 2: a version WITH a pre-release has lower precedence than the
+// same version without.
+fn test_rule_2():
+    check_precedes("1.0.0-alpha", "1.0.0"); check_precedes("1.0.0-rc.1", "1.0.0")
+    check_precedes("0.0.4", "1.0.0"); check_cmp("1.0.0-alpha", "1.0.1", 0 - 1)
+    println("rule 2 (pre-release is lower): ok")
+
+fn test_rule_3_chain():
+    // The canonical chain from the SemVer specification, in order.
+    check_precedes("1.0.0-alpha", "1.0.0-alpha.1")
+    check_precedes("1.0.0-alpha.1", "1.0.0-alpha.beta")
+    check_precedes("1.0.0-alpha.beta", "1.0.0-beta"); check_precedes("1.0.0-beta", "1.0.0-beta.2")
+    check_precedes("1.0.0-beta.2", "1.0.0-beta.11"); check_precedes("1.0.0-beta.11", "1.0.0-rc.1")
+    check_precedes("1.0.0-rc.1", "1.0.0"); check_cmp("1.0.0-alpha.1", "1.0.0-alpha.1", 0)
+    println("rule 3a (the spec chain): ok")
+
+fn test_rule_3_numeric():
+    // Numeric identifiers compare NUMERICALLY, not as text, so 2
+    // precedes 11 where a text compare would put "11" first.
+    check_precedes("1.0.0-2", "1.0.0-11")
+    check_precedes("1.0.0-1", "1.0.0-2"); check_precedes("1.0.0-2", "1.0.0-10")
+    check_precedes("1.0.0-9", "1.0.0-10"); check_precedes("1.0.0-1", "1.0.0-alpha")
+    check_precedes("1.0.0-9", "1.0.0-A"); println("rule 3b (numeric fields): ok")
+
+fn test_rule_3_alphanumeric():
+    // Alphanumeric identifiers compare in ASCII order.
+    check_precedes("1.0.0-A", "1.0.0-a")
+    check_precedes("1.0.0-alpha", "1.0.0-beta")
+    // A hyphen-only identifier is legal but NOT numeric, so it
+    // outranks every digit despite sorting lowest in ASCII order.
+    check_precedes("1.0.0-0", "1.0.0--")
+    check_precedes("1.0.0--", "1.0.0-A"); check_cmp("1.0.0-a-b", "1.0.0-a-b", 0)
+    println("rule 3c (alphanumeric fields): ok")
+
+fn test_rule_3_field_count():
+    // A larger set of fields has HIGHER precedence when all the
+    // preceding ones are equal.
+    check_precedes("1.0.0-alpha", "1.0.0-alpha.1")
+    check_precedes("1.0.0-rc.1", "1.0.0-rc.1.2"); check_precedes("1.0.0-rc.1.2", "1.0.0-rc.1.2.3")
+    check_precedes("1.0.0-rc.1.2.3", "1.0.0-rc.1.2.3.4")
+    // The first difference decides; later fields never get a say.
+    check_cmp("1.0.0-alpha.99", "1.0.0-beta.1", 0 - 1)
+    check_cmp("1.0.0-1.9", "1.0.0-2.0", 0 - 1); println("rule 3d (field count): ok")
+
+// Rule 4: build metadata is IGNORED in precedence, entirely.
+fn test_rule_4():
+    check_cmp("1.0.0+build", "1.0.0", 0); check_cmp("1.0.0+a", "1.0.0+b", 0)
+    check_cmp("1.0.0+build", "1.0.0+build.2", 0); check_cmp("1.0.0-rc.1+build", "1.0.0-rc.1", 0)
+    check_cmp("1.0.0+build", "1.0.1", 0 - 1); check_cmp("1.0.0+build", "1.0.0-rc.1", 1)
+    // Ignored does not mean identical: precedence equality is strictly
+    // coarser than "the same version", and `build_eq` draws the line.
+    let ba = parse_version("1.0.0+a")?
+    let bb = parse_version("1.0.0+b")?; let plain = parse_version("1.0.0")?
+    assert(version_eq(ba, bb), "build ignored in precedence")
+    assert(build_eq(ba, ba), "build_eq same"); assert(build_eq(plain, plain), "build_eq both empty")
+    assert(!build_eq(ba, bb), "build differs")
+    assert(!build_eq(ba, plain), "build present vs absent"); println("rule 4 (build ignored): ok")
+
+// The two orders disagree exactly where version.nv documents that they
+// do: on every input the manifest cannot spell.
+fn test_two_orders():
+    check_core_cmp("1.2.3-rc.1", "1.2.3", 0); check_core_cmp("1.2.3+build", "1.2.3", 0)
+    check_core_cmp("1.2.3-rc.1", "1.2.3-rc.9", 0); check_core_cmp("1.2.3-rc.1", "1.2.4-rc.1", 0 - 1)
+    check_core_cmp("2.0.0-rc.1", "1.9.9", 1); let pre = parse_version("1.2.3-rc.1")?
+    let plain = parse_version("1.2.3")?; let other = parse_version("1.2.3-rc.9")?
+    let bumped = parse_version("1.2.4-rc.1")?
+    assert(core_eq(pre, plain), "core_eq ignores suffixes")
+    assert(core_lt(pre, bumped), "core_lt ignores suffixes")
+    assert(!core_lt(pre, other), "same core is not below itself")
+    assert(core_gte(pre, other), "core_gte ignores suffixes")
+    check_cmp("1.2.3-rc.1", "1.2.3", 0 - 1); check_cmp("1.2.3-rc.1", "1.2.3-rc.9", 0 - 1)
+    // No cap on how many dotted fields a pre-release may have: nothing
+    // is materialised into a list to hold them, so the comparison walks
+    // one pair at a time and stops when one side runs out.
+    let many_a = "1.0.0-a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t"
+    let many_b = "1.0.0-a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u"; check_precedes(many_a, many_b)
+    check_precedes("1.0.0-a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u", "1.0.0-beta")
+    println("orders: ok")
+
+fn test_caret():
+    check_satisfied("1.2.3", "1.2.3", true); check_satisfied("1.2.3", "1.9.0", true)
+    check_satisfied("1.2.3", "1.2.2", false); check_satisfied("1.2.3", "2.0.0", false)
+    check_satisfied("1.2.3", "0.9.9", false); check_satisfied("0.2.3", "0.2.3", true)
+    check_satisfied("0.2.3", "0.2.9", true); check_satisfied("0.2.3", "0.3.0", false)
+    check_satisfied("0.0.3", "0.0.3", true); check_satisfied("0.0.3", "0.0.4", false)
+    check_upper_bound("1.2.3", "2.0.0"); check_upper_bound("0.2.3", "0.3.0")
+    check_upper_bound("0.0.3", "0.0.4"); println("caret: ok")
+
+fn test_exact():
+    check_satisfied("=1.2.3", "1.2.3", true); check_satisfied("=1.2.3", "1.2.4", false)
+    check_satisfied("=1.2.3", "1.2.2", false); check_satisfied("=0.0.1", "0.0.1", true)
+    check_satisfied("=0.0.1", "0.0.2", false); println("exact: ok")
+
+fn test_requirement_spelling():
+    check_req_err(""); check_req_err(">=1.0.0"); check_req_err(">1.0.0"); check_req_err("<2.0.0")
     check_req_err("^1.0.0"); check_req_err("~1.0.0"); check_req_err(">=1.0.0, <2.0.0")
     check_req_err("1.2.3 2.0.0"); check_req_err("=1.2"); check_req_err("=x.y.z")
-    check_req_err("=1.2.3.4")
-    assert(requirement_to_string(parse_requirement("1.2.3")?) == "1.2.3", "caret renders bare")
-    assert(requirement_to_string(parse_requirement("=1.2.3")?) == "=1.2.3", "exact renders with =")
+    check_req_err("=1.2.3.4"); let bare = parse_requirement("1.2.3")?
+    let pinned = parse_requirement("=1.2.3")?
+    assert(requirement_to_string(bare) == "1.2.3", "caret renders bare")
+    assert(requirement_to_string(pinned) == "=1.2.3", "exact renders with =")
     println("spelling: ok")
-    // ── the toolchain and the library agree ──
-    // The same requirements a manifest may declare, checked here through
-    // the library. A drift between this table and the `nestpkg` crate's
-    // caret rules would silently change what a dependency means.
-    check_satisfied("0.1.0", "0.1.0", true)
-    check_satisfied("0.1.0", "0.1.1", true); check_satisfied("0.1.0", "0.2.0", false)
-    check_satisfied("1.0.0", "1.0.0", true); check_satisfied("1.0.0", "1.5.2", true)
-    check_satisfied("1.0.0", "2.0.0", false); println("toolchain parity: ok")
+
+// Requirements stay on the numeric core even though `version.nv` parses
+// the suffixes: a manifest cannot declare one, so a requirement that
+// accepted one would mean something its own manifest cannot say.
+// Pinned here so the refusal is a test and not just a promise in a doc
+// comment.
+fn test_req_suffix_refusal():
+    check_req_err("1.2.3-rc.1"); check_req_err("=1.2.3-rc.1"); check_req_err("1.2.3+build")
+    check_req_err("=1.2.3+build"); check_req_err("1.2.3-0")
+    // The non-ASCII guard holds on the `=` path too, not just the bare
+    // one: a multi-byte char anywhere in the string is a named error.
+    check_req_err("=é.2.3")
+    check_req_err("é=1.2.3")
+    // ... and the matching itself stays core-equal, exactly as the
+    // crate's `req_satisfied` is: `=1.2.3` accepts `1.2.3-rc.1`.
+    // Unreachable from a manifest, stated so the gap stays visible.
+    let pin = parse_requirement("=1.2.3")?
+    let caret = parse_requirement("1.2.3")?; let rel = parse_version("1.2.3-rc.1")?
+    let bump = parse_version("1.2.4-rc.1")?; let beyond = parse_version("2.0.0-rc.1")?
+    let within = parse_version("1.9.0+build")?
+    assert(req_satisfied(pin, rel), "`=1.2.3` is core-equal to 1.2.3-rc.1")
+    assert(req_satisfied(caret, rel), "`1.2.3` is core-equal to 1.2.3-rc.1")
+    assert(req_satisfied(caret, bump), "core 1.2.4 is inside ^1.2.3")
+    assert(req_satisfied(caret, within), "`1.2.3` is core-equal to 1.9.0+build")
+    assert(!req_satisfied(caret, beyond), "core 2.0.0 is outside ^1.2.3")
+    println("suffix refusal: ok")
+
+// Every requirement a P-003 v1 manifest may declare, checked here
+// through the library. A drift between this table and the `nestpkg`
+// crate's caret rules would silently change what a dependency means.
+// This block IS the whole parity claim; the suffix rows above are the
+// documented one-directional gap, not a disagreement.
+fn test_toolchain_parity():
+    check_satisfied("0.1.0", "0.1.0", true); check_satisfied("0.1.0", "0.1.1", true)
+    check_satisfied("0.1.0", "0.2.0", false); check_satisfied("1.0.0", "1.0.0", true)
+    check_satisfied("1.0.0", "1.5.2", true); check_satisfied("1.0.0", "2.0.0", false)
+    println("toolchain parity: ok")
+
+main():
+    test_core_parse(); test_suffixes(); test_suffix_errors(); test_order(); test_rule_1()
+    test_rule_2(); test_rule_3_chain(); test_rule_3_numeric(); test_rule_3_alphanumeric()
+    test_rule_3_field_count(); test_rule_4(); test_two_orders(); test_caret(); test_exact()
+    test_requirement_spelling(); test_req_suffix_refusal(); test_toolchain_parity()
     println("semver tests passed")

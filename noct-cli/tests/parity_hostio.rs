@@ -181,6 +181,27 @@ fn parity_fs_exists_both() {
 }
 
 #[test]
+fn parity_fs_list_dir_names() {
+    let dir = scratch_dir("fs_list_dir");
+    std::fs::write(dir.join("zeta.txt"), b"z").expect("seed file");
+    std::fs::write(dir.join("alpha.txt"), b"a").expect("seed file");
+    std::fs::create_dir_all(dir.join("beta-dir")).expect("seed directory");
+    let lit = dir.to_string_lossy().replace('\\', "\\\\");
+    // The VM rejects the nested helper-call pattern for this aggregate
+    // shape (`malformed CFG: phi ... has no incoming entry`), so parity is
+    // intentionally limited to the shared count/error contract. Field
+    // extraction is pinned interpreter-side in `interp_fs_list_dir_*` and
+    // VM-side for the instruction shape in `vm_hostio_tests`.
+    let source = format!(
+        "fn main():\n    match fs_list_dir_builtin(\"{lit}\"):\n        Ok(entries):\n            if entries.length != 3:\n                print(\"wrong-count\")\n            else:\n                print(\"directory-ok\")\n        Err(_):\n            print(\"listing-failed\")\n"
+    );
+    let (run, _) = check_parity("fs_list_dir", &source);
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(stdout(&run), "directory-ok");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn parity_fs_modified_millis() {
     let dir = scratch_dir("fs_mtime");
     let file = dir.join("mtime.txt");

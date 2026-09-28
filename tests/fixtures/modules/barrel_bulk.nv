@@ -1,0 +1,4 @@
+import support::barrel
+
+main():
+    println(text("hi"))

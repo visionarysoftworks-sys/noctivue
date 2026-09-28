@@ -1,4 +1,4 @@
 package:
     name: terminal
-    version: 0.1.0
-    description: ANSI colors, text attributes, tables, spinners, and progress bars as pure composable values.
+    version: 0.2.0
+    description: ANSI colors (truecolor and 256-palette), text attributes, OSC 8 hyperlinks, terminal-cell width measurement, tables, spinners, and progress bars as pure composable values.

@@ -4,14 +4,22 @@
 access (`alias.item`, `alias::Type`) implemented via an export-gated
 linker rewrite; package-manifest format Decided (ADR-017,
 `nestpkg.nvpm`) with file-backed registry resolution (see
-TOOLCHAIN.md).
+TOOLCHAIN.md). Re-exports (`export import ...`) **Decided** (implemented
+in parser, linker, formatter, and LSP). Directory-module nesting rules
+**Decided** (implicit-by-directory). Both diagnostic gaps in §4.1
+**Fixed** (unaliased qualifier stripping; qualified private access
+hint). Linter rules L-004 (whole-module import style) and L-005
+(ad-hoc error types) added as default-off style rules.
 
 ## 1. Compilation Units
 
 Each `.nv` file is a module. A directory of `.nv` files forms a module
 tree mirroring the directory structure, in the tradition of Rust/Go —
 exact nesting/`mod`-declaration rules (implicit-by-directory vs.
-explicit re-export files) are **Proposed**, not finalized.
+explicit re-export files) are **Decided**: implicit-by-directory is the
+chosen rule; explicit `mod` declarations are not supported. The directory
+name serves as the module name; a file `a/b/c.nv` is module `a::b::c`.
+This is implemented and tested.
 
 ## 2. Import
 
@@ -77,8 +85,10 @@ WORKS   alias::Type                         type position: params, returns,
                                              let/var annotations
 WORKS   alias::Type { field: v }            struct-literal name
 WORKS   import m::Type  ->  Type            item import, then the bare name
+WORKS   pkg::Type                           full module-path prefix is registered
+                                             too, so `import semver::version` also
+                                             qualifies as `semver::Type`
 
-NEEDS   pkg::Type                           parses; qualifier NOT stripped (see below)
 NEVER   alias.Type  (a DOT, not `::`)       E0100 — a dot is member access, not a
                                              type path; use `alias::Type`
 ```
@@ -92,21 +102,38 @@ free: a function may call one defined later in the same file, in a root
 file or in a dependency, exported or private. Resolution is not a
 single forward pass over source order.
 
-The `pkg::Type` asymmetry is a *diagnostics* problem, not a rewrite
-bug: the rewriter strips only *registered alias* prefixes, so
-`import semver::version` registers `version` and never `semver`. A
-qualifier that was never imported is therefore silently left in place
-and the reader gets a type mismatch (`expected pkg::Type, found Type`)
-that points at the type instead of at the missing import. Import the
-type as an item (`import pkg::m::Type`) and write it flat, or import
-the module with an alias and use `alias::Type`.
+## 4.2 Re-exports: `export import`, `export *`
 
-**Known diagnostic gap.** Qualified access to a *private* item of a
-dependency (`p.private_one()` where `private_one` lacks `export`) is
-refused because the rewriter only rewrites exported members — but the
-resulting error blames the ALIAS (`E0201 unknown identifier p`) rather
-than naming the private item and the `export` fix. A flat use of the
-same name gets the `W0101` hint; the qualified form does not yet.
+```text
+export import foo      re-export another module's exported items
+export *               forward this file's exported items
+export * except a, b   ...with names listed for exclusion
+```
+
+`export *` is accepted and validated but **contributes nothing**, and
+that is deliberate rather than a stub. Linking here is flat: a root
+file already contributes *all* of its items, and a dependency already
+contributes exactly its `export`ed items, so every name `export *`
+asks to forward is already in the linked program. Re-injecting it would
+push a *second* definition of each re-exported name.
+
+The limitation that hides is worth stating: **a barrel cannot use this
+form to withhold a name.** A root keeps its private items and a
+dependency's non-exports are never contributed at all, so
+`export * except x` has nothing left to remove — the exclusion list is
+checked, not honoured. Giving it real meaning needs a namespaced
+barrel model, which is an architecture decision, not a linker tweak.
+
+So that the form cannot rot into a comment that lies, a name in an
+`except` list that is not an export of the file writing it is a loud
+`E0110` — not a silently dead line. Use `export import` when you want
+to control exactly what a barrel exposes.
+
+**Qualified private access** (`p.private_one()` where `private_one`
+lacks `export`) is refused, because the rewriter only rewrites exported
+members. It emits `W0101` naming the private item and the one-word fix
+(`add export to use it as p.private_one`), matching the flat-use hint
+rather than blaming the alias with a bare `E0201`.
 
 The expression rewrite is export-gated (`document.path` is untouched
 when `path` is a local field rather than an export), and rewriting is
@@ -126,8 +153,15 @@ stay single-file; `lint` L-002 and LSP diagnostics are
 graph-aware (flattened uses count, E0201s for linked exports are
 suppressed), so the editor agrees with `noct run`.
 
-## 5. Re-exports — Proposed
+## 5. Re-exports — Decided
 
-Whether Noctivue needs an explicit re-export form (`export import ...`)
-distinct from a plain `import` + `export` pair is Proposed, not decided;
-tracked alongside the package-manifest format work.
+Re-exports use the explicit form `export import path [as alias]`. This
+is distinct from a plain `import` + `export` pair and is now
+**implemented** (ADR-027). The re-export expands to all exported items
+of the target module, making them available as if they were defined
+in the current module. This enables library authors to create
+convenience preludes (e.g., `export import resilience::prelude`) so
+consumers see one import instead of many, without weakening
+per-declaration `export` as the visibility default. Whole-file export
+is NOT the default — explicit per-declaration export remains the
+visibility rule.

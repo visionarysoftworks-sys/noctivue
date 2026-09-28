@@ -4,6 +4,24 @@
 //! throughout the HIR and type-checker.  Monomorphised generics remain as
 //! `Named` until a later lowering pass (out of scope for M0).
 
+/// Execution mode for HIR functions and values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mode {
+    /// Native mode: ownership + borrowing, stack allocation, move semantics
+    Native,
+    /// Managed mode: ARC reference counting, heap allocation, cycle mitigation
+    Managed,
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mode::Native => write!(f, "native"),
+            Mode::Managed => write!(f, "managed"),
+        }
+    }
+}
+
 /// A resolved type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {

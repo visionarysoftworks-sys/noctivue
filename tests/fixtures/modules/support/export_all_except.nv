@@ -1,0 +1,8 @@
+// @skip-test (module-graph fixture: covered by compiler::modules::tests)
+export * except BarrelStruct
+
+export fn kept_fn() -> String:
+    "kept"
+
+export struct BarrelStruct:
+    x: Int
