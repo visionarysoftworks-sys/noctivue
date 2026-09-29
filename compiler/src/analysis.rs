@@ -15,7 +15,6 @@ use crate::resolver::resolve;
 use crate::typeck::typecheck;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 /// Result of analyzing a single source file.
 #[derive(Debug, Clone)]
@@ -233,7 +232,15 @@ pub fn span_to_range(source: &str, span: &Span) -> lsp_types::Range {
 }
 
 /// Convert a compiler [`Diagnostic`] to an LSP [`Diagnostic`].
-pub fn diagnostic_to_lsp(source: &str, diag: &Diagnostic) -> lsp_types::Diagnostic {
+/// Convert a compiler [`Diagnostic`] to an LSP [`Diagnostic`] for `uri`.
+///
+/// Secondary labels become `relatedInformation` pointing at the same
+/// document (compiler labels are same-file — never `file://dummy`).
+pub fn diagnostic_to_lsp(
+    source: &str,
+    uri: &lsp_types::Uri,
+    diag: &Diagnostic,
+) -> lsp_types::Diagnostic {
     let severity = match diag.severity {
         Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
         Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
@@ -262,7 +269,7 @@ pub fn diagnostic_to_lsp(source: &str, diag: &Diagnostic) -> lsp_types::Diagnost
                 .map(|label| {
                     lsp_types::DiagnosticRelatedInformation {
                         location: lsp_types::Location {
-                            uri: lsp_types::Uri::from_str("file://dummy").unwrap(), // Will be overridden by client
+                            uri: uri.clone(),
                             range: span_to_range(source, &label.span),
                         },
                         message: label.message.clone(),
@@ -288,8 +295,12 @@ pub fn diagnostic_to_lsp(source: &str, diag: &Diagnostic) -> lsp_types::Diagnost
 }
 
 /// Internal: convert byte offset to (line, character) position.
-/// Both line and character are 0-based.
+/// Both line and character are 0-based. Character counts LSP UTF-16 code
+/// units (spec §3.17), not bytes or scalar values: `é`/CJK are 1 unit,
+/// emoji are 2. Byte/char counting desyncs every hover, goto, and
+/// diagnostic on non-ASCII lines (LANGUAGE_SPEC.md §1 identifiers).
 fn byte_offset_to_position(source: &str, offset: usize) -> BytePosition {
+    let offset = offset.min(source.len());
     let mut line = 0;
     let mut line_start = 0;
     for (i, ch) in source.char_indices() {
@@ -301,10 +312,8 @@ fn byte_offset_to_position(source: &str, offset: usize) -> BytePosition {
             line_start = i + 1;
         }
     }
-    BytePosition {
-        line,
-        character: offset - line_start,
-    }
+    let character: usize = source[line_start..offset].chars().map(|c| c.len_utf16()).sum();
+    BytePosition { line, character }
 }
 
 #[derive(Debug)]
@@ -554,6 +563,14 @@ pub fn parse_resolved(source: &str) -> Program {
 /// Returns `(kind, full_span, detail)`; the caller narrows with `name_span_in`.
 pub fn find_item_span(program: &Program, name: &str) -> Option<(DefinitionKind, Span, String)> {
     for item in &program.items {
+        // `export` is visibility, not identity: an exported item IS the
+        // item for lookup purposes. Without this every cross-file lookup
+        // (goto and hover alike) went blind on exactly the items a
+        // dependency exists to provide.
+        let item = match item {
+            Item::Export(inner) => inner.as_ref(),
+            other => other,
+        };
         match item {
             Item::Struct(s) if s.name == name => {
                 return Some((
@@ -911,6 +928,102 @@ pub fn collect_impl_spans(
 /// - otherwise the first graph file (other than the current one) exporting
 ///   `ident` wins (flat `helper()` from a `path:` dep).
 /// Same-file hits are NOT reported here — single-file goto owns those.
+/// Hover for a name that lives in ANOTHER file: an import alias, a
+/// qualified module member, or a flat use of a dependency's export.
+///
+/// Single-file hover (`get_hover`) returns `None` for these by
+/// construction — the definition is not in `resolved` — so without this
+/// every imported name hovered to nothing. The card names the defining
+/// file explicitly (`Declared in widget.nv`), because "fn text(...)"
+/// without a location is indistinguishable from a local, and the whole
+/// point of hovering an import is to learn where it comes from. Doc
+/// comments are read from the TARGET file, not the current one.
+///
+/// Returns `None` when the name is local (single-file hover owns those),
+/// unresolvable, or unreadable — this is a fallback, and a fallback that
+/// guesses is worse than silence.
+pub fn hover_cross_file_at(
+    current_uri: &str,
+    program: &Program,
+    source: &str,
+    position: lsp_types::Position,
+    package_roots: &[PathBuf],
+) -> Option<lsp_types::Hover> {
+    let disk = uri_to_fs_path(current_uri)?;
+    let offset = position_to_byte_offset(source, position);
+    let ident = extract_identifier_at(source, offset)?;
+    // Local first: a shadowing local owns the name, and this function
+    // must not steal it. (Single-file hover already answered, but this
+    // is also called where it has not, so check again rather than assume
+    // the caller did.)
+    if find_local_definition_at(program, source, offset, &ident).is_some() {
+        return None;
+    }
+    let (target_path, item_name) = find_cross_file_target(&disk, program, &ident, package_roots)?;
+    let name = item_name?;
+    let target_source = std::fs::read_to_string(&target_path).ok()?;
+    let mut sink = DiagnosticSink::new();
+    let target_tokens = lex(&target_source, &mut sink);
+    let target_program = parse(&target_tokens, &mut sink);
+    let (kind, span, detail) = find_item_span(&target_program, &name)?;
+    let _ = kind;
+    let docs = doc_comment_for(&target_source, span.start);
+    // Name the defining file with its parent directory, not just the
+    // file name: dependencies conventionally expose `lib/main.nv`, so a
+    // bare "main.nv" is ambiguous exactly when it matters most — when
+    // the current file is ALSO called `main.nv`.
+    let file_label = target_path
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|d| {
+            format!(
+                "{}/{}",
+                d.to_string_lossy(),
+                target_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_else(|| target_path.display().to_string());
+    let range = identifier_range_at(source, offset, &ident);
+    Some(render_hover(
+        HoverInfo {
+            signature: detail,
+            ty: None,
+            declared_in: format!("{file_label} (imported)"),
+            docs,
+        },
+        range,
+    ))
+}
+
+/// The LSP range of the identifier under the cursor: its byte span in the
+/// CURRENT file, so the editor underlines the use, not the definition.
+fn identifier_range_at(
+    source: &str,
+    offset: usize,
+    ident: &str,
+) -> Option<lsp_types::Range> {
+    let start = source[..offset.min(source.len())]
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // `ident` was extracted at this offset, so it must start here; a
+    // mismatch means the text moved under us, and no range beats a wrong
+    // one.
+    if !source[start..].starts_with(ident) {
+        return None;
+    }
+    let end = start + ident.len();
+    let s = byte_offset_to_position(source, start);
+    let e = byte_offset_to_position(source, end);
+    Some(lsp_types::Range {
+        start: lsp_types::Position::new(s.line as u32, s.character as u32),
+        end: lsp_types::Position::new(e.line as u32, e.character as u32),
+    })
+}
+
 pub fn find_cross_file_target(
     current_path: &Path,
     program: &Program,
@@ -1883,20 +1996,35 @@ fn span_contains(span: &Span, offset: usize) -> bool {
     span.start <= offset && offset < span.end
 }
 
-/// Convert LSP Position to byte offset.
+/// Convert LSP Position (UTF-16 code units) to byte offset.
+/// Overshooting a short line clamps to the line end (never into the next
+/// line); mid-character offsets snap to the character start.
 fn position_to_byte_offset(source: &str, position: lsp_types::Position) -> usize {
+    let want_line = position.line as usize;
+    let want_col = position.character as usize;
     let mut line = 0;
-    let mut col = 0;
+    let mut line_start = 0usize;
     for (i, ch) in source.char_indices() {
-        if line == position.line as usize && col == position.character as usize {
-            return i;
-        }
         if ch == '\n' {
+            if line == want_line {
+                break;
+            }
             line += 1;
-            col = 0;
-        } else {
-            col += 1;
+            line_start = i + 1;
         }
+        if line == want_line {
+            break;
+        }
+    }
+    if line != want_line {
+        return source.len();
+    }
+    let mut col = 0usize;
+    for (i, ch) in source[line_start..].char_indices() {
+        if ch == '\n' || col >= want_col {
+            return line_start + i;
+        }
+        col += ch.len_utf16();
     }
     source.len()
 }
@@ -3261,6 +3389,57 @@ mod tests {
         assert!(!text.contains("fn greet(name"), "got: {text}");
     }
 
+    // ── noctivue-analyzer UTF-16 positions (LSP §3.17) ──
+
+    #[test]
+    fn positions_round_trip_over_mixed_unicode() {
+        // ASCII (1B/1u), é (2B/1u), 中 (3B/1u), 😀 (4B/2u).
+        let src = "aé中😀b\nxy";
+        // Every char-boundary offset must survive offset → position → offset.
+        let mut bounds = vec![0];
+        for (i, ch) in src.char_indices() {
+            bounds.push(i + ch.len_utf8());
+        }
+        for off in bounds {
+            let pos = byte_offset_to_position(src, off);
+            let back = position_to_byte_offset(
+                src,
+                lsp_types::Position::new(pos.line as u32, pos.character as u32),
+            );
+            assert_eq!(back, off, "round trip failed at byte {off}");
+        }
+        // Spot values: `é` ends byte 3 but is character 2 on line 0.
+        let e_end = byte_offset_to_position(src, 3);
+        assert_eq!((e_end.line, e_end.character), (0, 2));
+        // 😀 spans bytes 7..11 and occupies TWO units (chars 4..6).
+        let emoji_end = byte_offset_to_position(src, 11);
+        assert_eq!((emoji_end.line, emoji_end.character), (0, 6));
+        // Line 1 starts at byte 12 (`x`); byte 13 is `y` at char 1.
+        let l1 = byte_offset_to_position(src, 12);
+        assert_eq!((l1.line, l1.character), (1, 0));
+    }
+
+    #[test]
+    fn goto_unicode_ident_resolves() {
+        // LANGUAGE_SPEC.md §1 identifiers: non-ASCII must not desync.
+        let src = "main():\n    let café = 1\n    print(café)\n";
+        let def = goto_needle(src, "café", 1).expect("goto on café use");
+        assert_eq!(def.kind, DefinitionKind::Local);
+        assert_eq!(text_of(src, &def.span), "café");
+    }
+
+    #[test]
+    fn diagnostic_related_info_points_at_document_uri() {
+        let uri: lsp_types::Uri = "file:///test.nv".parse().unwrap();
+        let diag = crate::diagnostics::Diagnostic::error("two labels")
+            .with_span(Span { start: 0, end: 1 }, "first")
+            .with_span(Span { start: 2, end: 3 }, "second");
+        let lsp = diagnostic_to_lsp("ab\ncd", &uri, &diag);
+        let related = lsp.related_information.expect("related info");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].location.uri.as_str(), "file:///test.nv");
+    }
+
     #[test]
     fn name_span_in_finds_identifier_not_keyword_prefix() {
         // `mod m:` — searching `m` must not match the `m` in `mod`.
@@ -3293,10 +3472,17 @@ mod tests {
     fn goto_needle(source: &str, needle: &str, n: usize) -> Option<Definition> {
         let off = nth_offset(source, needle, n) + 1;
         let a = analyze_file("test.nv", source);
-        // offset → Position (char-based, ASCII fixtures only).
+        // offset → Position in UTF-16 units (required past ASCII).
         let prefix = &source[..off.min(source.len())];
         let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
-        let character = prefix.rsplit('\n').next().unwrap_or("").len() as u32;
+        let character: usize = prefix
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .map(|c| c.len_utf16())
+            .sum();
+        let character = character as u32;
         find_definition_at(
             &a.resolved,
             &a.typed,
@@ -3470,5 +3656,69 @@ mod tests {
             _ => panic!("markup"),
         };
         assert!(text.contains("Direction::North"), "got: {text}");
+    }
+
+    /// Hovering an imported name must name where it comes from. Two gaps
+    /// closed here at once: single-file hover returns `None` for anything
+    /// not defined in the file, and `find_item_span` — which the lookup
+    /// funnels through — did not unwrap `Item::Export`, so even a
+    /// successful cross-file resolution went blind on exactly the items a
+    /// dependency exists to provide.
+    #[test]
+    fn hover_on_an_import_names_the_defining_file() {
+        let base = std::env::temp_dir().join(format!(
+            "noct-analysis-hover-{}-{}",
+            std::process::id(),
+            NEXT_TMP_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let libs = base.join("libs");
+        let dep_lib = libs.join("dep").join("lib");
+        std::fs::create_dir_all(&dep_lib).expect("create dep lib");
+        let app = base.join("app");
+        std::fs::create_dir_all(app.join("lib")).expect("create app lib");
+
+        std::fs::write(
+            dep_lib.join("main.nv"),
+            "/// Adds one.\nexport fn helper() -> Int:\n    7\n",
+        )
+        .expect("write dep");
+        let main_path = app.join("lib").join("main.nv");
+        let source = "import dep\n\nmain():\n    let n: Int = helper()\n    print(\"{n}\")\n";
+        std::fs::write(&main_path, source).expect("write main");
+        let uri = format!(
+            "file:///{}",
+            main_path.to_string_lossy().replace('\\', "/")
+        );
+
+        let a = analyze_file_with_roots(&uri, source, &[libs.clone()]);
+        // Line 3 (0-based), inside `helper`.
+        let pos = lsp_types::Position::new(3, 22);
+        let single = get_hover(&a.resolved, &a.typed, source, pos, "main.nv");
+        assert!(
+            single.is_none(),
+            "single-file hover must not answer for an import (it would be a guess)"
+        );
+        let cross = hover_cross_file_at(&uri, &a.resolved, source, pos, &[libs])
+            .expect("cross-file hover must answer for a resolvable import");
+        let lsp_types::HoverContents::Markup(markup) = cross.contents else {
+            panic!("hover must be markdown");
+        };
+        assert!(
+            markup.value.contains("fn helper(...)"),
+            "the card must carry the signature, got: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("main.nv (imported)"),
+            "the card must name the defining file, got: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("Adds one."),
+            "the card must carry the target's doc comment, got: {}",
+            markup.value
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

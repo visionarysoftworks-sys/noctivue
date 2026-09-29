@@ -422,6 +422,38 @@ developer using only public tooling.
        fail with data rather than a smaller certified size, because a
        smaller number would certify a UI framework that cannot render a
        UI.
+     - *Corroborating inventory (code-reading, exact locations):* the
+       interpreter copies on (nearly) every operation, so the
+       superlinear curve is structural, not a hot spot:
+       `interp/src/lib.rs:1077-1078` clones the whole `Function`
+       (including its `Vec<TypedStmt>` body) on every call;
+       `:1095` clones the entire global scope per call;
+       `:1097` clones each argument twice (evaluate, then bind);
+       `:2925` (`Ident`) clones on every variable read, so reading a
+       1,000-element list copies it;
+       `:3111` (`Index`) clones the whole list then walks to `nth(i)`,
+       so a loop over children is O(n^2);
+       `:2389` (`list_append_builtin`) clones-then-pushes, so building a
+       list is O(n^2);
+       `:2573` (`arc_load_builtin`) deep-clones the heap value under the
+       lock, so every widget load copies;
+       `cycle_mitigation.nv:158-205` rebuild the mutation chain node by
+       node, and `diff_slot` passes both child lists by value per slot
+       (1,000 slots x 1,000-element copies) plus a function-body and
+       scope clone per call.
+       The identity diff (`diff_live_pair`) makes the identical-tree
+       case O(1) but still walks every child slot through this same call
+       path when one leaf changes, so it cannot reach sub-millisecond
+       either — that limitation is measured (N1), not assumed.
+       Path to sub-ms, in order (estimates, not measurements): O(1)
+       cloning via `Rc`/persistent vectors (also fixes append) and
+       `Rc<str>`/interned strings; resolve names at lowering time
+       (frame slots, not string-hashed scopes); move the diff into
+       native code over an arena (`runtime-native` already exists);
+       fold a CONTENT hash (not structural version) into each node so
+       equal hashes skip subtrees; dirty-path updates so a change costs
+       O(depth). The first three should take minutes to seconds; the
+       last three are what make sub-millisecond realistic.
 
 4. **Standard Error trait — decide, or document every distinct shape**
    - *Current state:* **Not decided.** `stdlib/error/traits.nv:5–10` explicitly reserves trait-based error handling for M4+ (requires trait/impl support, SPEC.md C4). `ERROR_HANDLING.md:62–66` confirms: "`E` in `Result<T, E>` is an ordinary Noctivue type… standard-library error trait/convention is Deferred."

@@ -105,6 +105,53 @@ fn hover_over_stdio_returns_section_ordered_card() {
     let _ = child.kill();
 }
 
+/// Diagnostics carry the document version, and later requests observe the
+/// latest change (the cached-analysis path), not a stale pipeline result.
+#[test]
+fn diagnostics_carry_versions_and_hover_sees_latest_change() {
+    let (mut child, mut conn) = spawn_server();
+    conn.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"capabilities":{}}}"#);
+    let init = conn.recv_response(1);
+    assert!(init.get("error").is_none(), "initialize failed: {init}");
+
+    fn next_diagnostics(conn: &mut Conn) -> serde_json::Value {
+        for _ in 0..20 {
+            let msg = conn.recv();
+            if msg.get("method") == Some(&serde_json::json!("textDocument/publishDiagnostics")) {
+                return msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            }
+        }
+        panic!("no publishDiagnostics received");
+    }
+
+    conn.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":URI,"languageId":"noctivue","version":1,"text":SRC}}})
+            .to_string(),
+    );
+    let diag1 = next_diagnostics(&mut conn);
+    assert_eq!(diag1.get("version"), Some(&serde_json::json!(1)), "open version: {diag1}");
+
+    // Rename `add` → `add2` everywhere (version 2); hover must follow.
+    let src2 = SRC.replace("add", "add2");
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":URI,"version":2},"contentChanges":[{"text":src2}]}})
+            .to_string(),
+    );
+    let diag2 = next_diagnostics(&mut conn);
+    assert_eq!(diag2.get("version"), Some(&serde_json::json!(2)), "change version: {diag2}");
+
+    conn.send(
+        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":URI},"position":{"line":5,"character":12}}})
+            .to_string(),
+    );
+    let hover = conn.recv_response(2);
+    let text = serde_json::to_string(hover.get("result").unwrap_or(&serde_json::Value::Null))
+        .expect("serialize result");
+    assert!(text.contains("fn add2(a: Int, b: Int) -> Int"), "stale hover: {text}");
+    let _ = child.kill();
+}
+
 const NESTPKG_SRC: &str = "package:\n    name: myapp\n    version: 0.1.0\ndependencies:\n    py_model:\n        version: 1.0.0\n        tier: foreign-runtime\n        opt_in: true\n";
 const NESTPKG_URI: &str = "file:///c%3A/tmp/nestpkg.nvpm";
 

@@ -205,6 +205,12 @@ integrations (see STYLE_GUIDE.md §6 for the file-identity/branding
 requirements editors should also honor: icon, syntax highlighting,
 language mode, etc.).
 
+Engine name: **noctivue-analyzer** (the rust-analyzer / tsserver
+equivalent: hover, go-to-definition/type/implementation, completions,
+references). The crate and binary stay `noctivue-lsp` for extension and
+script compatibility; `InitializeResult.serverInfo.name` and the
+`window/logMessage` beacon report `noctivue-analyzer`.
+
 ### 6.1 Hover standard
 
 Hover (`textDocument/hover`) **MUST** resolve the specific identifier
@@ -238,10 +244,36 @@ Declared in <location>.
   (`interp::eval_builtin`) — e.g. `print` writes *without* a trailing
   newline while `println` adds one; `to_int` returns `None` on parse
   failure; `assert` panics on `false`.
-- Lookup order is definitions, then locals, then built-ins, then
-  keywords, then reserved words, then prelude items: a user-defined item
-  always shadows a builtin of the same name. Keywords cannot be shadowed,
-  so their table position is load-independence, not precedence.
+- Lookup order is scope-aware: qualified member uses (`user.name`)
+  and struct-literal labels (`User { name: … }`) first, then the
+  innermost local/param/pattern binding (shadowing-correct), then bare
+  enum variants (`North`), then field/variant/method definitions at the
+  cursor, then top-level items, then import aliases, then built-ins,
+  then keywords, then reserved words, then prelude items. A local always
+  shadows a top-level item of the same name, and a user-defined item
+  always shadows a builtin. Keywords cannot be shadowed, so their table
+  position is load-independence, not precedence.
+- **Members.** `user.name` jumps to (and hovers) the struct's
+  `FieldDecl`, typed via the HIR object type; the cursor must sit on the
+  field part after the dot. Struct-literal labels resolve the same way;
+  values after the colon resolve as ordinary expressions. Bare enum
+  variants resolve to their `EnumVariant` (variants are in scope without
+  a prefix). Field/variant/trait-method/impl-method definitions show
+  `field Parent.name: Type` / `variant Parent::Variant` / `method`
+  cards with name-only ranges.
+- **Cross-file.** `textDocument/definition` resolves through the module
+  graph (`vendor/` + manifest `path:` roots + stdlib): import aliases
+  jump to the exporting file, and flat uses (`helper()` from a `path:`
+  dep) jump to the provider's item with its name-only range. Bare module
+  imports (`import pkg`) jump to the target file start. Open documents
+  shadow disk reads. A name the graph cannot serve stays same-file (or
+  null) rather than a wrong guess.
+- **Type & implementation.** `textDocument/typeDefinition` maps the
+  deepest HIR expression type at the cursor to its nominal declaration
+  (`Option<User>` → `User`; primitives/`Unknown` return null), same-file
+  first then cross-file. `textDocument/implementation` maps a trait
+  member/trait/impl-method cursor to every `impl Trait` method site,
+  same-file plus graph closure (empty list when no trait owns the name).
 - **Keywords (present and future).** Every keyword the language defines
   MUST have a hover entry consisting of a usage template as the
   signature plus a one-to-two-line role summary (`Declared in keyword.`).
@@ -262,8 +294,14 @@ Declared in <location>.
 - Covered by unit tests in `compiler/src/analysis.rs` (`analysis::tests`):
   call-site hover, builtin card, definition hover, local hover, `Type:`
   / `Declared in` lines, doc comments at definition and call sites,
-  keyword templates, reserved-word notes, prelude literals, and the
-  whitespace/unknown-shows-nothing cases.
+  keyword templates, reserved-word notes, prelude literals,
+  whitespace/unknown-shows-nothing, usage→definition (call sites,
+  locals, params, shadowing, imports), name-only spans, scope-aware
+  param cards, member-field and struct-label goto/hover, bare-variant
+  cards, cross-file `path:`-dep targets, HIR type-at-cursor, and
+  trait-context/impl-span collection; plus stdio protocol tests in
+  `noctivue-lsp/tests/lsp_protocol.rs` (hover card, cross-file
+  definition incl. capability advertisement, nestpkg hover/completion).
 
 ### 6.2 TextMate grammar source of truth
 

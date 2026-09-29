@@ -19,8 +19,8 @@ use lsp_types::*;
 use compiler::analysis::{
     analyze_file_with_roots, collect_impl_spans, definition_name_span, diagnostic_to_lsp,
     find_cross_file_target, find_definition_at, find_item_span, find_trait_context, find_type_at,
-    fs_path_to_uri, get_completions, get_hover, identifier_at, name_span_in, nominal_name_of,
-    parse_resolved, span_to_range, uri_to_fs_path,
+    fs_path_to_uri, get_completions, get_hover, hover_cross_file_at, identifier_at, name_span_in,
+    nominal_name_of, parse_resolved, span_to_range, uri_to_fs_path, AnalysisResult,
 };
 
 mod nestpkg;
@@ -30,11 +30,26 @@ mod nestpkg;
 ///
 /// Engine: `noctivue-analyzer`. The beacon keeps the `noctivue-lsp` binary
 /// name in parentheses so old Output-panel filters still match.
-const SERVER_VERSION: &str = "0.0.13-xfile";
+const SERVER_VERSION: &str = "0.0.14-analyzer";
+
+/// Open-document state (noctivue-analyzer).
+///
+/// `analysis` is the import-aware pipeline result computed once per
+/// change in `analyze_and_publish` and shared by hover, definition,
+/// type-definition, implementation, and completion. Handlers must read
+/// this instead of re-running lex → parse → resolve → typecheck per
+/// request (previously 3–4 full pipelines per keystroke).
+struct OpenDocument {
+    text: String,
+    version: i32,
+    /// `None` for nestpkg manifests/locks and `.nvir`/`.nvc` artifacts,
+    /// which ride different pipelines (or none).
+    analysis: Option<AnalysisResult>,
+}
 
 struct ServerState {
     connection: Connection,
-    documents: HashMap<Uri, String>,
+    documents: HashMap<Uri, OpenDocument>,
     capabilities: ServerCapabilities,
 }
 
@@ -202,8 +217,16 @@ impl ServerState {
         };
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        self.documents.insert(uri.clone(), text.clone());
-        self.analyze_and_publish(&uri, &text);
+        let version = params.text_document.version;
+        self.documents.insert(
+            uri.clone(),
+            OpenDocument {
+                text: text.clone(),
+                version,
+                analysis: None,
+            },
+        );
+        self.analyze_and_publish(&uri, version, &text);
     }
 
     fn handle_did_change(&mut self, notif: Notification) {
@@ -215,14 +238,19 @@ impl ServerState {
             }
         };
         let uri = params.text_document.uri;
-        for change in params.content_changes {
-            // Use the text field directly (it's a String for Full/FullWithRange events)
+        let version = params.text_document.version;
+        // FULL sync: the first change carries the whole document.
+        if let Some(change) = params.content_changes.into_iter().next() {
             let text = change.text;
-            self.documents.insert(uri.clone(), text);
-            if let Some(text) = self.documents.get(&uri).cloned() {
-                self.analyze_and_publish(&uri, &text);
-            }
-            break;
+            self.documents.insert(
+                uri.clone(),
+                OpenDocument {
+                    text: text.clone(),
+                    version,
+                    analysis: None,
+                },
+            );
+            self.analyze_and_publish(&uri, version, &text);
         }
     }
 
@@ -235,12 +263,16 @@ impl ServerState {
             }
         };
         self.documents.remove(&params.text_document.uri);
-        self.publish_diagnostics(&params.text_document.uri, vec![]);
+        self.publish_diagnostics(&params.text_document.uri, None, vec![]);
     }
 
-    fn analyze_and_publish(&self, uri: &Uri, text: &str) {
+    fn analyze_and_publish(&mut self, uri: &Uri, version: i32, text: &str) {
         if nestpkg::is_nestpkg_uri(uri) {
-            self.publish_diagnostics(uri, nestpkg::diagnostics_for_uri(uri, text));
+            self.publish_diagnostics(
+                uri,
+                Some(version),
+                nestpkg::diagnostics_for_uri(uri, text),
+            );
             return;
         }
         if is_artifact_uri(uri) {
@@ -248,23 +280,46 @@ impl ServerState {
             // symbols all work on dumps) but never get diagnostics:
             // they are generated, so error squiggles would be noise
             // (STYLE_GUIDE.md §6.7).
-            self.publish_diagnostics(uri, Vec::new());
+            self.publish_diagnostics(uri, Some(version), Vec::new());
             return;
         }
         let result = analyze_file_with_roots(uri.to_string(), text, &package_roots_for(uri));
         let diagnostics: Vec<Diagnostic> = result
             .diagnostics
             .iter()
-            .map(|d| diagnostic_to_lsp(&result.source, d))
+            .map(|d| diagnostic_to_lsp(&result.source, uri, d))
             .collect();
-        self.publish_diagnostics(uri, diagnostics);
+        if let Some(doc) = self.documents.get_mut(uri) {
+            doc.analysis = Some(result);
+        }
+        self.publish_diagnostics(uri, Some(version), diagnostics);
     }
 
-    fn publish_diagnostics(&self, uri: &Uri, diagnostics: Vec<Diagnostic>) {
+    /// Shared pipeline result for hover/definition/completion: the analysis
+    /// cached at the last open/change, recomputed on demand only when the
+    /// document was never analyzed (e.g. a request racing didOpen).
+    fn cached_analysis(&mut self, uri: &Uri) -> Option<AnalysisResult> {
+        if let Some(doc) = self.documents.get(uri) {
+            if let Some(analysis) = &doc.analysis {
+                return Some(analysis.clone());
+            }
+        }
+        let text = self.documents.get(uri)?.text.clone();
+        if nestpkg::is_nestpkg_uri(uri) || is_artifact_uri(uri) {
+            return None;
+        }
+        let analysis = analyze_file_with_roots(uri.to_string(), &text, &package_roots_for(uri));
+        if let Some(doc) = self.documents.get_mut(uri) {
+            doc.analysis = Some(analysis.clone());
+        }
+        Some(analysis)
+    }
+
+    fn publish_diagnostics(&self, uri: &Uri, version: Option<i32>, diagnostics: Vec<Diagnostic>) {
         let params = PublishDiagnosticsParams {
             uri: uri.clone(),
             diagnostics,
-            version: None,
+            version,
         };
         let _ = self.connection.sender.send(Message::Notification(Notification::new(
             "textDocument/publishDiagnostics".to_string(),
@@ -283,19 +338,36 @@ impl ServerState {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let result = self.documents.get(&uri).map(|text| {
-            if nestpkg::is_nestpkg_uri(&uri) {
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let result = self.text_at(&uri).and_then(|text| {
                 let is_lock = nestpkg::is_lock_uri(&uri);
-                return nestpkg::get_hover(text, position, is_lock);
-            }
-            // noctivue-analyzer: hover uses the same import-aware analysis
-            // as diagnostics so `path:` deps don't produce false
-            // unknowns at the hovered call site.
-            let analysis =
-                analyze_file_with_roots(uri.to_string(), text, &package_roots_for(&uri));
+                nestpkg::get_hover(text, position, is_lock)
+            });
+            self.connection.sender.send(Message::Response(Response::new_ok(
+                req.id,
+                serde_json::to_value(result).unwrap(),
+            )));
+            return;
+        }
+        let result = self.cached_analysis(&uri).and_then(|analysis| {
+            // noctivue-analyzer: hover reuses the import-aware analysis
+            // cached at the last open/change, so `path:` deps don't
+            // produce false unknowns at the hovered call site. Single-file
+            // first; an imported name falls through to the cross-file card,
+            // which names the defining file (a hover that cannot say where
+            // a name comes from is half an answer for an import).
             let label = uri.as_str().rsplit('/').next().unwrap_or("untitled.nv").to_string();
             get_hover(&analysis.resolved, &analysis.typed, &analysis.source, position, &label)
-        }).flatten();
+                .or_else(|| {
+                    hover_cross_file_at(
+                        uri.as_str(),
+                        &analysis.resolved,
+                        &analysis.source,
+                        position,
+                        &package_roots_for(&uri),
+                    )
+                })
+        });
 
         self.connection.sender.send(Message::Response(Response::new_ok(
             req.id,
@@ -323,13 +395,14 @@ impl ServerState {
         }
         let position = params.text_document_position_params.position;
 
-        let result = self.documents.get(&uri).cloned().and_then(|text| {
-            // noctivue-analyzer: same import-aware analysis as diagnostics;
-            // goto targets are name-only spans (see `definition_name_span`).
-            // Cross-file (imports, flat dep uses, stdlib) resolves through
-            // the module graph before falling back to same-file.
+        let result = self.cached_analysis(&uri).and_then(|analysis| {
+            // noctivue-analyzer: goto reuses the cached import-aware
+            // analysis; targets are name-only spans (see
+            // `definition_name_span`). Cross-file (imports, flat dep uses,
+            // stdlib) resolves through the module graph before falling
+            // back to same-file.
             let roots = package_roots_for(&uri);
-            let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+            let text = analysis.source.clone();
             let single = find_definition_at(
                 &analysis.resolved,
                 &analysis.typed,
@@ -387,9 +460,9 @@ impl ServerState {
             return;
         }
         let position = params.text_document_position_params.position;
-        let result = self.documents.get(&uri).cloned().and_then(|text| {
+        let result = self.cached_analysis(&uri).and_then(|analysis| {
             let roots = package_roots_for(&uri);
-            let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+            let text = analysis.source.clone();
             // Expression type first (`user.name` → field type).
             let mut nominal = find_type_at(&analysis.typed, &text, position)
                 .and_then(|ty| nominal_name_of(&ty));
@@ -443,12 +516,10 @@ impl ServerState {
         }
         let position = params.text_document_position_params.position;
         let result: Vec<Location> = self
-            .documents
-            .get(&uri)
-            .cloned()
-            .map(|text| {
+            .cached_analysis(&uri)
+            .map(|analysis| {
                 let roots = package_roots_for(&uri);
-                let analysis = analyze_file_with_roots(uri.to_string(), &text, &roots);
+                let text = analysis.source.clone();
                 let ident = identifier_at(&text, position).unwrap_or_default();
                 let Some((trait_name, method)) = find_trait_context(
                     &analysis.resolved,
@@ -548,8 +619,8 @@ impl ServerState {
     fn target_source(&self, path: &std::path::Path) -> Option<(Uri, String)> {
         let uri_str = fs_path_to_uri(path);
         let uri: Uri = uri_str.parse().ok()?;
-        if let Some(text) = self.documents.get(&uri) {
-            return Some((uri, text.clone()));
+        if let Some(doc) = self.documents.get(&uri) {
+            return Some((uri, doc.text.clone()));
         }
         let text = std::fs::read_to_string(path).ok()?;
         Some((uri, text))
@@ -566,12 +637,17 @@ impl ServerState {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let result = self.documents.get(&uri).map(|text| {
-            if nestpkg::is_nestpkg_uri(&uri) {
-                return nestpkg::get_completions(&uri, text, position);
-            }
-            let analysis =
-                analyze_file_with_roots(uri.to_string(), text, &package_roots_for(&uri));
+        if nestpkg::is_nestpkg_uri(&uri) {
+            let result = self.text_at(&uri).map(|text| {
+                nestpkg::get_completions(&uri, text, position)
+            }).unwrap_or_default();
+            self.connection.sender.send(Message::Response(Response::new_ok(
+                req.id,
+                serde_json::to_value(result).unwrap(),
+            )));
+            return;
+        }
+        let result = self.cached_analysis(&uri).map(|analysis| {
             get_completions(&analysis.resolved, &analysis.source, position)
         }).unwrap_or_default();
 
@@ -590,7 +666,7 @@ impl ServerState {
     }
 
     fn text_at(&self, uri: &Uri) -> Option<&str> {
-        self.documents.get(uri).map(String::as_str)
+        self.documents.get(uri).map(|doc| doc.text.as_str())
     }
 
     fn handle_references(&mut self, req: Request) {
@@ -645,8 +721,8 @@ impl ServerState {
         };
         let query = params.query.to_lowercase();
         let mut result = Vec::new();
-        for (uri, text) in &self.documents {
-            for symbol in document_symbols(text) {
+        for (uri, doc) in &self.documents {
+            for symbol in document_symbols(&doc.text) {
                 if symbol.name.to_lowercase().contains(&query) {
                     result.push(SymbolInformation {
                         name: symbol.name,
@@ -770,11 +846,18 @@ fn word_at(text: &str, position: Position) -> String {
     line[start..end].to_string()
 }
 
+/// Byte offset → LSP position (UTF-16 code units, not bytes/chars).
 fn position_at(text: &str, offset: usize) -> Position {
     let prefix = &text[..offset.min(text.len())];
     let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
-    let character = prefix.rsplit('\n').next().unwrap_or("").chars().count() as u32;
-    Position::new(line, character)
+    let character: usize = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .map(|c| c.len_utf16())
+        .sum();
+    Position::new(line, character as u32)
 }
 
 fn full_range(text: &str) -> Range {
