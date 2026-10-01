@@ -1531,12 +1531,29 @@ impl LoweringContext {
                 let obj_val = self.lower_expr(object, nir_block);
                 let dst = ValueId(self.next_local_index);
                 self.next_local_index += 1;
-                nir_block.add_instr(Instr::FieldGet {
-                    dst,
-                    obj: obj_val,
-                    field: field.clone(),
-                    ty: NirTy::new(expr.ty.clone(), self.mode),
-                });
+                // `.length` on a List/String/Tuple is a length query, not
+                // a struct field: typeck types it `Int` for exactly these
+                // shapes, but lowering used to emit a `FieldGet` for every
+                // member access, and the VM answers `FieldGet` on a
+                // non-Struct with `Unit`. So `entries.length` silently came
+                // back `()` instead of `3`. A struct that DECLARES a
+                // `length` field keeps the `FieldGet` path — the check is
+                // on the object's type, not the field name alone.
+                let is_len_query = field == "length"
+                    && matches!(
+                        object.ty,
+                        Ty::List(_) | Ty::String | Ty::Tuple(_)
+                    );
+                if is_len_query {
+                    nir_block.add_instr(Instr::ListLen { dst, src: obj_val });
+                } else {
+                    nir_block.add_instr(Instr::FieldGet {
+                        dst,
+                        obj: obj_val,
+                        field: field.clone(),
+                        ty: NirTy::new(expr.ty.clone(), self.mode),
+                    });
+                }
                 dst
             }
             // `expr?` — early-return None/Err, otherwise unwrap.
